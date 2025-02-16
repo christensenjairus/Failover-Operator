@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- failover_v1alpha1_failoverstate.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

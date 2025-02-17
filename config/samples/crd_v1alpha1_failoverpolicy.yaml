@@ -1,5 +1,5 @@
-apiVersion: failover.cyber-engine.com/v1alpha1
-kind: FailoverState
+apiVersion: crd.cyber-engine.com/v1alpha1
+kind: FailoverPolicy
 metadata:
   labels:
     app.kubernetes.io/name: failover-operator

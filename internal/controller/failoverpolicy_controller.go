@@ -35,46 +35,46 @@ import (
 
 	replicationv1alpha1 "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
 
-	failoverv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 )
 
 func init() {
 	replicationv1alpha1.SchemeBuilder.Register(&replicationv1alpha1.VolumeReplication{}, &replicationv1alpha1.VolumeReplicationList{})
 }
 
-// FailoverStateReconciler reconciles a FailoverState object
-type FailoverStateReconciler struct {
+// FailoverPolicyReconciler reconciles a FailoverPolicy object
+type FailoverPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=failover.cyber-engine.com,resources=failoverstates,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=failover.cyber-engine.com,resources=failoverstates/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=failover.cyber-engine.com,resources=failoverstates/finalizers,verbs=update
+// +kubebuilder:rbac:groups=crd.cyber-engine.com,resources=failoverstates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=crd.cyber-engine.com,resources=failoverstates/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=crd.cyber-engine.com,resources=failoverstates/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=virtualservices,verbs=get;list;watch;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the FailoverState object against the actual cluster state, and then
+// the FailoverPolicy object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 
-func (r *FailoverStateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// Fetch FailoverState object
-	failoverState := &failoverv1alpha1.FailoverState{}
+	// Fetch FailoverPolicy object
+	failoverState := &crdv1alpha1.FailoverPolicy{}
 	if err := r.Get(ctx, req.NamespacedName, failoverState); err != nil {
-		log.Error(err, "Failed to get FailoverState")
+		log.Error(err, "Failed to get FailoverPolicy")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log.Info("Reconciling FailoverState", "FailoverState", failoverState.Name)
+	log.Info("Reconciling FailoverPolicy", "FailoverPolicy", failoverState.Name)
 
 	// Process VolumeReplication failover
 	pendingUpdates, failoverError, failoverErrorMessage := r.processVolumeReplications(ctx, failoverState)
@@ -82,7 +82,7 @@ func (r *FailoverStateReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Process VirtualService updates
 	r.processVirtualServices(ctx, failoverState)
 
-	// Update FailoverState status
+	// Update FailoverPolicy status
 	if err := r.updateFailoverStatus(ctx, failoverState, pendingUpdates, failoverError, failoverErrorMessage); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -95,7 +95,7 @@ func (r *FailoverStateReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-func (r *FailoverStateReconciler) updateVolumeReplication(ctx context.Context, name, namespace, state string) (bool, error) {
+func (r *FailoverPolicyReconciler) updateVolumeReplication(ctx context.Context, name, namespace, state string) (bool, error) {
 	log := log.FromContext(ctx)
 	volumeReplication := &replicationv1alpha1.VolumeReplication{}
 
@@ -160,7 +160,7 @@ func (r *FailoverStateReconciler) updateVolumeReplication(ctx context.Context, n
 	return !strings.EqualFold(statusReplicationState, desiredReplicationState), nil
 }
 
-func (r *FailoverStateReconciler) checkVolumeReplicationError(ctx context.Context, name, namespace string) (string, bool) {
+func (r *FailoverPolicyReconciler) checkVolumeReplicationError(ctx context.Context, name, namespace string) (string, bool) {
 	log := log.FromContext(ctx)
 	volumeReplication := &replicationv1alpha1.VolumeReplication{}
 
@@ -183,7 +183,7 @@ func (r *FailoverStateReconciler) checkVolumeReplicationError(ctx context.Contex
 }
 
 // updateVirtualService ensures VirtualService annotation matches the desired state
-func (r *FailoverStateReconciler) updateVirtualService(ctx context.Context, name, namespace, state string) (bool, error) {
+func (r *FailoverPolicyReconciler) updateVirtualService(ctx context.Context, name, namespace, state string) (bool, error) {
 	virtualService := &unstructured.Unstructured{}
 	virtualService.SetAPIVersion("networking.istio.io/v1")
 	virtualService.SetKind("VirtualService")
@@ -222,7 +222,7 @@ func (r *FailoverStateReconciler) updateVirtualService(ctx context.Context, name
 }
 
 // processVolumeReplications manages VolumeReplication updates & error tracking
-func (r *FailoverStateReconciler) processVolumeReplications(ctx context.Context, failoverState *failoverv1alpha1.FailoverState) (int, bool, string) {
+func (r *FailoverPolicyReconciler) processVolumeReplications(ctx context.Context, failoverState *crdv1alpha1.FailoverPolicy) (int, bool, string) {
 	log := log.FromContext(ctx)
 	desiredState := failoverState.Spec.FailoverState
 
@@ -256,7 +256,7 @@ func (r *FailoverStateReconciler) processVolumeReplications(ctx context.Context,
 }
 
 // processVirtualServices updates VirtualService resources
-func (r *FailoverStateReconciler) processVirtualServices(ctx context.Context, failoverState *failoverv1alpha1.FailoverState) {
+func (r *FailoverPolicyReconciler) processVirtualServices(ctx context.Context, failoverState *crdv1alpha1.FailoverPolicy) {
 	log := log.FromContext(ctx)
 	desiredState := failoverState.Spec.FailoverState
 
@@ -274,8 +274,8 @@ func (r *FailoverStateReconciler) processVirtualServices(ctx context.Context, fa
 	}
 }
 
-// updateFailoverStatus updates the status of FailoverState
-func (r *FailoverStateReconciler) updateFailoverStatus(ctx context.Context, failoverState *failoverv1alpha1.FailoverState, pendingUpdates int, failoverError bool, failoverErrorMessage string) error {
+// updateFailoverStatus updates the status of FailoverPolicy
+func (r *FailoverPolicyReconciler) updateFailoverStatus(ctx context.Context, failoverState *crdv1alpha1.FailoverPolicy, pendingUpdates int, failoverError bool, failoverErrorMessage string) error {
 	log := log.FromContext(ctx)
 
 	if failoverError {
@@ -313,22 +313,22 @@ func (r *FailoverStateReconciler) updateFailoverStatus(ctx context.Context, fail
 	}
 
 	if err := r.Status().Update(ctx, failoverState); err != nil {
-		log.Error(err, "Failed to update FailoverState status")
+		log.Error(err, "Failed to update FailoverPolicy status")
 		return err
 	}
 
-	log.Info("Updated FailoverState status", "FailoverState", failoverState.Name)
+	log.Info("Updated FailoverPolicy status", "FailoverPolicy", failoverState.Name)
 	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *FailoverStateReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *FailoverPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := replicationv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return err
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&failoverv1alpha1.FailoverState{}).
+		For(&crdv1alpha1.FailoverPolicy{}).
 		Owns(&replicationv1alpha1.VolumeReplication{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
 		Complete(r)

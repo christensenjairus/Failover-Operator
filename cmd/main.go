@@ -144,11 +144,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.FailoverStateReconciler{
+	if err = (&controller.FailoverPolicyReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "FailoverState")
+		setupLog.Error(err, "unable to create controller", "controller", "FailoverPolicy")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

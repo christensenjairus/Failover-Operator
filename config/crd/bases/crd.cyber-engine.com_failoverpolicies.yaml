@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  name: failoverstates.failover.cyber-engine.com
+  name: failoverpolicies.crd.cyber-engine.com
 spec:
-  group: failover.cyber-engine.com
+  group: crd.cyber-engine.com
   names:
-    kind: FailoverState
-    listKind: FailoverStateList
-    plural: failoverstates
-    singular: failoverstate
+    kind: FailoverPolicy
+    listKind: FailoverPolicyList
+    plural: failoverpolicies
+    singular: failoverpolicy
   scope: Namespaced
   versions:
   - name: v1alpha1

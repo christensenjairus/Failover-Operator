@@ -16,7 +16,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - failover.cyber-engine.com
+  - crd.cyber-engine.com
   resources:
   - failoverstates
   verbs:
@@ -28,13 +28,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - failover.cyber-engine.com
+  - crd.cyber-engine.com
   resources:
   - failoverstates/finalizers
   verbs:
   - update
 - apiGroups:
-  - failover.cyber-engine.com
+  - crd.cyber-engine.com
   resources:
   - failoverstates/status
   verbs:

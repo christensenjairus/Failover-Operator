@@ -21,7 +21,7 @@ import (
 )
 
 // FailoverStateSpec defines the desired state of FailoverState
-type FailoverStateSpec struct {
+type FailoverPolicySpec struct {
 	// FailoverState determines whether this resource should be in "primary" or "secondary" mode.
 	// +kubebuilder:validation:Enum=primary;secondary
 	FailoverState string `json:"failoverState"`
@@ -36,7 +36,7 @@ type FailoverStateSpec struct {
 }
 
 // FailoverStateStatus defines the observed state of FailoverState
-type FailoverStateStatus struct {
+type FailoverPolicyStatus struct {
 	// AppliedState is the currently applied failover state ("primary" or "secondary").
 	AppliedState string `json:"appliedState,omitempty"`
 
@@ -53,23 +53,23 @@ type FailoverStateStatus struct {
 // +kubebuilder:subresource:status
 
 // FailoverState is the Schema for the failoverstates API
-type FailoverState struct {
+type FailoverPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   FailoverStateSpec   `json:"spec,omitempty"`
-	Status FailoverStateStatus `json:"status,omitempty"`
+	Spec   FailoverPolicySpec   `json:"spec,omitempty"`
+	Status FailoverPolicyStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// FailoverStateList contains a list of FailoverState
-type FailoverStateList struct {
+// FailoverPolicyList contains a list of FailoverState
+type FailoverPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []FailoverState `json:"items"`
+	Items           []FailoverPolicy `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&FailoverState{}, &FailoverStateList{})
+	SchemeBuilder.Register(&FailoverPolicy{}, &FailoverPolicyList{})
 }

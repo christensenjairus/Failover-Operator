@@ -17,7 +17,7 @@ resources:
   controller: true
   domain: cyber-engine.com
   group: failover
-  kind: FailoverState
+  kind: FailoverPolicy
   path: github.com/christensenjairus/Failover-Operator/api/v1alpha1
   version: v1alpha1
 version: "3"

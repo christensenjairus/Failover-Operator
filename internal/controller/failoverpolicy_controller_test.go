@@ -30,7 +30,7 @@ import (
 	failoverv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 )
 
-var _ = Describe("FailoverState Controller", func() {
+var _ = Describe("FailoverPolicy Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -40,13 +40,13 @@ var _ = Describe("FailoverState Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		failoverstate := &failoverv1alpha1.FailoverState{}
+		failoverstate := &failoverv1alpha1.FailoverPolicy{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind FailoverState")
+			By("creating the custom resource for the Kind FailoverPolicy")
 			err := k8sClient.Get(ctx, typeNamespacedName, failoverstate)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &failoverv1alpha1.FailoverState{
+				resource := &failoverv1alpha1.FailoverPolicy{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -59,16 +59,16 @@ var _ = Describe("FailoverState Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &failoverv1alpha1.FailoverState{}
+			resource := &failoverv1alpha1.FailoverPolicy{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance FailoverState")
+			By("Cleanup the specific resource instance FailoverPolicy")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &FailoverStateReconciler{
+			controllerReconciler := &FailoverPolicyReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

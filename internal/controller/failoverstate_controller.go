@@ -67,127 +67,31 @@ type FailoverStateReconciler struct {
 func (r *FailoverStateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// Fetch the FailoverState instance
+	// Fetch FailoverState object
 	failoverState := &failoverv1alpha1.FailoverState{}
-	err := r.Get(ctx, req.NamespacedName, failoverState)
-	if err != nil {
+	if err := r.Get(ctx, req.NamespacedName, failoverState); err != nil {
 		log.Error(err, "Failed to get FailoverState")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	log.Info("Reconciling FailoverState", "FailoverState", failoverState.Name)
 
-	desiredState := failoverState.Spec.FailoverState // "primary" or "secondary"
-	var pendingVolumeReplicationUpdates int
-	var failoverErrorMessage string
-	var hasError bool // Track if any VolumeReplication has failed
+	// Process VolumeReplication failover
+	pendingUpdates, failoverError, failoverErrorMessage := r.processVolumeReplications(ctx, failoverState)
 
-	// ✅ Check all VolumeReplication objects
-	for _, vrName := range failoverState.Spec.VolumeReplications {
-		log.Info("Checking VolumeReplication", "VolumeReplication", vrName)
+	// Process VirtualService updates
+	r.processVirtualServices(ctx, failoverState)
 
-		// ✅ Detect errors in VolumeReplication
-		errorMessage, errorDetected := r.checkVolumeReplicationError(ctx, vrName, failoverState.Namespace)
-		if errorDetected {
-			failoverErrorMessage = fmt.Sprintf("VolumeReplication %s: %s", vrName, errorMessage)
-			hasError = true
-			continue // **Skip further processing, do NOT count this as pending**
-		}
-
-		// ✅ Only count VolumeReplications that are actually pending an update
-		pending, err := r.updateVolumeReplication(ctx, vrName, failoverState.Namespace, desiredState)
-		if err != nil {
-			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", vrName)
-			return ctrl.Result{}, err
-		}
-		if pending {
-			pendingVolumeReplicationUpdates++
-		}
-	}
-
-	// ✅ If error was detected, mark FailoverState as "Error" **with VolumeReplication name**
-	if hasError {
-		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
-			Type:               "FailoverError",
-			Status:             metav1.ConditionTrue,
-			Reason:             "VolumeReplicationError",
-			Message:            failoverErrorMessage, // ✅ Now includes which VolumeReplication failed
-			LastTransitionTime: metav1.Now(),
-		})
-
-		// ✅ Remove "FailoverComplete" and "FailoverInProgress" conditions
-		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverComplete")
-		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverInProgress")
-
-		// ✅ Update status
-		failoverState.Status.PendingVolumeReplicationUpdates = pendingVolumeReplicationUpdates
-		if err := r.Status().Update(ctx, failoverState); err != nil {
-			log.Error(err, "Failed to update FailoverState status")
-			return ctrl.Result{}, err
-		}
-
-		log.Error(fmt.Errorf("failover error"), "FailoverState entered an error state", "FailoverState", failoverState.Name, "Error", failoverErrorMessage)
-	}
-
-	// ✅ **Fix: Ensure VirtualServices are updated, even if there was an error**
-	for _, vsName := range failoverState.Spec.VirtualServices {
-		log.Info("Checking VirtualService update", "VirtualService", vsName, "desiredState", desiredState) // 🔥 DEBUGGING LOG
-
-		updated, err := r.updateVirtualService(ctx, vsName, failoverState.Namespace, desiredState)
-		if err != nil {
-			log.Error(err, "Failed to update VirtualService", "VirtualService", vsName)
-			return ctrl.Result{}, err
-		}
-		if updated {
-			log.Info("Updated VirtualService", "VirtualService", vsName)
-		}
-	}
-
-	// ✅ If an error exists, return **after** updating VirtualServices
-	if hasError {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// ✅ Remove FailoverError condition if no errors
-	meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverError")
-
-	// ✅ Normal Failover Process
-	failoverComplete := (pendingVolumeReplicationUpdates == 0)
-	failoverState.Status.PendingVolumeReplicationUpdates = pendingVolumeReplicationUpdates
-
-	if failoverComplete {
-		// ✅ Set "FailoverComplete"
-		failoverState.Status.AppliedState = desiredState
-		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
-			Type:               "FailoverComplete",
-			Status:             metav1.ConditionTrue,
-			Reason:             "AllReplicationsSynced",
-			Message:            "All VolumeReplication objects have been updated successfully.",
-			LastTransitionTime: metav1.Now(),
-		})
-	} else {
-		// ✅ Set "FailoverInProgress"
-		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
-			Type:               "FailoverInProgress",
-			Status:             metav1.ConditionTrue,
-			Reason:             "SyncingReplications",
-			Message:            fmt.Sprintf("%d VolumeReplication objects are still syncing.", pendingVolumeReplicationUpdates),
-			LastTransitionTime: metav1.Now(),
-		})
-	}
-
-	// ✅ Remove "FailoverComplete" if still in progress
-	if !failoverComplete {
-		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverComplete")
-	}
-
-	// ✅ Update status in Kubernetes
-	if err := r.Status().Update(ctx, failoverState); err != nil {
-		log.Error(err, "Failed to update FailoverState status")
+	// Update FailoverState status
+	if err := r.updateFailoverStatus(ctx, failoverState, pendingUpdates, failoverError, failoverErrorMessage); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Successfully reconciled FailoverState", "FailoverState", failoverState.Name)
+	// If error exists, requeue
+	if failoverError {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -315,6 +219,106 @@ func (r *FailoverStateReconciler) updateVirtualService(ctx context.Context, name
 	}
 
 	return false, nil // No update needed
+}
+
+// processVolumeReplications manages VolumeReplication updates & error tracking
+func (r *FailoverStateReconciler) processVolumeReplications(ctx context.Context, failoverState *failoverv1alpha1.FailoverState) (int, bool, string) {
+	log := log.FromContext(ctx)
+	desiredState := failoverState.Spec.FailoverState
+
+	var pendingUpdates int
+	var failoverError bool
+	var failoverErrorMessage string
+
+	for _, vrName := range failoverState.Spec.VolumeReplications {
+		log.Info("Checking VolumeReplication", "VolumeReplication", vrName)
+
+		// Detect VolumeReplication errors
+		errorMessage, errorDetected := r.checkVolumeReplicationError(ctx, vrName, failoverState.Namespace)
+		if errorDetected {
+			failoverErrorMessage = fmt.Sprintf("VolumeReplication %s: %s", vrName, errorMessage)
+			failoverError = true
+			continue // Skip processing this VolumeReplication
+		}
+
+		// Attempt to update VolumeReplication
+		pending, err := r.updateVolumeReplication(ctx, vrName, failoverState.Namespace, desiredState)
+		if err != nil {
+			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", vrName)
+			return 0, true, "Failed to update VolumeReplication"
+		}
+		if pending {
+			pendingUpdates++
+		}
+	}
+
+	return pendingUpdates, failoverError, failoverErrorMessage
+}
+
+// processVirtualServices updates VirtualService resources
+func (r *FailoverStateReconciler) processVirtualServices(ctx context.Context, failoverState *failoverv1alpha1.FailoverState) {
+	log := log.FromContext(ctx)
+	desiredState := failoverState.Spec.FailoverState
+
+	for _, vsName := range failoverState.Spec.VirtualServices {
+		log.Info("Checking VirtualService update", "VirtualService", vsName)
+
+		updated, err := r.updateVirtualService(ctx, vsName, failoverState.Namespace, desiredState)
+		if err != nil {
+			log.Error(err, "Failed to update VirtualService", "VirtualService", vsName)
+			continue
+		}
+		if updated {
+			log.Info("Updated VirtualService", "VirtualService", vsName)
+		}
+	}
+}
+
+// updateFailoverStatus updates the status of FailoverState
+func (r *FailoverStateReconciler) updateFailoverStatus(ctx context.Context, failoverState *failoverv1alpha1.FailoverState, pendingUpdates int, failoverError bool, failoverErrorMessage string) error {
+	log := log.FromContext(ctx)
+
+	if failoverError {
+		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
+			Type:    "FailoverError",
+			Status:  metav1.ConditionTrue,
+			Reason:  "VolumeReplicationError",
+			Message: failoverErrorMessage,
+		})
+
+		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverComplete")
+		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverInProgress")
+	} else {
+		meta.RemoveStatusCondition(&failoverState.Status.Conditions, "FailoverError")
+	}
+
+	failoverComplete := (pendingUpdates == 0)
+	failoverState.Status.PendingVolumeReplicationUpdates = pendingUpdates
+
+	if failoverComplete {
+		failoverState.Status.AppliedState = failoverState.Spec.FailoverState
+		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
+			Type:    "FailoverComplete",
+			Status:  metav1.ConditionTrue,
+			Reason:  "AllReplicationsSynced",
+			Message: "All VolumeReplication objects have been updated successfully.",
+		})
+	} else {
+		meta.SetStatusCondition(&failoverState.Status.Conditions, metav1.Condition{
+			Type:    "FailoverInProgress",
+			Status:  metav1.ConditionTrue,
+			Reason:  "SyncingReplications",
+			Message: fmt.Sprintf("%d VolumeReplication objects are still syncing.", pendingUpdates),
+		})
+	}
+
+	if err := r.Status().Update(ctx, failoverState); err != nil {
+		log.Error(err, "Failed to update FailoverState status")
+		return err
+	}
+
+	log.Info("Updated FailoverState status", "FailoverState", failoverState.Name)
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

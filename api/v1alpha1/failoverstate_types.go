@@ -20,22 +20,33 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // FailoverStateSpec defines the desired state of FailoverState
 type FailoverStateSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// FailoverState determines whether this resource should be in "primary" or "secondary" mode.
+	// +kubebuilder:validation:Enum=primary;secondary
+	FailoverState string `json:"failoverState"`
 
-	// Foo is an example field of FailoverState. Edit failoverstate_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// VolumeReplications is a list of VolumeReplication objects to manage in this failover state.
+	// +kubebuilder:validation:MinItems=1
+	VolumeReplications []string `json:"volumeReplications"`
+
+	// VirtualServices is a list of VirtualService objects to update during failover.
+	// +kubebuilder:validation:MinItems=1
+	VirtualServices []string `json:"virtualServices"`
 }
 
 // FailoverStateStatus defines the observed state of FailoverState
 type FailoverStateStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// AppliedState is the currently applied failover state ("primary" or "secondary").
+	AppliedState string `json:"appliedState,omitempty"`
+
+	// PendingVolumeReplicationUpdates represents the number of VolumeReplication objects
+	// that still need to be updated to match the desired failover state.
+	PendingVolumeReplicationUpdates int `json:"pendingVolumeReplicationUpdates,omitempty"`
+
+	// Conditions represent the current state of failover reconciliation.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

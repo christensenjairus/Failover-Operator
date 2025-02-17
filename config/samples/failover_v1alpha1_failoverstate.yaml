@@ -4,6 +4,12 @@ metadata:
   labels:
     app.kubernetes.io/name: failover-operator
     app.kubernetes.io/managed-by: kustomize
-  name: failoverstate-sample
+  name: wordpress
+  namespace: wordpress
 spec:
-  # TODO(user): Add fields here
+  failoverState: "primary"
+  virtualServices: 
+    - "wordpress"
+  volumeReplications:
+    - data-wordpress-mariadb-0
+    - wordpress

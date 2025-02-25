@@ -17,7 +17,7 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: FailoverState is the Schema for the failoverstates API
+        description: FailoverPolicy is the Schema for the failoverpolicies API
         properties:
           apiVersion:
             description: |-
@@ -37,14 +37,22 @@ spec:
           metadata:
             type: object
           spec:
-            description: FailoverStateSpec defines the desired state of FailoverState
+            description: FailoverPolicySpec defines the desired state of FailoverPolicy
             properties:
-              failoverState:
-                description: FailoverState determines whether this resource should
-                  be in "primary" or "secondary" mode.
+              desiredState:
+                description: DesiredState represents the intended failover state ("primary"
+                  or "secondary").
                 enum:
                 - primary
                 - secondary
+                type: string
+              mode:
+                description: |-
+                  Mode determines the failover approach. "safe" ensures VolumeReplication is fully synced before failover,
+                  while "unsafe" allows immediate transition without waiting.
+                enum:
+                - safe
+                - unsafe
                 type: string
               virtualServices:
                 description: VirtualServices is a list of VirtualService objects to
@@ -55,23 +63,20 @@ spec:
                 type: array
               volumeReplications:
                 description: VolumeReplications is a list of VolumeReplication objects
-                  to manage in this failover state.
+                  to manage in this failover policy.
                 items:
                   type: string
                 minItems: 1
                 type: array
             required:
-            - failoverState
+            - desiredState
+            - mode
             - virtualServices
             - volumeReplications
             type: object
           status:
-            description: FailoverStateStatus defines the observed state of FailoverState
+            description: FailoverPolicyStatus defines the observed state of FailoverPolicy
             properties:
-              appliedState:
-                description: AppliedState is the currently applied failover state
-                  ("primary" or "secondary").
-                type: string
               conditions:
                 description: Conditions represent the current state of failover reconciliation.
                 items:
@@ -129,6 +134,10 @@ spec:
                   - type
                   type: object
                 type: array
+              currentState:
+                description: CurrentState reflects the actual failover state ("primary"
+                  or "secondary") of the system.
+                type: string
               pendingVolumeReplicationUpdates:
                 description: |-
                   PendingVolumeReplicationUpdates represents the number of VolumeReplication objects

@@ -18,7 +18,7 @@ rules:
 - apiGroups:
   - crd.cyber-engine.com
   resources:
-  - failoverstates
+  - failoverpolicies
   verbs:
   - create
   - delete
@@ -30,13 +30,13 @@ rules:
 - apiGroups:
   - crd.cyber-engine.com
   resources:
-  - failoverstates/finalizers
+  - failoverpolicies/finalizers
   verbs:
   - update
 - apiGroups:
   - crd.cyber-engine.com
   resources:
-  - failoverstates/status
+  - failoverpolicies/status
   verbs:
   - get
   - patch

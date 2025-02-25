@@ -20,13 +20,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// FailoverStateSpec defines the desired state of FailoverState
+// FailoverPolicySpec defines the desired state of FailoverPolicy
 type FailoverPolicySpec struct {
-	// FailoverState determines whether this resource should be in "primary" or "secondary" mode.
+	// DesiredState represents the intended failover state ("primary" or "secondary").
 	// +kubebuilder:validation:Enum=primary;secondary
-	FailoverState string `json:"failoverState"`
+	DesiredState string `json:"desiredState"`
 
-	// VolumeReplications is a list of VolumeReplication objects to manage in this failover state.
+	// Mode determines the failover approach. "safe" ensures VolumeReplication is fully synced before failover,
+	// while "unsafe" allows immediate transition without waiting.
+	// +kubebuilder:validation:Enum=safe;unsafe
+	Mode string `json:"mode"`
+
+	// VolumeReplications is a list of VolumeReplication objects to manage in this failover policy.
 	// +kubebuilder:validation:MinItems=1
 	VolumeReplications []string `json:"volumeReplications"`
 
@@ -35,10 +40,10 @@ type FailoverPolicySpec struct {
 	VirtualServices []string `json:"virtualServices"`
 }
 
-// FailoverStateStatus defines the observed state of FailoverState
+// FailoverPolicyStatus defines the observed state of FailoverPolicy
 type FailoverPolicyStatus struct {
-	// AppliedState is the currently applied failover state ("primary" or "secondary").
-	AppliedState string `json:"appliedState,omitempty"`
+	// CurrentState reflects the actual failover state ("primary" or "secondary") of the system.
+	CurrentState string `json:"currentState,omitempty"`
 
 	// PendingVolumeReplicationUpdates represents the number of VolumeReplication objects
 	// that still need to be updated to match the desired failover state.
@@ -52,7 +57,7 @@ type FailoverPolicyStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// FailoverState is the Schema for the failoverstates API
+// FailoverPolicy is the Schema for the failoverpolicies API
 type FailoverPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -63,7 +68,7 @@ type FailoverPolicy struct {
 
 // +kubebuilder:object:root=true
 
-// FailoverPolicyList contains a list of FailoverState
+// FailoverPolicyList contains a list of FailoverPolicy
 type FailoverPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

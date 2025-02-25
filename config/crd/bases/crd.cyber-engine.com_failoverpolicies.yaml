@@ -143,6 +143,26 @@ spec:
                   PendingVolumeReplicationUpdates represents the number of VolumeReplication objects
                   that still need to be updated to match the desired failover state.
                 type: integer
+              volumeReplicationStatuses:
+                items:
+                  description: VolumeReplicationStatus defines the status of a VolumeReplication
+                  properties:
+                    currentState:
+                      type: string
+                    desiredState:
+                      type: string
+                    error:
+                      type: string
+                    lastUpdateTime:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - currentState
+                  - desiredState
+                  - name
+                  type: object
+                type: array
             type: object
         type: object
     served: true

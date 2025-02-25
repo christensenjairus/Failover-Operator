@@ -40,6 +40,15 @@ type FailoverPolicySpec struct {
 	VirtualServices []string `json:"virtualServices"`
 }
 
+// VolumeReplicationStatus defines the status of a VolumeReplication
+type VolumeReplicationStatus struct {
+	Name           string `json:"name"`
+	CurrentState   string `json:"currentState"`
+	DesiredState   string `json:"desiredState"`
+	Error          string `json:"error,omitempty"`
+	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
+}
+
 // FailoverPolicyStatus defines the observed state of FailoverPolicy
 type FailoverPolicyStatus struct {
 	// CurrentState reflects the actual failover state ("primary" or "secondary") of the system.
@@ -52,6 +61,8 @@ type FailoverPolicyStatus struct {
 	// Conditions represent the current state of failover reconciliation.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	VolumeReplicationStatuses []VolumeReplicationStatus `json:"volumeReplicationStatuses,omitempty"`
 }
 
 // +kubebuilder:object:root=true

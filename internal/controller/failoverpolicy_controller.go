@@ -20,6 +20,8 @@ import (
 	replicationv1alpha1 "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func init() {
@@ -61,9 +63,9 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// If error exists, requeue
-	if failoverError {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Only requeue if there are pending updates or errors
+	if pendingUpdates > 0 || failoverError {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -80,53 +82,63 @@ func (r *FailoverPolicyReconciler) updateVolumeReplication(ctx context.Context, 
 		return false, client.IgnoreNotFound(err)
 	}
 
-	// Extract `spec.replicationState`
-	specReplicationState := string(volumeReplication.Spec.ReplicationState)
+	currentSpec := string(volumeReplication.Spec.ReplicationState)
+	currentStatus := strings.ToLower(string(volumeReplication.Status.State))
+	desiredState := strings.ToLower(state)
 
-	// Extract `status.state`
-	statusReplicationState := strings.ToLower(string(volumeReplication.Status.State))
-
-	// Determine desired state
-	desiredReplicationState := "secondary"
-	if state == "primary" {
-		desiredReplicationState = "primary"
-	}
-
-	log.Info("Checking VolumeReplication",
+	log.Info("Checking VolumeReplication state",
 		"name", name,
-		"spec.replicationState", specReplicationState,
-		"status.state", statusReplicationState,
-		"desiredReplicationState", desiredReplicationState)
+		"currentSpec", currentSpec,
+		"currentStatus", currentStatus,
+		"desiredState", desiredState)
 
-	if statusReplicationState == "resync" {
-		log.Info("VolumeReplication is in resync mode; waiting for it to complete before applying changes", "name", name)
-		return true, nil // **Still pending**
+	// If in resync mode, wait for completion
+	if currentStatus == "resync" {
+		log.Info("VolumeReplication is in resync mode - waiting for completion",
+			"name", name)
+		return true, nil
 	}
 
-	if strings.EqualFold(statusReplicationState, desiredReplicationState) {
-		log.Info("VolumeReplication already in desired state, marking as complete", "name", name)
-		return false, nil
+	// If transitioning to primary, ensure current status is either secondary or already primary
+	if desiredState == "primary" && currentStatus != "secondary" && currentStatus != "primary" {
+		log.Info("Cannot transition to primary - current status must be secondary or primary",
+			"name", name,
+			"currentStatus", currentStatus)
+		return true, nil
 	}
 
-	if desiredReplicationState == "primary" && statusReplicationState != "secondary" {
-		log.Info("Waiting for VolumeReplication to reach 'secondary' before switching to 'primary'", "name", name)
-		return true, nil // **Still pending**
+	// Only update spec if it doesn't match desired state and status is stable
+	if currentSpec != state {
+		// Check if status is in a stable state before updating
+		if currentStatus == "error" {
+			log.Info("Cannot update spec - VolumeReplication is in error state",
+				"name", name)
+			return true, nil
+		}
+
+		log.Info("Updating VolumeReplication spec",
+			"name", name,
+			"currentSpec", currentSpec,
+			"desiredState", state)
+
+		volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(state)
+		if err := r.Update(ctx, volumeReplication); err != nil {
+			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", name)
+			return true, err
+		}
+		return true, nil
 	}
 
-	log.Info("Updating VolumeReplication spec", "name", name, "newState", desiredReplicationState)
-
-	// Update the replication state
-	volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(desiredReplicationState)
-
-	// Attempt update
-	if err := r.Update(ctx, volumeReplication); err != nil {
-		log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", name)
-		return true, err
+	// Check if status matches spec
+	if currentStatus != desiredState {
+		log.Info("VolumeReplication status not yet matching spec",
+			"name", name,
+			"statusState", currentStatus,
+			"desiredState", desiredState)
+		return true, nil
 	}
 
-	log.Info("Successfully updated VolumeReplication", "name", name, "newState", desiredReplicationState)
-
-	return !strings.EqualFold(statusReplicationState, desiredReplicationState), nil
+	return false, nil
 }
 
 func (r *FailoverPolicyReconciler) checkVolumeReplicationError(ctx context.Context, name, namespace string) (string, bool) {
@@ -159,6 +171,7 @@ func (r *FailoverPolicyReconciler) getCurrentVolumeReplicationState(ctx context.
 		return "", err
 	}
 
+	// Convert to lowercase to ensure consistent comparison
 	return strings.ToLower(string(volumeReplication.Status.State)), nil
 }
 
@@ -209,6 +222,34 @@ func (r *FailoverPolicyReconciler) processVolumeReplications(ctx context.Context
 	var failoverError bool
 	var failoverErrorMessage string
 
+	// For safe mode, first check if all VolumeReplications are ready for primary transition
+	if mode == "safe" && strings.ToLower(desiredState) == "primary" {
+		allReady := true
+		for _, vrName := range failoverPolicy.Spec.VolumeReplications {
+			currentState, err := r.getCurrentVolumeReplicationState(ctx, vrName, failoverPolicy.Namespace)
+			if err != nil {
+				failoverErrorMessage = fmt.Sprintf("Failed to retrieve state for VolumeReplication %s", vrName)
+				return 0, true, failoverErrorMessage
+			}
+
+			// In safe mode, volumes must be either already primary or secondary before transitioning
+			if currentState != "primary" && currentState != "secondary" {
+				log.Info("Safe mode: waiting for VolumeReplication to be in valid state",
+					"VolumeReplication", vrName,
+					"CurrentState", currentState,
+					"ValidStates", []string{"primary", "secondary"})
+				allReady = false
+				pendingUpdates++
+			}
+		}
+
+		// Only return early if not all volumes are ready
+		if !allReady {
+			return pendingUpdates, false, ""
+		}
+	}
+
+	// Process all VolumeReplications
 	for _, vrName := range failoverPolicy.Spec.VolumeReplications {
 		log.Info("Checking VolumeReplication", "VolumeReplication", vrName)
 
@@ -228,20 +269,11 @@ func (r *FailoverPolicyReconciler) processVolumeReplications(ctx context.Context
 			continue
 		}
 
-		// Ensure the state comparison is case-insensitive
-		currentStateLower := strings.ToLower(currentState)
-		desiredStateLower := strings.ToLower(desiredState)
-
 		// If the current state already matches the desired state, no update is needed
-		if currentStateLower == desiredStateLower {
-			log.Info("VolumeReplication is already in the desired state", "VolumeReplication", vrName, "State", currentState)
-			continue
-		}
-
-		// Safe mode logic: Ensure all VolumeReplications are in "secondary" before switching to "primary"
-		if mode == "safe" && desiredStateLower == "primary" && currentStateLower != "secondary" {
-			log.Info("Safe mode enforced: Waiting for all VolumeReplications to reach secondary before promoting to primary", "VolumeReplication", vrName)
-			pendingUpdates++
+		if strings.EqualFold(currentState, desiredState) {
+			log.Info("VolumeReplication is already in the desired state",
+				"VolumeReplication", vrName,
+				"State", currentState)
 			continue
 		}
 
@@ -280,6 +312,46 @@ func (r *FailoverPolicyReconciler) processVirtualServices(ctx context.Context, f
 func (r *FailoverPolicyReconciler) updateFailoverStatus(ctx context.Context, failoverPolicy *crdv1alpha1.FailoverPolicy, pendingUpdates int, failoverError bool, failoverErrorMessage string) error {
 	log := log.FromContext(ctx)
 
+	// Only track problematic VolumeReplications
+	var statuses []crdv1alpha1.VolumeReplicationStatus
+	for _, vrName := range failoverPolicy.Spec.VolumeReplications {
+		currentState, err := r.getCurrentVolumeReplicationState(ctx, vrName, failoverPolicy.Namespace)
+		if err != nil {
+			// Include in status if we can't get the state
+			statuses = append(statuses, crdv1alpha1.VolumeReplicationStatus{
+				Name:           vrName,
+				Error:          fmt.Sprintf("Failed to get state: %v", err),
+				LastUpdateTime: time.Now().Format(time.RFC3339),
+			})
+			continue
+		}
+
+		// Check for errors
+		if errorMsg, hasError := r.checkVolumeReplicationError(ctx, vrName, failoverPolicy.Namespace); hasError {
+			statuses = append(statuses, crdv1alpha1.VolumeReplicationStatus{
+				Name:           vrName,
+				CurrentState:   currentState,
+				DesiredState:   failoverPolicy.Spec.DesiredState,
+				Error:          errorMsg,
+				LastUpdateTime: time.Now().Format(time.RFC3339),
+			})
+			continue
+		}
+
+		// Only include if not in desired state
+		if !strings.EqualFold(currentState, failoverPolicy.Spec.DesiredState) {
+			statuses = append(statuses, crdv1alpha1.VolumeReplicationStatus{
+				Name:           vrName,
+				CurrentState:   currentState,
+				DesiredState:   failoverPolicy.Spec.DesiredState,
+				LastUpdateTime: time.Now().Format(time.RFC3339),
+			})
+		}
+	}
+
+	// Update status with only problematic VolumeReplications
+	failoverPolicy.Status.VolumeReplicationStatuses = statuses
+
 	if failoverError {
 		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, metav1.Condition{
 			Type:    "FailoverError",
@@ -306,7 +378,6 @@ func (r *FailoverPolicyReconciler) updateFailoverStatus(ctx context.Context, fai
 			Message: "All VolumeReplication objects have been updated successfully.",
 		})
 
-		// Ensure FailoverInProgress condition is removed when failover is complete
 		meta.RemoveStatusCondition(&failoverPolicy.Status.Conditions, "FailoverInProgress")
 	} else {
 		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, metav1.Condition{
@@ -316,7 +387,6 @@ func (r *FailoverPolicyReconciler) updateFailoverStatus(ctx context.Context, fai
 			Message: fmt.Sprintf("%d VolumeReplication objects are still syncing.", pendingUpdates),
 		})
 
-		// Ensure FailoverComplete condition is removed when failover is in progress
 		meta.RemoveStatusCondition(&failoverPolicy.Status.Conditions, "FailoverComplete")
 	}
 
@@ -337,6 +407,33 @@ func (r *FailoverPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&crdv1alpha1.FailoverPolicy{}).
 		Owns(&replicationv1alpha1.VolumeReplication{}).
+		Watches(
+			&replicationv1alpha1.VolumeReplication{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				// Find all FailoverPolicies in the same namespace
+				failoverPolicies := &crdv1alpha1.FailoverPolicyList{}
+				if err := r.List(context.Background(), failoverPolicies, client.InNamespace(obj.GetNamespace())); err != nil {
+					return nil
+				}
+
+				var requests []reconcile.Request
+				for _, policy := range failoverPolicies.Items {
+					// Check if this VolumeReplication is referenced in the policy
+					for _, vrName := range policy.Spec.VolumeReplications {
+						if vrName == obj.GetName() {
+							requests = append(requests, reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Name:      policy.Name,
+									Namespace: policy.Namespace,
+								},
+							})
+							break
+						}
+					}
+				}
+				return requests
+			}),
+		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
 		Complete(r)
 }

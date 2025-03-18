@@ -43,9 +43,9 @@ type FailoverPolicySpec struct {
 // VolumeReplicationStatus defines the status of a VolumeReplication
 type VolumeReplicationStatus struct {
 	Name           string `json:"name"`
-	CurrentState   string `json:"currentState"`
-	DesiredState   string `json:"desiredState"`
-	Error          string `json:"error,omitempty"`
+	State          string `json:"state"`           // Current state
+	Error          string `json:"error,omitempty"` // Only populated for errors
+	Message        string `json:"message,omitempty"`
 	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
 }
 

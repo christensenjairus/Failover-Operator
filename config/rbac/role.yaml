@@ -16,7 +16,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - crd.cyber-engine.com
+  - crd.hahomelabs.com
   resources:
   - failoverpolicies
   verbs:
@@ -28,13 +28,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - crd.cyber-engine.com
+  - crd.hahomelabs.com
   resources:
   - failoverpolicies/finalizers
   verbs:
   - update
 - apiGroups:
-  - crd.cyber-engine.com
+  - crd.hahomelabs.com
   resources:
   - failoverpolicies/status
   verbs:

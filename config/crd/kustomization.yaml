@@ -2,7 +2,7 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/crd.cyber-engine.com_failoverpolicies.yaml
+- bases/crd.hahomelabs.com_failoverpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
@@ -18,5 +18,5 @@ patches:
 # [WEBHOOK] To enable webhook, uncomment the following section
 # the following config is for teaching kustomize how to do kustomization for CRDs.
 
-#configurations:
-#- kustomizeconfig.yaml
+configurations:
+- kustomizeconfig.yaml

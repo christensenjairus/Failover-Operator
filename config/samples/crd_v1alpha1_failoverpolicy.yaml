@@ -1,4 +1,4 @@
-apiVersion: crd.cyber-engine.com/v1alpha1
+apiVersion: crd.hahomelabs.com/v1alpha1
 kind: FailoverPolicy
 metadata:
   labels:

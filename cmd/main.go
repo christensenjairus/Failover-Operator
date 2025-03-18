@@ -49,6 +49,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(failoverv1alpha1.AddToScheme(scheme))
+	// Register VolumeReplication scheme
+	utilruntime.Must(controller.RegisterSchemes(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -126,7 +128,7 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "fecc9312.cyber-engine.com",
+		LeaderElectionID:       "fecc9312.hahomelabs.com",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

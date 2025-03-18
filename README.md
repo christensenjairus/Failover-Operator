@@ -1,8 +1,17 @@
-# failover-operator
-// TODO(user): Add simple overview of use/purpose
+# Failover-Operator
+
+The Failover-Operator manages the failover of VolumeReplications and VirtualServices in Kubernetes. It provides a custom resource `FailoverPolicy` that coordinates cross-cluster failover operations.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+This Kubernetes operator allows you to define policies that manage the failover of applications between clusters using VolumeReplication resources and VirtualService configurations. It handles:
+
+- Coordinating the state change of storage replications (primary/secondary)
+- Managing DNS resolution through VirtualService annotations
+- Monitoring the status of failover operations
+- Supporting both regular and "safe" modes for different failover scenarios
+
+For details about the code organization and architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Getting Started
 
@@ -21,7 +30,7 @@ make docker-build docker-push IMG=<some-registry>/failover-operator:tag
 
 **NOTE:** This image ought to be published in the personal registry you specified.
 And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Make sure you have the proper permission to the registry if the above commands don't work.
 
 **Install the CRDs into the cluster:**
 
@@ -111,4 +120,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

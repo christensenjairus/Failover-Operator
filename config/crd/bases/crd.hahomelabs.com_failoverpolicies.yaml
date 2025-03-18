@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  name: failoverpolicies.crd.cyber-engine.com
+  name: failoverpolicies.crd.hahomelabs.com
 spec:
-  group: crd.cyber-engine.com
+  group: crd.hahomelabs.com
   names:
     kind: FailoverPolicy
     listKind: FailoverPolicyList

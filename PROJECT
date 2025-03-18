@@ -2,22 +2,23 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: cyber-engine.com
+version: "3"
+projectName: failover-operator
 layout:
 - go.kubebuilder.io/v4
-plugins:
-  manifests.sdk.operatorframework.io/v2: {}
-  scorecard.sdk.operatorframework.io/v2: {}
-projectName: failover-operator
+domain: hahomelabs.com
+multigroup: true
 repo: github.com/christensenjairus/Failover-Operator
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: cyber-engine.com
-  group: failover
+  domain: hahomelabs.com
+  group: crd
   kind: FailoverPolicy
   path: github.com/christensenjairus/Failover-Operator/api/v1alpha1
   version: v1alpha1
-version: "3"
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}

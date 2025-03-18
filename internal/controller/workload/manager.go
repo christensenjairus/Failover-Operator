@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -19,72 +20,50 @@ type Manager struct {
 	client client.Client
 }
 
-// NewManager creates a new Workload manager
+// NewManager creates a new workload manager
 func NewManager(client client.Client) *Manager {
 	return &Manager{
 		client: client,
 	}
 }
 
-// ProcessWorkloads handles scaling deployments, statefulsets, and suspending cronjobs based on the desired state
-func (m *Manager) ProcessWorkloads(ctx context.Context, namespace string, deployments, statefulSets, cronJobs []string, desiredState string) error {
-	log := log.FromContext(ctx)
+// ProcessWorkloads handles appropriate workload actions based on policy state
+func (m *Manager) ProcessWorkloads(ctx context.Context,
+	deployments, statefulSets, cronJobs []string,
+	namespace, desiredState string) error {
 
-	// If we're in primary mode, we don't need to scale anything
-	// Flux will handle scaling up workloads in primary mode
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
 	if desiredState == "primary" {
-		log.Info("Primary mode - no workload changes needed")
+		// In primary mode, Flux will handle restoring workloads
+		// Nothing to do here
 		return nil
 	}
 
-	// In secondary mode, we need to ensure all workloads are scaled down/suspended
-	log.Info("Secondary mode - ensuring workloads are scaled down/suspended",
-		"Deployments", len(deployments),
-		"StatefulSets", len(statefulSets),
-		"CronJobs", len(cronJobs))
+	// In secondary mode, scale down all workloads
+	logger.Info("Processing workloads in secondary mode",
+		"deployments", len(deployments),
+		"statefulSets", len(statefulSets),
+		"cronJobs", len(cronJobs))
 
-	// First check if any workload is not in the desired state
-	statuses := m.GetWorkloadStatuses(ctx, namespace, deployments, statefulSets, cronJobs)
-	anyWorkloadActive := false
-
-	// Check deployments
-	for _, status := range statuses {
-		if (status.Kind == "Deployment" || status.Kind == "StatefulSet") && status.State != "Scaled Down" {
-			log.Info("Found active workload in secondary mode", "Kind", status.Kind, "Name", status.Name, "State", status.State)
-			anyWorkloadActive = true
-		} else if status.Kind == "CronJob" && status.State != "Suspended" {
-			log.Info("Found active CronJob in secondary mode", "Name", status.Name, "State", status.State)
-			anyWorkloadActive = true
-		}
-	}
-
-	if !anyWorkloadActive {
-		log.Info("All workloads are already in the correct state")
-	} else {
-		log.Info("Some workloads need to be scaled down/suspended - applying changes now")
-	}
-
-	// Process Deployments - scale down to 0
+	// Process deployments
 	for _, name := range deployments {
-		if err := m.ensureDeploymentScaledDown(ctx, namespace, name); err != nil {
-			log.Error(err, "Failed to scale Deployment", "Deployment", name)
-			return err
+		if err := m.ensureDeploymentScaledDown(ctx, name, namespace); err != nil {
+			logger.Error(err, "Failed to scale down deployment", "name", name, "namespace", namespace)
 		}
 	}
 
-	// Process StatefulSets - scale down to 0
+	// Process statefulsets
 	for _, name := range statefulSets {
-		if err := m.ensureStatefulSetScaledDown(ctx, namespace, name); err != nil {
-			log.Error(err, "Failed to scale StatefulSet", "StatefulSet", name)
-			return err
+		if err := m.ensureStatefulSetScaledDown(ctx, name, namespace); err != nil {
+			logger.Error(err, "Failed to scale down statefulset", "name", name, "namespace", namespace)
 		}
 	}
 
-	// Process CronJobs - suspend
+	// Process cronjobs
 	for _, name := range cronJobs {
-		if err := m.ensureCronJobSuspended(ctx, namespace, name); err != nil {
-			log.Error(err, "Failed to suspend CronJob", "CronJob", name)
-			return err
+		if err := m.ensureCronJobSuspended(ctx, name, namespace); err != nil {
+			logger.Error(err, "Failed to suspend cronjob", "name", name, "namespace", namespace)
 		}
 	}
 
@@ -162,64 +141,135 @@ func (m *Manager) suspendCronJob(ctx context.Context, namespace, name string, su
 	return m.client.Update(ctx, cronJob)
 }
 
-// ensureDeploymentScaledDown ensures a Deployment is scaled to 0 replicas
-func (m *Manager) ensureDeploymentScaledDown(ctx context.Context, namespace, name string) error {
-	return m.scaleDeployment(ctx, namespace, name, 0)
+// ensureDeploymentScaledDown scales down a deployment to 0 replicas
+func (m *Manager) ensureDeploymentScaledDown(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
+	deployment := &appsv1.Deployment{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, deployment); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Deployment doesn't exist, nothing to do
+		}
+		return fmt.Errorf("failed to get deployment %s: %w", name, err)
+	}
+
+	// Check if already scaled down
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
+		return nil
+	}
+
+	// Scale down the deployment
+	zero := int32(0)
+	deployment.Spec.Replicas = &zero
+	if err := m.client.Update(ctx, deployment); err != nil {
+		return fmt.Errorf("failed to scale down deployment %s: %w", name, err)
+	}
+
+	logger.Info("Scaled down deployment", "name", name, "namespace", namespace)
+	return nil
 }
 
-// ensureStatefulSetScaledDown ensures a StatefulSet is scaled to 0 replicas
-func (m *Manager) ensureStatefulSetScaledDown(ctx context.Context, namespace, name string) error {
-	return m.scaleStatefulSet(ctx, namespace, name, 0)
+// ensureStatefulSetScaledDown scales down a statefulset to 0 replicas
+func (m *Manager) ensureStatefulSetScaledDown(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
+	statefulset := &appsv1.StatefulSet{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, statefulset); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // StatefulSet doesn't exist, nothing to do
+		}
+		return fmt.Errorf("failed to get statefulset %s: %w", name, err)
+	}
+
+	// Check if already scaled down
+	if statefulset.Spec.Replicas != nil && *statefulset.Spec.Replicas == 0 {
+		return nil
+	}
+
+	// Scale down the statefulset
+	zero := int32(0)
+	statefulset.Spec.Replicas = &zero
+	if err := m.client.Update(ctx, statefulset); err != nil {
+		return fmt.Errorf("failed to scale down statefulset %s: %w", name, err)
+	}
+
+	logger.Info("Scaled down statefulset", "name", name, "namespace", namespace)
+	return nil
 }
 
-// ensureCronJobSuspended ensures a CronJob is suspended
-func (m *Manager) ensureCronJobSuspended(ctx context.Context, namespace, name string) error {
-	return m.suspendCronJob(ctx, namespace, name, true)
+// ensureCronJobSuspended suspends a cronjob
+func (m *Manager) ensureCronJobSuspended(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
+	cronjob := &batchv1.CronJob{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // CronJob doesn't exist, nothing to do
+		}
+		return fmt.Errorf("failed to get cronjob %s: %w", name, err)
+	}
+
+	// Check if already suspended
+	if cronjob.Spec.Suspend != nil && *cronjob.Spec.Suspend {
+		return nil
+	}
+
+	// Suspend the cronjob
+	suspend := true
+	cronjob.Spec.Suspend = &suspend
+	if err := m.client.Update(ctx, cronjob); err != nil {
+		return fmt.Errorf("failed to suspend cronjob %s: %w", name, err)
+	}
+
+	logger.Info("Suspended cronjob", "name", name, "namespace", namespace)
+	return nil
 }
 
-// GetWorkloadStatuses retrieves the current status of all managed workloads
-func (m *Manager) GetWorkloadStatuses(ctx context.Context, namespace string, deployments, statefulSets, cronJobs []string) []crdv1alpha1.WorkloadStatus {
-	var statuses []crdv1alpha1.WorkloadStatus
-	timestamp := time.Now().Format(time.RFC3339)
+// GetWorkloadStatuses gets the status of workloads managed by this manager
+func (m *Manager) GetWorkloadStatuses(ctx context.Context, namespace string,
+	deployments, statefulSets, cronJobs []string) []crdv1alpha1.WorkloadStatus {
 
-	// Check deployments
+	statuses := []crdv1alpha1.WorkloadStatus{}
+
+	// Process deployments
 	for _, name := range deployments {
-		status := m.getDeploymentStatus(ctx, namespace, name)
-		status.LastUpdateTime = timestamp
+		status := m.getDeploymentStatus(ctx, name, namespace)
 		statuses = append(statuses, status)
 	}
 
-	// Check statefulsets
+	// Process statefulsets
 	for _, name := range statefulSets {
-		status := m.getStatefulSetStatus(ctx, namespace, name)
-		status.LastUpdateTime = timestamp
+		status := m.getStatefulSetStatus(ctx, name, namespace)
 		statuses = append(statuses, status)
 	}
 
-	// Check cronjobs
+	// Process cronjobs
 	for _, name := range cronJobs {
-		status := m.getCronJobStatus(ctx, namespace, name)
-		status.LastUpdateTime = timestamp
+		status := m.getCronJobStatus(ctx, name, namespace)
 		statuses = append(statuses, status)
 	}
 
 	return statuses
 }
 
-// getDeploymentStatus gets the current status of a Deployment
-func (m *Manager) getDeploymentStatus(ctx context.Context, namespace, name string) crdv1alpha1.WorkloadStatus {
-	log := log.FromContext(ctx)
+// getDeploymentStatus gets the status of a deployment
+func (m *Manager) getDeploymentStatus(ctx context.Context, name, namespace string) crdv1alpha1.WorkloadStatus {
+	timestamp := time.Now().Format(time.RFC3339)
 	status := crdv1alpha1.WorkloadStatus{
-		Name: name,
-		Kind: "Deployment",
+		Name:           name,
+		Kind:           "Deployment",
+		LastUpdateTime: timestamp,
 	}
 
 	deployment := &appsv1.Deployment{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, deployment)
-	if err != nil {
-		log.Error(err, "Failed to get Deployment status", "Deployment", name)
-		status.Error = fmt.Sprintf("Failed to get status: %v", err)
-		status.State = "Unknown"
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, deployment); err != nil {
+		if apierrors.IsNotFound(err) {
+			status.State = "Not Found"
+			status.Error = "Deployment does not exist"
+		} else {
+			status.State = "Error"
+			status.Error = fmt.Sprintf("Failed to get deployment: %v", err)
+		}
 		return status
 	}
 
@@ -227,69 +277,72 @@ func (m *Manager) getDeploymentStatus(ctx context.Context, namespace, name strin
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
 		status.State = "Scaled Down"
 	} else {
-		replicas := 0
-		if deployment.Spec.Replicas != nil {
-			replicas = int(*deployment.Spec.Replicas)
-		}
-		status.State = fmt.Sprintf("Active (%d replicas)", replicas)
+		status.State = "Active"
+		status.Error = fmt.Sprintf("Deployment has %d replicas", *deployment.Spec.Replicas)
 	}
 
 	return status
 }
 
-// getStatefulSetStatus gets the current status of a StatefulSet
-func (m *Manager) getStatefulSetStatus(ctx context.Context, namespace, name string) crdv1alpha1.WorkloadStatus {
-	log := log.FromContext(ctx)
+// getStatefulSetStatus gets the status of a statefulset
+func (m *Manager) getStatefulSetStatus(ctx context.Context, name, namespace string) crdv1alpha1.WorkloadStatus {
+	timestamp := time.Now().Format(time.RFC3339)
 	status := crdv1alpha1.WorkloadStatus{
-		Name: name,
-		Kind: "StatefulSet",
+		Name:           name,
+		Kind:           "StatefulSet",
+		LastUpdateTime: timestamp,
 	}
 
-	statefulSet := &appsv1.StatefulSet{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, statefulSet)
-	if err != nil {
-		log.Error(err, "Failed to get StatefulSet status", "StatefulSet", name)
-		status.Error = fmt.Sprintf("Failed to get status: %v", err)
-		status.State = "Unknown"
+	statefulset := &appsv1.StatefulSet{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, statefulset); err != nil {
+		if apierrors.IsNotFound(err) {
+			status.State = "Not Found"
+			status.Error = "StatefulSet does not exist"
+		} else {
+			status.State = "Error"
+			status.Error = fmt.Sprintf("Failed to get statefulset: %v", err)
+		}
 		return status
 	}
 
 	// Check if scaled down
-	if statefulSet.Spec.Replicas != nil && *statefulSet.Spec.Replicas == 0 {
+	if statefulset.Spec.Replicas != nil && *statefulset.Spec.Replicas == 0 {
 		status.State = "Scaled Down"
 	} else {
-		replicas := 0
-		if statefulSet.Spec.Replicas != nil {
-			replicas = int(*statefulSet.Spec.Replicas)
-		}
-		status.State = fmt.Sprintf("Active (%d replicas)", replicas)
+		status.State = "Active"
+		status.Error = fmt.Sprintf("StatefulSet has %d replicas", *statefulset.Spec.Replicas)
 	}
 
 	return status
 }
 
-// getCronJobStatus gets the current status of a CronJob
-func (m *Manager) getCronJobStatus(ctx context.Context, namespace, name string) crdv1alpha1.WorkloadStatus {
-	log := log.FromContext(ctx)
+// getCronJobStatus gets the status of a cronjob
+func (m *Manager) getCronJobStatus(ctx context.Context, name, namespace string) crdv1alpha1.WorkloadStatus {
+	timestamp := time.Now().Format(time.RFC3339)
 	status := crdv1alpha1.WorkloadStatus{
-		Name: name,
-		Kind: "CronJob",
+		Name:           name,
+		Kind:           "CronJob",
+		LastUpdateTime: timestamp,
 	}
 
-	cronJob := &batchv1.CronJob{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronJob)
-	if err != nil {
-		log.Error(err, "Failed to get CronJob status", "CronJob", name)
-		status.Error = fmt.Sprintf("Failed to get status: %v", err)
-		status.State = "Unknown"
+	cronjob := &batchv1.CronJob{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
+		if apierrors.IsNotFound(err) {
+			status.State = "Not Found"
+			status.Error = "CronJob does not exist"
+		} else {
+			status.State = "Error"
+			status.Error = fmt.Sprintf("Failed to get cronjob: %v", err)
+		}
 		return status
 	}
 
 	// Check if suspended
-	if cronJob.Spec.Suspend != nil && *cronJob.Spec.Suspend {
+	if cronjob.Spec.Suspend != nil && *cronjob.Spec.Suspend {
 		status.State = "Suspended"
 	} else {
 		status.State = "Active"
+		status.Error = "CronJob is not suspended"
 	}
 
 	return status

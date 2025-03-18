@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -11,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/flux"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/workload"
 )
 
@@ -82,9 +84,9 @@ func (m *Manager) updateVolumeReplicationStatus(ctx context.Context, policy *crd
 	}
 
 	// For each volume replication, add a status entry
-	for _, volRepName := range policy.Spec.VolumeReplications {
+	for _, volRep := range policy.Spec.VolumeReplications {
 		status := crdv1alpha1.VolumeReplicationStatus{
-			Name:           volRepName,
+			Name:           volRep.Name,
 			LastUpdateTime: time.Now().Format(time.RFC3339),
 		}
 
@@ -106,55 +108,201 @@ func (m *Manager) updateVolumeReplicationStatus(ctx context.Context, policy *crd
 	return nil
 }
 
-// updateWorkloadStatus updates the status for workloads (deployments, statefulsets, cronjobs)
+// updateWorkloadStatus updates the status for workloads (deployments, statefulsets, cronjobs, flux resources)
 func (m *Manager) updateWorkloadStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) error {
-	deployments := policy.Spec.Deployments
-	statefulsets := policy.Spec.StatefulSets
-	cronjobs := policy.Spec.CronJobs
+	// Group resources by type for both legacy fields and the new managedResources field
+	resourcesByType := groupResourcesByType(policy)
 
-	// If no workloads defined, update status accordingly
-	if len(deployments) == 0 && len(statefulsets) == 0 && len(cronjobs) == 0 {
-		policy.Status.WorkloadStatus = "No workloads defined"
+	// Get resource counts
+	deploymentCount := len(resourcesByType.deployments)
+	statefulsetCount := len(resourcesByType.statefulSets)
+	cronjobCount := len(resourcesByType.cronJobs)
+	fluxCount := len(resourcesByType.helmReleases) + len(resourcesByType.kustomizations)
+
+	// If no workloads or flux resources defined, update status accordingly
+	if deploymentCount == 0 && statefulsetCount == 0 && cronjobCount == 0 && fluxCount == 0 {
+		policy.Status.WorkloadStatus = "No resources defined"
 		policy.Status.WorkloadStatuses = nil
 		return nil
 	}
 
-	// Get detailed workload statuses
-	workloadMgr := workload.NewManager(m.client)
-	workloadStatuses := workloadMgr.GetWorkloadStatuses(ctx, policy.Namespace, deployments, statefulsets, cronjobs)
-	policy.Status.WorkloadStatuses = workloadStatuses
-
-	totalWorkloads := len(deployments) + len(statefulsets) + len(cronjobs)
-
+	// Handle primary or secondary mode differently
 	switch policy.Spec.DesiredState {
 	case "primary":
-		policy.Status.WorkloadStatus = fmt.Sprintf("%d workload(s) managed by Flux", totalWorkloads)
-	case "secondary":
-		scaledDownCount := 0
-		suspendedCount := 0
+		// In primary mode, clear detailed workload statuses and just show summary
+		totalWorkloads := deploymentCount + statefulsetCount + cronjobCount
 
-		for _, status := range workloadStatuses {
-			if status.Kind == "Deployment" || status.Kind == "StatefulSet" {
+		var parts []string
+		if totalWorkloads > 0 {
+			parts = append(parts, fmt.Sprintf("%d workload(s) managed by Flux", totalWorkloads))
+		}
+
+		if fluxCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d Flux resource(s) active", fluxCount))
+		}
+
+		policy.Status.WorkloadStatus = strings.Join(parts, ", ")
+		policy.Status.WorkloadStatuses = nil // Clear detailed statuses in primary mode
+
+	case "secondary":
+		// In secondary mode, collect detailed workload statuses
+		var allStatuses []crdv1alpha1.WorkloadStatus
+
+		// Get Kubernetes workload statuses if defined
+		if deploymentCount > 0 || statefulsetCount > 0 || cronjobCount > 0 {
+			// Convert to name-only lists for backward compatibility with workload manager
+			deploymentNames := getResourceNames(resourcesByType.deployments)
+			statefulsetNames := getResourceNames(resourcesByType.statefulSets)
+			cronjobNames := getResourceNames(resourcesByType.cronJobs)
+
+			workloadMgr := workload.NewManager(m.client)
+			k8sStatuses := workloadMgr.GetWorkloadStatuses(ctx, policy.Namespace,
+				deploymentNames, statefulsetNames, cronjobNames)
+			allStatuses = append(allStatuses, k8sStatuses...)
+		}
+
+		// Get Flux resource statuses if defined
+		if fluxCount > 0 {
+			fluxMgr := flux.NewManager(m.client)
+			fluxStatuses := fluxMgr.GetFluxStatuses(ctx,
+				resourcesByType.helmReleases, resourcesByType.kustomizations, policy.Namespace)
+			allStatuses = append(allStatuses, fluxStatuses...)
+		}
+
+		// Update the status with the combined workload statuses
+		policy.Status.WorkloadStatuses = allStatuses
+
+		// Calculate summary statistics
+		scaledDownCount := 0
+		suspendedCronJobCount := 0
+		suspendedFluxCount := 0
+
+		for _, status := range allStatuses {
+			switch status.Kind {
+			case "Deployment", "StatefulSet":
 				if status.State == "Scaled Down" {
 					scaledDownCount++
 				}
-			} else if status.Kind == "CronJob" {
+			case "CronJob":
 				if status.State == "Suspended" {
-					suspendedCount++
+					suspendedCronJobCount++
+				}
+			case "HelmRelease", "Kustomization":
+				if status.State == "Suspended" {
+					suspendedFluxCount++
 				}
 			}
 		}
 
-		policy.Status.WorkloadStatus = fmt.Sprintf("%d/%d scaled down, %d/%d suspended",
-			scaledDownCount,
-			len(deployments)+len(statefulsets),
-			suspendedCount,
-			len(cronjobs))
+		// Create the status message parts
+		var parts []string
+
+		if deploymentCount+statefulsetCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d/%d scaled down",
+				scaledDownCount, deploymentCount+statefulsetCount))
+		}
+
+		if cronjobCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d/%d suspended",
+				suspendedCronJobCount, cronjobCount))
+		}
+
+		if fluxCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d/%d Flux resources suspended",
+				suspendedFluxCount, fluxCount))
+		}
+
+		policy.Status.WorkloadStatus = strings.Join(parts, ", ")
+
 	default:
-		policy.Status.WorkloadStatus = "Workload state unknown"
+		policy.Status.WorkloadStatus = "Resource state unknown"
 	}
 
 	return nil
+}
+
+// ResourcesByType holds references to resources grouped by their type
+type ResourcesByType struct {
+	volumeReplications []crdv1alpha1.ResourceReference
+	virtualServices    []crdv1alpha1.ResourceReference
+	deployments        []crdv1alpha1.ResourceReference
+	statefulSets       []crdv1alpha1.ResourceReference
+	cronJobs           []crdv1alpha1.ResourceReference
+	helmReleases       []crdv1alpha1.ResourceReference
+	kustomizations     []crdv1alpha1.ResourceReference
+}
+
+// groupResourcesByType organizes resources from managedResources by their type
+// It also handles legacy resource references for backward compatibility
+func groupResourcesByType(policy *crdv1alpha1.FailoverPolicy) ResourcesByType {
+	result := ResourcesByType{
+		volumeReplications: make([]crdv1alpha1.ResourceReference, 0),
+		virtualServices:    make([]crdv1alpha1.ResourceReference, 0),
+		deployments:        make([]crdv1alpha1.ResourceReference, 0),
+		statefulSets:       make([]crdv1alpha1.ResourceReference, 0),
+		cronJobs:           make([]crdv1alpha1.ResourceReference, 0),
+		helmReleases:       make([]crdv1alpha1.ResourceReference, 0),
+		kustomizations:     make([]crdv1alpha1.ResourceReference, 0),
+	}
+
+	// Add resources from managedResources field
+	for _, resource := range policy.Spec.ManagedResources {
+		ref := crdv1alpha1.ResourceReference{
+			Name:      resource.Name,
+			Namespace: resource.Namespace,
+		}
+
+		switch resource.Kind {
+		case "VolumeReplication":
+			result.volumeReplications = append(result.volumeReplications, ref)
+		case "VirtualService":
+			result.virtualServices = append(result.virtualServices, ref)
+		case "Deployment":
+			result.deployments = append(result.deployments, ref)
+		case "StatefulSet":
+			result.statefulSets = append(result.statefulSets, ref)
+		case "CronJob":
+			result.cronJobs = append(result.cronJobs, ref)
+		case "HelmRelease":
+			result.helmReleases = append(result.helmReleases, ref)
+		case "Kustomization":
+			result.kustomizations = append(result.kustomizations, ref)
+		}
+	}
+
+	// Handle legacy resource references for backward compatibility
+	for _, vr := range policy.Spec.VolumeReplications {
+		result.volumeReplications = append(result.volumeReplications, vr)
+	}
+	for _, vs := range policy.Spec.VirtualServices {
+		result.virtualServices = append(result.virtualServices, vs)
+	}
+	for _, deploy := range policy.Spec.Deployments {
+		result.deployments = append(result.deployments, deploy)
+	}
+	for _, sts := range policy.Spec.StatefulSets {
+		result.statefulSets = append(result.statefulSets, sts)
+	}
+	for _, cj := range policy.Spec.CronJobs {
+		result.cronJobs = append(result.cronJobs, cj)
+	}
+	for _, hr := range policy.Spec.HelmReleases {
+		result.helmReleases = append(result.helmReleases, hr)
+	}
+	for _, k := range policy.Spec.Kustomizations {
+		result.kustomizations = append(result.kustomizations, k)
+	}
+
+	return result
+}
+
+// getResourceNames extracts names from a slice of ResourceReference
+func getResourceNames(refs []crdv1alpha1.ResourceReference) []string {
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = ref.Name
+	}
+	return names
 }
 
 // UpdateFailoverStatus updates the status of a FailoverPolicy

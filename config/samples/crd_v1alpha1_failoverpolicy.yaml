@@ -4,19 +4,26 @@ metadata:
   labels:
     app.kubernetes.io/name: failover-operator
     app.kubernetes.io/managed-by: kustomize
-  name: wordpress
-  namespace: wordpress
+  name: kyverno
+  namespace: kyverno
 spec:
   desiredState: "primary"
   mode: "safe"
-  virtualServices: 
-    - "wordpress"
-  volumeReplications:
-    - data-wordpress-mariadb-0
-    - wordpress
-  deployments:
-    - wordpress
-  statefulSets:
-    - wordpress-mariadb
-  cronJobs:
-    - wordpress-backup
+  managedResources:
+    - kind: Deployment
+      name: kyverno-admission-controller
+    - kind: Deployment
+      name: kyverno-background-controller
+    - kind: Deployment
+      name: kyverno-cleanup-controller
+    - kind: Deployment
+      name: kyverno-reports-controller
+    - kind: CronJob
+      name: kyverno-cleanup-admission-reports
+    - kind: CronJob
+      name: kyverno-cleanup-cluster-admission-reports
+    - kind: HelmRelease
+      name: kyverno
+    - kind: Kustomization
+      name: infra-policies-stage-1
+      namespace: flux-system

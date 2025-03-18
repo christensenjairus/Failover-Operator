@@ -20,6 +20,132 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
+// Deprecated: Use ManagedResource instead
+type ResourceReference struct {
+	// Name of the resource
+	Name string `json:"name"`
+
+	// Namespace of the resource (optional)
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// SupportedResourceKind represents a supported resource kind and its associated API group
+type SupportedResourceKind struct {
+	// Kind is the resource kind
+	Kind string
+	// APIGroup is the resource API group (without version)
+	APIGroup string
+	// DefaultAPIGroup is used when APIGroup is omitted
+	DefaultAPIGroup string
+}
+
+// Define supported resource kinds as constants
+// Note: These constants help maintain a single source of truth for supported resources
+var (
+	// VolumeReplicationKind represents VolumeReplication resources
+	VolumeReplicationKind = SupportedResourceKind{
+		Kind:            "VolumeReplication",
+		APIGroup:        "replication.storage.openshift.io",
+		DefaultAPIGroup: "replication.storage.openshift.io",
+	}
+
+	// DeploymentKind represents Deployment resources
+	DeploymentKind = SupportedResourceKind{
+		Kind:            "Deployment",
+		APIGroup:        "apps",
+		DefaultAPIGroup: "apps",
+	}
+
+	// StatefulSetKind represents StatefulSet resources
+	StatefulSetKind = SupportedResourceKind{
+		Kind:            "StatefulSet",
+		APIGroup:        "apps",
+		DefaultAPIGroup: "apps",
+	}
+
+	// CronJobKind represents CronJob resources
+	CronJobKind = SupportedResourceKind{
+		Kind:            "CronJob",
+		APIGroup:        "batch",
+		DefaultAPIGroup: "batch",
+	}
+
+	// VirtualServiceKind represents VirtualService resources
+	VirtualServiceKind = SupportedResourceKind{
+		Kind:            "VirtualService",
+		APIGroup:        "networking.istio.io",
+		DefaultAPIGroup: "networking.istio.io",
+	}
+
+	// HelmReleaseKind represents HelmRelease resources
+	HelmReleaseKind = SupportedResourceKind{
+		Kind:            "HelmRelease",
+		APIGroup:        "helm.toolkit.fluxcd.io",
+		DefaultAPIGroup: "helm.toolkit.fluxcd.io",
+	}
+
+	// KustomizationKind represents Kustomization resources
+	KustomizationKind = SupportedResourceKind{
+		Kind:            "Kustomization",
+		APIGroup:        "kustomize.toolkit.fluxcd.io",
+		DefaultAPIGroup: "kustomize.toolkit.fluxcd.io",
+	}
+)
+
+// AllSupportedResourceKinds defines all resource kinds supported by the operator
+var AllSupportedResourceKinds = []SupportedResourceKind{
+	VolumeReplicationKind,
+	DeploymentKind,
+	StatefulSetKind,
+	CronJobKind,
+	VirtualServiceKind,
+	HelmReleaseKind,
+	KustomizationKind,
+}
+
+// GetSupportedKinds returns a list of all supported resource kinds
+func GetSupportedKinds() []string {
+	kinds := make([]string, len(AllSupportedResourceKinds))
+	for i, k := range AllSupportedResourceKinds {
+		kinds[i] = k.Kind
+	}
+	return kinds
+}
+
+// GetSupportedAPIGroups returns a list of all supported API groups
+func GetSupportedAPIGroups() []string {
+	groups := make([]string, len(AllSupportedResourceKinds))
+	for i, k := range AllSupportedResourceKinds {
+		groups[i] = k.APIGroup
+	}
+	return groups
+}
+
+// ManagedResource defines a resource managed by the failover operator
+type ManagedResource struct {
+	// Name of the resource
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Namespace of the resource
+	// If not provided, the FailoverPolicy's namespace will be used
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Kind specifies the type of resource (e.g., Deployment, StatefulSet, CronJob)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=VolumeReplication;Deployment;StatefulSet;CronJob;VirtualService;HelmRelease;Kustomization
+	Kind string `json:"kind"`
+
+	// APIGroup specifies the Kubernetes API group for this resource
+	// If not provided, the default API group for the specified Kind will be used
+	// +optional
+	// +kubebuilder:validation:Enum=replication.storage.openshift.io;apps;batch;networking.istio.io;helm.toolkit.fluxcd.io;kustomize.toolkit.fluxcd.io
+	APIGroup string `json:"apiGroup,omitempty"`
+}
+
 // FailoverPolicySpec defines the desired state of FailoverPolicy
 type FailoverPolicySpec struct {
 	// DesiredState represents the intended failover state ("primary" or "secondary").
@@ -31,25 +157,49 @@ type FailoverPolicySpec struct {
 	// +kubebuilder:validation:Enum=safe;unsafe
 	Mode string `json:"mode"`
 
-	// VolumeReplications is a list of VolumeReplication objects to manage in this failover policy.
+	// ManagedResources is a list of resources to be managed by this failover policy.
+	// When in secondary mode, the operator will:
+	// - Scale Deployments and StatefulSets to 0 replicas
+	// - Suspend CronJobs
+	// - Suspend Flux HelmReleases and Kustomizations
+	// - Set VolumeReplications to secondary-ro mode
 	// +kubebuilder:validation:MinItems=1
-	VolumeReplications []string `json:"volumeReplications"`
+	ManagedResources []ManagedResource `json:"managedResources"`
+
+	// VolumeReplications is a list of VolumeReplication objects to manage in this failover policy.
+	// Deprecated: Use managedResources instead
+	// +optional
+	VolumeReplications []ResourceReference `json:"volumeReplications,omitempty"`
 
 	// VirtualServices is a list of VirtualService objects to update during failover.
-	// +kubebuilder:validation:MinItems=1
-	VirtualServices []string `json:"virtualServices"`
+	// Deprecated: Use managedResources instead
+	// +optional
+	VirtualServices []ResourceReference `json:"virtualServices,omitempty"`
 
 	// Deployments is a list of Deployment objects to scale down to 0 replicas when in secondary mode.
+	// Deprecated: Use managedResources instead
 	// +optional
-	Deployments []string `json:"deployments,omitempty"`
+	Deployments []ResourceReference `json:"deployments,omitempty"`
 
 	// StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in secondary mode.
+	// Deprecated: Use managedResources instead
 	// +optional
-	StatefulSets []string `json:"statefulSets,omitempty"`
+	StatefulSets []ResourceReference `json:"statefulSets,omitempty"`
 
 	// CronJobs is a list of CronJob objects to suspend when in secondary mode.
+	// Deprecated: Use managedResources instead
 	// +optional
-	CronJobs []string `json:"cronJobs,omitempty"`
+	CronJobs []ResourceReference `json:"cronJobs,omitempty"`
+
+	// HelmReleases is a list of Flux HelmRelease objects to suspend when in secondary mode.
+	// Deprecated: Use managedResources instead
+	// +optional
+	HelmReleases []ResourceReference `json:"helmReleases,omitempty"`
+
+	// Kustomizations is a list of Flux Kustomization objects to suspend when in secondary mode.
+	// Deprecated: Use managedResources instead
+	// +optional
+	Kustomizations []ResourceReference `json:"kustomizations,omitempty"`
 }
 
 // VolumeReplicationStatus defines the status of a VolumeReplication

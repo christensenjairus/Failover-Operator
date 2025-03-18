@@ -1,6 +1,112 @@
-# Failover-Operator
+# Failover Operator
 
-The Failover-Operator manages the failover of VolumeReplications and VirtualServices in Kubernetes. It provides a custom resource `FailoverPolicy` that coordinates cross-cluster failover operations.
+A Kubernetes operator for managing site failover with volume replication and workload management.
+
+## Overview
+
+The Failover Operator manages site failovers by:
+
+1. Coordinating the failover of volume replications
+2. Managing workloads (Deployments, StatefulSets, CronJobs)
+3. Managing Flux resources (HelmReleases, Kustomizations)
+4. Updating Istio VirtualServices
+
+## Custom Resource Definition
+
+The operator uses a Custom Resource Definition (CRD) called `FailoverPolicy` to define the resources and behavior during failover.
+
+Example:
+
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: FailoverPolicy
+metadata:
+  name: failoverpolicy-sample
+spec:
+  # Determine the intended state - "primary" or "secondary"
+  desiredState: primary
+  
+  # Determine the failover approach - "safe" or "unsafe"
+  mode: safe
+  
+  # Define all managed resources in a single list
+  managedResources:
+    # Volume replications
+    - kind: VolumeReplication
+      name: volume-replication-1
+    - kind: VolumeReplication
+      name: volume-replication-2
+      namespace: different-namespace
+    
+    # Kubernetes workloads
+    - kind: Deployment
+      name: web-frontend
+    - kind: Deployment
+      name: api-server
+      namespace: api
+    - kind: StatefulSet
+      name: database
+    - kind: CronJob
+      name: backup-job
+    
+    # Flux resources
+    - kind: HelmRelease
+      name: ingress-nginx
+      namespace: ingress-nginx
+    - kind: Kustomization
+      name: core-services
+      namespace: flux-system
+    
+    # Istio resources
+    - kind: VirtualService
+      name: web-virtualservice
+```
+
+### Resource Management Behavior
+
+When a `FailoverPolicy` is in **primary** mode:
+- VolumeReplications are set to `primary` mode
+- Deployments, StatefulSets, CronJobs are managed by Flux
+- Flux resources (HelmReleases, Kustomizations) are active
+- VirtualServices are updated to route traffic to this site
+
+When a `FailoverPolicy` is in **secondary** mode:
+- VolumeReplications are set to `secondary-ro` mode
+- Deployments and StatefulSets are scaled down to 0 replicas
+- CronJobs are suspended
+- Flux resources are suspended
+- VirtualServices are updated to stop routing traffic to this site
+
+### Resource References
+
+Each resource in `managedResources` is defined with:
+- `kind`: The type of resource (required)
+- `name`: The name of the resource (required)
+- `namespace`: The namespace of the resource (optional, defaults to the FailoverPolicy's namespace)
+- `apiGroup`: The API group of the resource (optional, inferred from kind if not specified)
+
+## Installation
+
+```bash
+# Apply the CRD
+kubectl apply -f config/crd/bases/crd.hahomelabs.com_failoverpolicies.yaml
+
+# Deploy the operator
+make deploy
+```
+
+## Development
+
+```bash
+# Generate manifests and code
+make generate manifests
+
+# Build the operator
+make build
+
+# Run the operator locally
+make run
+```
 
 ## Description
 

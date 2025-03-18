@@ -18,11 +18,13 @@ import (
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/flux"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/status"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/virtualservice"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/volumereplication"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/workload"
 	replicationv1alpha1 "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // Deprecated: Use RegisterSchemes from setup.go instead
@@ -72,56 +74,221 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	vrManager := volumereplication.NewManager(r.Client)
 	workloadManager := workload.NewManager(r.Client)
 	fluxManager := flux.NewManager(r.Client)
+	vsManager := virtualservice.NewManager(r.Client)
 	statusManager := status.NewManager(r.Client, vrManager)
 
 	// Group resources by type
 	resourcesByType := groupResourcesByType(failoverPolicy)
 
-	// Process VolumeReplications
-	vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
-	for _, vr := range resourcesByType.volumeReplications {
-		vrNames = append(vrNames, vr.Name)
-	}
+	// Different sequencing based on desired state
+	if failoverPolicy.Spec.DesiredState == "secondary" {
+		// For secondary mode: Flux first, then VirtualServices/CronJobs, then other workloads, then VolumeReplications
 
-	pendingUpdates, failoverError, failoverErrorMessage := vrManager.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState, failoverPolicy.Spec.Mode)
-	if failoverError {
-		log.Error(nil, "Failed to process volume replications", "error", failoverErrorMessage)
-		statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, failoverError, failoverErrorMessage)
-		if statusErr != nil {
-			log.Error(statusErr, "Failed to update status after volume replication error")
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
-	// Process workloads if defined
-	err = workloadManager.ProcessWorkloads(ctx,
-		getResourceNames(resourcesByType.deployments),
-		getResourceNames(resourcesByType.statefulSets),
-		getResourceNames(resourcesByType.cronJobs),
-		failoverPolicy.Namespace,
-		failoverPolicy.Spec.DesiredState)
-	if err != nil {
-		log.Error(err, "Failed to process workloads")
-		statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process workloads: %v", err))
-		if statusErr != nil {
-			log.Error(statusErr, "Failed to update status after workload error")
-		}
-		return ctrl.Result{}, err
-	}
-
-	// Process Flux resources if any are defined
-	if len(resourcesByType.helmReleases) > 0 || len(resourcesByType.kustomizations) > 0 {
-		if err := fluxManager.ProcessFluxResources(ctx,
-			resourcesByType.helmReleases,
-			resourcesByType.kustomizations,
-			failoverPolicy.Namespace,
-			failoverPolicy.Spec.DesiredState); err != nil {
-			log.Error(err, "Failed to process Flux resources")
-			statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process Flux resources: %v", err))
-			if statusErr != nil {
-				log.Error(statusErr, "Failed to update status after Flux error")
+		// 1. First suspend Flux resources if any are defined (first to suspend)
+		if len(resourcesByType.helmReleases) > 0 || len(resourcesByType.kustomizations) > 0 {
+			log.Info("Suspending Flux resources first")
+			if err := fluxManager.ProcessFluxResources(ctx,
+				resourcesByType.helmReleases,
+				resourcesByType.kustomizations,
+				failoverPolicy.Namespace,
+				failoverPolicy.Spec.DesiredState); err != nil {
+				log.Error(err, "Failed to process Flux resources")
+				statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process Flux resources: %v", err))
+				if statusErr != nil {
+					log.Error(statusErr, "Failed to update status after Flux error")
+				}
+				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, err
+		}
+
+		// 2. Immediately process VirtualServices (these need to change quickly)
+		if len(resourcesByType.virtualServices) > 0 {
+			vsNames := getResourceNames(resourcesByType.virtualServices)
+			log.Info("Processing VirtualServices immediately", "count", len(vsNames))
+			vsManager.ProcessVirtualServices(ctx, failoverPolicy.Namespace, vsNames, failoverPolicy.Spec.DesiredState)
+		}
+
+		// 3. Process CronJobs immediately (these can be handled quickly)
+		cronJobNames := getResourceNames(resourcesByType.cronJobs)
+		if len(cronJobNames) > 0 {
+			log.Info("Processing CronJobs immediately", "count", len(cronJobNames))
+			err = workloadManager.ProcessCronJobs(ctx, cronJobNames, failoverPolicy.Namespace, failoverPolicy.Spec.DesiredState)
+			if err != nil {
+				log.Error(err, "Failed to process CronJobs")
+				statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process CronJobs: %v", err))
+				if statusErr != nil {
+					log.Error(statusErr, "Failed to update status after CronJob error")
+				}
+				return ctrl.Result{}, err
+			}
+		}
+
+		// 4. Process Deployments and StatefulSets
+		deploymentNames := getResourceNames(resourcesByType.deployments)
+		statefulSetNames := getResourceNames(resourcesByType.statefulSets)
+		if len(deploymentNames) > 0 || len(statefulSetNames) > 0 {
+			log.Info("Processing Deployments and StatefulSets", "deployments", len(deploymentNames), "statefulSets", len(statefulSetNames))
+			err = workloadManager.ProcessDeploymentsAndStatefulSets(ctx, deploymentNames, statefulSetNames, failoverPolicy.Namespace, failoverPolicy.Spec.DesiredState)
+			if err != nil {
+				log.Error(err, "Failed to process Deployments and StatefulSets")
+				statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process workloads: %v", err))
+				if statusErr != nil {
+					log.Error(statusErr, "Failed to update status after workload error")
+				}
+				return ctrl.Result{}, err
+			}
+		}
+
+		// 5. Check if all workloads are fully scaled down before proceeding with VolumeReplications
+		allWorkloadsReady := true
+
+		// Update status to get current workload states
+		if err := statusManager.UpdateStatus(ctx, failoverPolicy); err != nil {
+			log.Error(err, "Failed to update status")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+		}
+
+		// Check workload statuses
+		log.Info("Checking if all workloads are fully scaled down before processing VolumeReplications")
+		if len(failoverPolicy.Status.WorkloadStatuses) > 0 {
+			for _, status := range failoverPolicy.Status.WorkloadStatuses {
+				if status.Kind == "Deployment" || status.Kind == "StatefulSet" {
+					if status.State == "Scaling Down" {
+						log.Info("Workload is still scaling down",
+							"Kind", status.Kind,
+							"Name", status.Name,
+							"CurrentState", status.State,
+							"Details", status.Error)
+						allWorkloadsReady = false
+					} else if status.State != "Scaled Down" && status.State != "Not Found" {
+						log.Info("Workload is not scaled down",
+							"Kind", status.Kind,
+							"Name", status.Name,
+							"CurrentState", status.State)
+						allWorkloadsReady = false
+					} else {
+						log.Info("Workload is fully scaled down",
+							"Kind", status.Kind,
+							"Name", status.Name,
+							"CurrentState", status.State)
+					}
+				} else if status.Kind == "CronJob" && status.State != "Suspended" {
+					log.Info("Waiting for CronJob to be suspended",
+						"Name", status.Name,
+						"CurrentState", status.State)
+					allWorkloadsReady = false
+				} else if (status.Kind == "HelmRelease" || status.Kind == "Kustomization") && status.State != "Suspended" {
+					log.Info("Waiting for Flux resource to be suspended",
+						"Kind", status.Kind,
+						"Name", status.Name,
+						"CurrentState", status.State)
+					allWorkloadsReady = false
+				}
+			}
+		}
+
+		// If workloads are not ready yet, requeue and wait
+		if !allWorkloadsReady {
+			log.Info("Some workloads are still shutting down, waiting before processing VolumeReplications")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		log.Info("All workloads are fully scaled down and terminated")
+
+		// 6. Once workloads are scaled down, process VolumeReplications last
+		vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
+		for _, vr := range resourcesByType.volumeReplications {
+			vrNames = append(vrNames, vr.Name)
+		}
+
+		log.Info("All workloads are fully terminated, now processing VolumeReplications",
+			"count", len(vrNames),
+			"names", vrNames)
+		failoverError, failoverErrorMessage := vrManager.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState, failoverPolicy.Spec.Mode)
+		if failoverError {
+			log.Error(nil, "Failed to process volume replications", "error", failoverErrorMessage)
+			statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, failoverError, failoverErrorMessage)
+			if statusErr != nil {
+				log.Error(statusErr, "Failed to update status after volume replication error")
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	} else {
+		// For primary mode: VR first, then VirtualServices/CronJobs, then wait for VR to be fully primary, then Flux last
+
+		// 1. Process VolumeReplications first
+		vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
+		for _, vr := range resourcesByType.volumeReplications {
+			vrNames = append(vrNames, vr.Name)
+		}
+
+		log.Info("Processing VolumeReplications first")
+		failoverError, failoverErrorMessage := vrManager.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState, failoverPolicy.Spec.Mode)
+		if failoverError {
+			log.Error(nil, "Failed to process volume replications", "error", failoverErrorMessage)
+			statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, failoverError, failoverErrorMessage)
+			if statusErr != nil {
+				log.Error(statusErr, "Failed to update status after volume replication error")
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// 2. Process VirtualServices immediately
+		if len(resourcesByType.virtualServices) > 0 {
+			vsNames := getResourceNames(resourcesByType.virtualServices)
+			log.Info("Processing VirtualServices immediately", "count", len(vsNames))
+			vsManager.ProcessVirtualServices(ctx, failoverPolicy.Namespace, vsNames, failoverPolicy.Spec.DesiredState)
+		}
+
+		// 3. Process CronJobs immediately
+		cronJobNames := getResourceNames(resourcesByType.cronJobs)
+		if len(cronJobNames) > 0 {
+			log.Info("Processing CronJobs immediately", "count", len(cronJobNames))
+			err = workloadManager.ProcessCronJobs(ctx, cronJobNames, failoverPolicy.Namespace, failoverPolicy.Spec.DesiredState)
+			if err != nil {
+				log.Error(err, "Failed to process CronJobs")
+				statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process CronJobs: %v", err))
+				if statusErr != nil {
+					log.Error(statusErr, "Failed to update status after CronJob error")
+				}
+				return ctrl.Result{}, err
+			}
+		}
+
+		// 4. Wait for all VolumeReplications to reach PRIMARY state before resuming Flux
+		if len(vrNames) > 0 && (len(resourcesByType.helmReleases) > 0 || len(resourcesByType.kustomizations) > 0) {
+			// Update status to get current VR states
+			if err := statusManager.UpdateStatus(ctx, failoverPolicy); err != nil {
+				log.Error(err, "Failed to update status")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			}
+
+			log.Info("Checking if all VolumeReplications have reached PRIMARY state before resuming Flux")
+			allVolumesReady, message := vrManager.AreAllVolumesInDesiredState(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState)
+
+			if !allVolumesReady {
+				log.Info("Waiting for VolumeReplications to reach PRIMARY state before resuming Flux", "message", message)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+
+			log.Info("All VolumeReplications have reached PRIMARY state, proceeding to resume Flux")
+		}
+
+		// 5. Process Flux resources last (Flux will handle scaling up the workloads)
+		if len(resourcesByType.helmReleases) > 0 || len(resourcesByType.kustomizations) > 0 {
+			log.Info("Resuming Flux resources last (Flux will handle scaling up workloads)")
+			if err := fluxManager.ProcessFluxResources(ctx,
+				resourcesByType.helmReleases,
+				resourcesByType.kustomizations,
+				failoverPolicy.Namespace,
+				failoverPolicy.Spec.DesiredState); err != nil {
+				log.Error(err, "Failed to process Flux resources")
+				statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, true, fmt.Sprintf("Failed to process Flux resources: %v", err))
+				if statusErr != nil {
+					log.Error(statusErr, "Failed to update status after Flux error")
+				}
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -129,19 +296,6 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := statusManager.UpdateStatus(ctx, failoverPolicy); err != nil {
 		log.Error(err, "Failed to update status")
 		return ctrl.Result{}, err
-	}
-
-	// If there are pending volume replication updates, requeue sooner
-	if pendingUpdates > 0 {
-		log.Info("Volume replication updates pending, requeueing", "pendingUpdates", pendingUpdates)
-		failoverPolicy.Status.PendingVolumeReplicationUpdates = pendingUpdates
-
-		if err := r.Status().Update(ctx, failoverPolicy); err != nil {
-			log.Error(err, "Failed to update pending updates count in status")
-			return ctrl.Result{}, err
-		}
-
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Update status to indicate successful reconciliation
@@ -394,6 +548,54 @@ func (r *FailoverPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return requests
 	})
 
+	// Create a watch handler function for VirtualService resources
+	vsMapFunc := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		// Find all FailoverPolicies in the same namespace
+		failoverPolicies := &crdv1alpha1.FailoverPolicyList{}
+		if err := r.List(context.Background(), failoverPolicies, client.InNamespace(obj.GetNamespace())); err != nil {
+			return nil
+		}
+
+		var requests []reconcile.Request
+		objName := obj.GetName()
+
+		for _, policy := range failoverPolicies.Items {
+			shouldEnqueue := false
+
+			// Check managedResources field first
+			for _, resource := range policy.Spec.ManagedResources {
+				if resource.Kind == "VirtualService" && resource.Name == objName {
+					// Check namespace if specified
+					if resource.Namespace != "" && resource.Namespace != obj.GetNamespace() {
+						continue // Skip if namespace doesn't match
+					}
+					shouldEnqueue = true
+					break
+				}
+			}
+
+			// For backward compatibility, check legacy field too
+			if !shouldEnqueue {
+				for _, vsRef := range policy.Spec.VirtualServices {
+					if vsRef.Name == objName {
+						shouldEnqueue = true
+						break
+					}
+				}
+			}
+
+			if shouldEnqueue {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      policy.Name,
+						Namespace: policy.Namespace,
+					},
+				})
+			}
+		}
+		return requests
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&crdv1alpha1.FailoverPolicy{}).
 		Owns(&replicationv1alpha1.VolumeReplication{}).
@@ -412,6 +614,16 @@ func (r *FailoverPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&batchv1.CronJob{},
 			workloadMapFunc,
+		).
+		// Add watch for VirtualService resources
+		Watches(
+			&unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "networking.istio.io/v1",
+					"kind":       "VirtualService",
+				},
+			},
+			vsMapFunc,
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
 		Complete(r)

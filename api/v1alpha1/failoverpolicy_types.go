@@ -234,10 +234,6 @@ type FailoverPolicyStatus struct {
 	// CurrentState reflects the actual failover state ("primary" or "secondary") of the system.
 	CurrentState string `json:"currentState,omitempty"`
 
-	// PendingVolumeReplicationUpdates represents the number of VolumeReplication objects
-	// that still need to be updated to match the desired failover state.
-	PendingVolumeReplicationUpdates int `json:"pendingVolumeReplicationUpdates,omitempty"`
-
 	// Conditions represent the current state of failover reconciliation.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

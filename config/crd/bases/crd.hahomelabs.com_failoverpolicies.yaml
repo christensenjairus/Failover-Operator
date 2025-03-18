@@ -306,11 +306,6 @@ spec:
                 description: CurrentState reflects the actual failover state ("primary"
                   or "secondary") of the system.
                 type: string
-              pendingVolumeReplicationUpdates:
-                description: |-
-                  PendingVolumeReplicationUpdates represents the number of VolumeReplication objects
-                  that still need to be updated to match the desired failover state.
-                type: integer
               volumeReplicationStatuses:
                 description: VolumeReplicationStatuses contains status information
                   for VolumeReplications

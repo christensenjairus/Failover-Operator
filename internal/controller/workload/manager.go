@@ -273,9 +273,22 @@ func (m *Manager) getDeploymentStatus(ctx context.Context, name, namespace strin
 		return status
 	}
 
-	// Check if scaled down
+	// Check if fully scaled down - both spec and status must show 0 replicas
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
-		status.State = "Scaled Down"
+		// Check that all status replicas are also 0
+		if deployment.Status.Replicas == 0 &&
+			deployment.Status.AvailableReplicas == 0 &&
+			deployment.Status.ReadyReplicas == 0 &&
+			deployment.Status.UpdatedReplicas == 0 {
+			status.State = "Scaled Down"
+		} else {
+			status.State = "Scaling Down"
+			status.Error = fmt.Sprintf("Deployment is scaling down: %d/%d/%d/%d replicas (total/available/ready/updated)",
+				deployment.Status.Replicas,
+				deployment.Status.AvailableReplicas,
+				deployment.Status.ReadyReplicas,
+				deployment.Status.UpdatedReplicas)
+		}
 	} else {
 		status.State = "Active"
 		status.Error = fmt.Sprintf("Deployment has %d replicas", *deployment.Spec.Replicas)
@@ -305,9 +318,22 @@ func (m *Manager) getStatefulSetStatus(ctx context.Context, name, namespace stri
 		return status
 	}
 
-	// Check if scaled down
+	// Check if fully scaled down - both spec and status must show 0 replicas
 	if statefulset.Spec.Replicas != nil && *statefulset.Spec.Replicas == 0 {
-		status.State = "Scaled Down"
+		// Check that all status replicas are also 0
+		if statefulset.Status.Replicas == 0 &&
+			statefulset.Status.AvailableReplicas == 0 &&
+			statefulset.Status.ReadyReplicas == 0 &&
+			statefulset.Status.UpdatedReplicas == 0 {
+			status.State = "Scaled Down"
+		} else {
+			status.State = "Scaling Down"
+			status.Error = fmt.Sprintf("StatefulSet is scaling down: %d/%d/%d/%d replicas (total/available/ready/updated)",
+				statefulset.Status.Replicas,
+				statefulset.Status.AvailableReplicas,
+				statefulset.Status.ReadyReplicas,
+				statefulset.Status.UpdatedReplicas)
+		}
 	} else {
 		status.State = "Active"
 		status.Error = fmt.Sprintf("StatefulSet has %d replicas", *statefulset.Spec.Replicas)
@@ -346,4 +372,68 @@ func (m *Manager) getCronJobStatus(ctx context.Context, name, namespace string) 
 	}
 
 	return status
+}
+
+// ProcessCronJobs handles just CronJob resources for immediate processing
+func (m *Manager) ProcessCronJobs(ctx context.Context, cronJobs []string, namespace, desiredState string) error {
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
+	logger.Info("Processing CronJobs", "count", len(cronJobs))
+
+	if desiredState == "primary" {
+		// In primary mode, unsuspend CronJobs
+		for _, name := range cronJobs {
+			if err := m.suspendCronJob(ctx, namespace, name, false); err != nil {
+				logger.Error(err, "Failed to activate CronJob", "name", name, "namespace", namespace)
+				return err
+			}
+			logger.Info("Activated CronJob", "name", name, "namespace", namespace)
+		}
+	} else {
+		// In secondary mode, suspend CronJobs
+		for _, name := range cronJobs {
+			if err := m.ensureCronJobSuspended(ctx, name, namespace); err != nil {
+				logger.Error(err, "Failed to suspend CronJob", "name", name, "namespace", namespace)
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// ProcessDeploymentsAndStatefulSets handles just Deployment and StatefulSet resources
+func (m *Manager) ProcessDeploymentsAndStatefulSets(ctx context.Context, deployments, statefulSets []string, namespace, desiredState string) error {
+	logger := log.FromContext(ctx).WithName("workload-manager")
+
+	logger.Info("Processing Deployments and StatefulSets",
+		"deployments", len(deployments),
+		"statefulSets", len(statefulSets))
+
+	if desiredState == "primary" {
+		// In primary mode, Flux will handle restoring workloads
+		// Nothing to do here for Deployments and StatefulSets
+		logger.Info("In primary mode - Flux will handle scaling up Deployments and StatefulSets")
+		return nil
+	}
+
+	// In secondary mode, scale down all Deployments and StatefulSets
+
+	// Process deployments
+	for _, name := range deployments {
+		if err := m.ensureDeploymentScaledDown(ctx, name, namespace); err != nil {
+			logger.Error(err, "Failed to scale down deployment", "name", name, "namespace", namespace)
+			return err
+		}
+	}
+
+	// Process statefulsets
+	for _, name := range statefulSets {
+		if err := m.ensureStatefulSetScaledDown(ctx, name, namespace); err != nil {
+			logger.Error(err, "Failed to scale down statefulset", "name", name, "namespace", namespace)
+			return err
+		}
+	}
+
+	return nil
 }

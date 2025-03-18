@@ -26,7 +26,7 @@ func NewManager(client client.Client) *Manager {
 }
 
 // UpdateVolumeReplication updates a VolumeReplication resource to the desired state
-func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, state string) (bool, error) {
+func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, state string) error {
 	log := log.FromContext(ctx)
 	volumeReplication := &replicationv1alpha1.VolumeReplication{}
 
@@ -34,7 +34,7 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, volumeReplication)
 	if err != nil {
 		log.Error(err, "Failed to get VolumeReplication", "VolumeReplication", name)
-		return false, client.IgnoreNotFound(err)
+		return client.IgnoreNotFound(err)
 	}
 
 	currentSpec := string(volumeReplication.Spec.ReplicationState)
@@ -51,7 +51,7 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 	if currentStatus == "resync" {
 		log.Info("VolumeReplication is in resync mode - waiting for completion",
 			"name", name)
-		return true, nil
+		return nil
 	}
 
 	// Handle primary->secondary transition specially
@@ -62,10 +62,10 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 			volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(state)
 			if err := m.client.Update(ctx, volumeReplication); err != nil {
 				log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", name)
-				return true, err
+				return err
 			}
 		}
-		return true, nil // Always indicate we're pending for primary->secondary transitions
+		return nil
 	}
 
 	// Check if volume is in an error state but it's actually transitioning
@@ -87,10 +87,10 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 						volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(state)
 						if err := m.client.Update(ctx, volumeReplication); err != nil {
 							log.Error(err, "Failed to update VolumeReplication during transition", "VolumeReplication", name)
-							return true, err
+							return err
 						}
 					}
-					return true, nil
+					return nil
 				}
 			}
 		}
@@ -101,7 +101,7 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 		log.Info("Cannot transition to primary - current status must be secondary or primary",
 			"name", name,
 			"currentStatus", currentStatus)
-		return true, nil
+		return nil
 	}
 
 	// Only update spec if it doesn't match desired state and status is stable
@@ -110,7 +110,7 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 		if currentStatus == "error" {
 			log.Info("Cannot update spec - VolumeReplication is in error state",
 				"name", name)
-			return true, nil
+			return nil
 		}
 
 		log.Info("Updating VolumeReplication spec",
@@ -121,9 +121,9 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 		volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(state)
 		if err := m.client.Update(ctx, volumeReplication); err != nil {
 			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", name)
-			return true, err
+			return err
 		}
-		return true, nil
+		return nil
 	}
 
 	// Check if status matches spec
@@ -132,10 +132,10 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 			"name", name,
 			"statusState", currentStatus,
 			"desiredState", desiredState)
-		return true, nil
+		return nil
 	}
 
-	return false, nil
+	return nil
 }
 
 // CheckVolumeReplicationError checks if a VolumeReplication resource has errors
@@ -334,10 +334,74 @@ func (m *Manager) GetErrorMessage(ctx context.Context, name, namespace string) s
 	return ""
 }
 
-// ProcessVolumeReplications handles the processing of all VolumeReplications for a FailoverPolicy
-func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace string, vrNames []string, desiredState, mode string) (int, bool, string) {
+// AreAllVolumesInDesiredState checks if all VolumeReplications have reached the desired state
+func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace string, vrNames []string, desiredState string) (bool, string) {
 	log := log.FromContext(ctx)
-	var pendingUpdates int
+	log.Info("Checking if all VolumeReplications have reached desired state",
+		"count", len(vrNames),
+		"desiredState", desiredState)
+
+	for _, vrName := range vrNames {
+		volumeReplication := &replicationv1alpha1.VolumeReplication{}
+
+		// Fetch the VolumeReplication object
+		err := m.client.Get(ctx, types.NamespacedName{Name: vrName, Namespace: namespace}, volumeReplication)
+		if err != nil {
+			log.Error(err, "Failed to get VolumeReplication", "VolumeReplication", vrName)
+			return false, fmt.Sprintf("Failed to get VolumeReplication %s: %v", vrName, err)
+		}
+
+		// Get current status state and spec state
+		currentStatus := strings.ToLower(string(volumeReplication.Status.State))
+		currentSpec := string(volumeReplication.Spec.ReplicationState)
+
+		log.Info("Checking VolumeReplication state",
+			"name", vrName,
+			"currentStatus", currentStatus,
+			"currentSpec", currentSpec,
+			"desiredState", desiredState)
+
+		// Check if the status matches the desired state
+		if currentStatus != strings.ToLower(desiredState) {
+			log.Info("VolumeReplication not yet in desired state",
+				"name", vrName,
+				"currentStatus", currentStatus,
+				"desiredState", desiredState)
+
+			// If transitioning (spec already updated but status not yet there), report detailed status
+			if currentSpec == desiredState {
+				// Check if in resync state
+				if currentStatus == "resync" {
+					return false, fmt.Sprintf("VolumeReplication %s is in resync state", vrName)
+				}
+
+				// Check if in error state
+				if currentStatus == "error" {
+					// Check for a legitimate error vs transitional state
+					for _, condition := range volumeReplication.Status.Conditions {
+						if condition.Type == "Degraded" && condition.Status == metav1.ConditionTrue {
+							return false, fmt.Sprintf("VolumeReplication %s is in error state: %s", vrName, condition.Message)
+						}
+					}
+				}
+
+				return false, fmt.Sprintf("VolumeReplication %s is transitioning from %s to %s",
+					vrName, currentStatus, desiredState)
+			}
+
+			// If spec doesn't match desired state either, the update hasn't been applied yet
+			return false, fmt.Sprintf("VolumeReplication %s needs update: current state %s, spec %s, desired %s",
+				vrName, currentStatus, currentSpec, desiredState)
+		}
+	}
+
+	log.Info("All VolumeReplications have reached the desired state", "desiredState", desiredState)
+	return true, ""
+}
+
+// ProcessVolumeReplications handles the processing of all VolumeReplications for a FailoverPolicy
+func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace string, vrNames []string, desiredState, mode string) (bool, string) {
+	log := log.FromContext(ctx)
 	var failoverError bool
 	var failoverErrorMessage string
 
@@ -348,7 +412,7 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 			currentState, err := m.GetCurrentVolumeReplicationState(ctx, vrName, namespace)
 			if err != nil {
 				failoverErrorMessage = fmt.Sprintf("Failed to retrieve state for VolumeReplication %s", vrName)
-				return 0, true, failoverErrorMessage
+				return true, failoverErrorMessage
 			}
 
 			// In safe mode, volumes must be either already primary or secondary before transitioning
@@ -358,13 +422,12 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 					"CurrentState", currentState,
 					"ValidStates", []string{"primary", "secondary"})
 				allReady = false
-				pendingUpdates++
 			}
 		}
 
-		// Only return early if not all volumes are ready
+		// If not all volumes are ready in safe mode, we should try again later
 		if !allReady {
-			return pendingUpdates, false, ""
+			return false, "Some volume replications are not ready for primary transition in safe mode"
 		}
 	}
 
@@ -397,15 +460,12 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 		}
 
 		// Attempt to update VolumeReplication
-		pending, err := m.UpdateVolumeReplication(ctx, vrName, namespace, desiredState)
+		err = m.UpdateVolumeReplication(ctx, vrName, namespace, desiredState)
 		if err != nil {
 			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", vrName)
-			return 0, true, "Failed to update VolumeReplication"
-		}
-		if pending {
-			pendingUpdates++
+			return true, "Failed to update VolumeReplication"
 		}
 	}
 
-	return pendingUpdates, failoverError, failoverErrorMessage
+	return failoverError, failoverErrorMessage
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -80,7 +81,90 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Group resources by type
 	resourcesByType := groupResourcesByType(failoverPolicy)
 
-	// Different sequencing based on desired state
+	// Get a list of VolumeReplication names
+	vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
+	for _, vr := range resourcesByType.volumeReplications {
+		vrNames = append(vrNames, vr.Name)
+	}
+
+	// Check if we're in safe mode - defaults to "on" if not specified
+	isSafeMode := true
+	if failoverPolicy.Spec.Mode != "" {
+		isSafeMode = strings.ToLower(failoverPolicy.Spec.Mode) != "off"
+	}
+
+	// In unsafe mode, process all resources in parallel without waiting
+	if !isSafeMode {
+		log.Info("Operating in unsafe mode - bypassing ordered sequencing")
+
+		// Process all resources in parallel without waiting
+
+		// 1. Process Flux resources
+		if len(resourcesByType.helmReleases) > 0 || len(resourcesByType.kustomizations) > 0 {
+			log.Info("Processing Flux resources", "desiredState", failoverPolicy.Spec.DesiredState)
+			if err := fluxManager.ProcessFluxResources(ctx,
+				resourcesByType.helmReleases,
+				resourcesByType.kustomizations,
+				failoverPolicy.Namespace,
+				failoverPolicy.Spec.DesiredState); err != nil {
+				log.Error(err, "Failed to process Flux resources")
+			}
+		}
+
+		// 2. Process VirtualServices
+		if len(resourcesByType.virtualServices) > 0 {
+			vsNames := getResourceNames(resourcesByType.virtualServices)
+			log.Info("Processing VirtualServices", "count", len(vsNames))
+			vsManager.ProcessVirtualServices(ctx, failoverPolicy.Namespace, vsNames, failoverPolicy.Spec.DesiredState)
+		}
+
+		// 3. Process all workloads
+		deploymentNames := getResourceNames(resourcesByType.deployments)
+		statefulSetNames := getResourceNames(resourcesByType.statefulSets)
+		cronJobNames := getResourceNames(resourcesByType.cronJobs)
+
+		if len(deploymentNames) > 0 || len(statefulSetNames) > 0 || len(cronJobNames) > 0 {
+			err = workloadManager.ProcessWorkloads(ctx,
+				deploymentNames,
+				statefulSetNames,
+				cronJobNames,
+				failoverPolicy.Namespace,
+				failoverPolicy.Spec.DesiredState)
+			if err != nil {
+				log.Error(err, "Failed to process workloads")
+			}
+		}
+
+		// 4. Process VolumeReplications
+		log.Info("Processing VolumeReplications", "count", len(vrNames))
+		failoverError, failoverErrorMessage := vrManager.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState, failoverPolicy.Spec.Mode)
+		if failoverError {
+			log.Error(nil, "Failed to process volume replications", "error", failoverErrorMessage)
+			statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, failoverError, failoverErrorMessage)
+			if statusErr != nil {
+				log.Error(statusErr, "Failed to update status after volume replication error")
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// Update status
+		if err := statusManager.UpdateStatus(ctx, failoverPolicy); err != nil {
+			log.Error(err, "Failed to update status")
+			return ctrl.Result{}, err
+		}
+
+		// Update status to indicate successful reconciliation
+		statusErr := statusManager.UpdateFailoverStatus(ctx, failoverPolicy, false, "")
+		if statusErr != nil {
+			log.Error(statusErr, "Failed to update status after successful reconciliation")
+			return ctrl.Result{}, statusErr
+		}
+
+		// Requeue more frequently in unsafe mode to compensate for lack of ordered processing
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Continue with safe mode processing using the ordered sequencing
 	if failoverPolicy.Spec.DesiredState == "secondary" {
 		// For secondary mode: Flux first, then VirtualServices/CronJobs, then other workloads, then VolumeReplications
 
@@ -196,11 +280,6 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Info("All workloads are fully scaled down and terminated")
 
 		// 6. Once workloads are scaled down, process VolumeReplications last
-		vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
-		for _, vr := range resourcesByType.volumeReplications {
-			vrNames = append(vrNames, vr.Name)
-		}
-
 		log.Info("All workloads are fully terminated, now processing VolumeReplications",
 			"count", len(vrNames),
 			"names", vrNames)
@@ -217,11 +296,6 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// For primary mode: VR first, then VirtualServices/CronJobs, then wait for VR to be fully primary, then Flux last
 
 		// 1. Process VolumeReplications first
-		vrNames := make([]string, 0, len(resourcesByType.volumeReplications))
-		for _, vr := range resourcesByType.volumeReplications {
-			vrNames = append(vrNames, vr.Name)
-		}
-
 		log.Info("Processing VolumeReplications first")
 		failoverError, failoverErrorMessage := vrManager.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, failoverPolicy.Spec.DesiredState, failoverPolicy.Spec.Mode)
 		if failoverError {

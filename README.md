@@ -216,17 +216,42 @@ status:
 
 The operator supports two modes:
 
-### Safe Mode
+### Safe Mode (Default)
 
-In safe mode, additional validations occur:
-- When transitioning to primary: VolumeReplications must be in a valid state (either already primary or secondary)
+In safe mode (`mode: "on"` or not specified):
+- Resources are processed in a carefully ordered sequence
+- Workloads are fully terminated before VolumeReplications are set to secondary
+- VolumeReplications must reach primary state before Flux resources are resumed
+- Additional validations occur during transitions
 - More conservative error handling
 
-### Regular Mode
+This is the recommended mode for production environments where data integrity is critical.
 
-In regular mode:
-- Faster transitions with fewer validations
-- May be appropriate for less critical applications
+### Unsafe Mode
+
+In unsafe mode (`mode: "off"`):
+- All resources are processed in parallel without waiting for ordered completion
+- No waiting for workloads to fully terminate before marking volumes as secondary
+- No waiting for volumes to be fully primary before resuming Flux resources
+- Faster transitions with fewer validations and safety checks
+- Suitable for testing, development, or non-critical environments
+
+Unsafe mode trades safety for speed, completing failovers faster but potentially risking data integrity if applications haven't fully shut down before volumes become read-only.
+
+> **Future Enhancement**: In a future release, unsafe mode will also signal to a remote cluster that it can promote its volumes as quickly as possible, even before the current cluster has demoted its volumes. This will enable even faster site switchovers in multi-cluster scenarios.
+
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: FailoverPolicy
+metadata:
+  name: fast-failover-policy
+spec:
+  desiredState: secondary
+  # Set to "off" to bypass ordered sequencing for faster operation
+  mode: "off"
+  managedResources:
+    # resources...
+```
 
 ## Installation
 

@@ -21,6 +21,62 @@ internal/
 │       └── manager.go
 ```
 
+## Operating Modes
+
+The operator supports two distinct operating modes that control the reconciliation flow:
+
+### Safe Mode (Default)
+
+Safe mode (`mode: "on"` or not specified) prioritizes data integrity and application stability:
+
+- Resources are processed in a carefully ordered sequence with wait states
+- During secondary transition: Workloads are fully terminated before VolumeReplications change state
+- During primary transition: Storage is fully available before workloads are deployed
+- Sequential processing prevents race conditions and resource conflicts
+- Detailed status verification ensures each step completes before proceeding
+
+### Unsafe Mode
+
+Unsafe mode (`mode: "off"`) prioritizes speed and bypasses the ordered reconciliation:
+
+- All resources are processed in parallel without waiting for dependencies
+- No verification that workloads are fully terminated before changing volume states
+- No verification that volumes are primary before resuming Flux resources
+- Faster but potentially riskier for data integrity
+- Suitable for testing or non-critical environments
+
+#### Future Enhancements
+
+In a future release, unsafe mode will also enable cross-cluster coordination, where:
+- The controller will signal to a remote cluster that it can promote its volumes immediately
+- This will happen even before the current cluster has completed demoting its own volumes
+- This will significantly reduce the total time required for site switchovers in multi-cluster environments
+
+```go
+// Simplified controller logic showing mode handling
+isSafeMode := true  // Default to safe mode
+if mode != "" {
+    isSafeMode = strings.ToLower(mode) != "off"
+}
+
+if !isSafeMode {
+    // Process all resources in parallel
+    ProcessFluxResources(...)
+    ProcessVirtualServices(...)
+    ProcessWorkloads(...)
+    ProcessVolumeReplications(...)
+} else {
+    // Process in ordered sequence with wait states
+    if desiredState == "secondary" {
+        // Suspend Flux → Update VirtualServices → Suspend CronJobs → 
+        // Scale Down workloads → Wait → Update VolumeReplications
+    } else {
+        // Update VolumeReplications → Update VirtualServices → 
+        // Resume CronJobs → Wait for volumes → Resume Flux
+    }
+}
+```
+
 ## Component Responsibilities
 
 ### Main Controller (failoverpolicy_controller.go)
@@ -98,6 +154,12 @@ Responsible for:
 └─────────────┬─────────┘
               │
               ▼
+┌───────────────────────┐  No   ┌───────────────────────┐
+│    Safe Mode?         │──────▶│ Process All Resources │
+│                       │       │ In Parallel (Unsafe)  │
+└─────────────┬─────────┘       └───────────────────────┘
+              │ Yes
+              ▼
 ┌───────────────────────┐     ┌──────────────────────┐
 │ Suspend Flux          │     │ Process Flux         │
 │ Resources First       │────▶│ HelmReleases &       │
@@ -174,6 +236,12 @@ Responsible for:
 │       Type            │
 └─────────────┬─────────┘
               │
+              ▼
+┌───────────────────────┐  No   ┌───────────────────────┐
+│    Safe Mode?         │──────▶│ Process All Resources │
+│                       │       │ In Parallel (Unsafe)  │
+└─────────────┬─────────┘       └───────────────────────┘
+              │ Yes
               ▼
 ┌───────────────────────┐     ┌──────────────────────┐
 │ Process Volume        │     │ Set VolumeReplication│

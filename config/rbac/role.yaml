@@ -8,7 +8,18 @@ rules:
   - apps
   resources:
   - deployments
+  - statefulsets
   - virtualservices
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
   verbs:
   - get
   - list

@@ -38,6 +38,18 @@ type FailoverPolicySpec struct {
 	// VirtualServices is a list of VirtualService objects to update during failover.
 	// +kubebuilder:validation:MinItems=1
 	VirtualServices []string `json:"virtualServices"`
+
+	// Deployments is a list of Deployment objects to scale down to 0 replicas when in secondary mode.
+	// +optional
+	Deployments []string `json:"deployments,omitempty"`
+
+	// StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in secondary mode.
+	// +optional
+	StatefulSets []string `json:"statefulSets,omitempty"`
+
+	// CronJobs is a list of CronJob objects to suspend when in secondary mode.
+	// +optional
+	CronJobs []string `json:"cronJobs,omitempty"`
 }
 
 // VolumeReplicationStatus defines the status of a VolumeReplication
@@ -46,6 +58,24 @@ type VolumeReplicationStatus struct {
 	State          string `json:"state"`           // Current state
 	Error          string `json:"error,omitempty"` // Only populated for errors
 	Message        string `json:"message,omitempty"`
+	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
+}
+
+// WorkloadStatus defines the status of a managed workload
+type WorkloadStatus struct {
+	// Name of the workload
+	Name string `json:"name"`
+
+	// Kind of the workload (Deployment, StatefulSet, CronJob)
+	Kind string `json:"kind"`
+
+	// State indicates the current state of the workload (scaled down, suspended, etc.)
+	State string `json:"state,omitempty"`
+
+	// Error contains any error messages if the workload couldn't be managed properly
+	Error string `json:"error,omitempty"`
+
+	// LastUpdateTime is the time when the status was last updated
 	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
 }
 
@@ -62,7 +92,16 @@ type FailoverPolicyStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// VolumeReplicationStatuses contains status information for VolumeReplications
 	VolumeReplicationStatuses []VolumeReplicationStatus `json:"volumeReplicationStatuses,omitempty"`
+
+	// WorkloadStatus indicates whether workloads have been properly scaled/suspended
+	// +optional
+	WorkloadStatus string `json:"workloadStatus,omitempty"`
+
+	// WorkloadStatuses contains detailed status information for individual workloads
+	// +optional
+	WorkloadStatuses []WorkloadStatus `json:"workloadStatuses,omitempty"`
 }
 
 // +kubebuilder:object:root=true

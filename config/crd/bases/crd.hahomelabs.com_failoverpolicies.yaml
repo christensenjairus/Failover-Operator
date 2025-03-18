@@ -39,6 +39,18 @@ spec:
           spec:
             description: FailoverPolicySpec defines the desired state of FailoverPolicy
             properties:
+              cronJobs:
+                description: CronJobs is a list of CronJob objects to suspend when
+                  in secondary mode.
+                items:
+                  type: string
+                type: array
+              deployments:
+                description: Deployments is a list of Deployment objects to scale
+                  down to 0 replicas when in secondary mode.
+                items:
+                  type: string
+                type: array
               desiredState:
                 description: DesiredState represents the intended failover state ("primary"
                   or "secondary").
@@ -54,6 +66,12 @@ spec:
                 - safe
                 - unsafe
                 type: string
+              statefulSets:
+                description: StatefulSets is a list of StatefulSet objects to scale
+                  down to 0 replicas when in secondary mode.
+                items:
+                  type: string
+                type: array
               virtualServices:
                 description: VirtualServices is a list of VirtualService objects to
                   update during failover.
@@ -144,6 +162,8 @@ spec:
                   that still need to be updated to match the desired failover state.
                 type: integer
               volumeReplicationStatuses:
+                description: VolumeReplicationStatuses contains status information
+                  for VolumeReplications
                 items:
                   description: VolumeReplicationStatus defines the status of a VolumeReplication
                   properties:
@@ -160,6 +180,40 @@ spec:
                   required:
                   - name
                   - state
+                  type: object
+                type: array
+              workloadStatus:
+                description: WorkloadStatus indicates whether workloads have been
+                  properly scaled/suspended
+                type: string
+              workloadStatuses:
+                description: WorkloadStatuses contains detailed status information
+                  for individual workloads
+                items:
+                  description: WorkloadStatus defines the status of a managed workload
+                  properties:
+                    error:
+                      description: Error contains any error messages if the workload
+                        couldn't be managed properly
+                      type: string
+                    kind:
+                      description: Kind of the workload (Deployment, StatefulSet,
+                        CronJob)
+                      type: string
+                    lastUpdateTime:
+                      description: LastUpdateTime is the time when the status was
+                        last updated
+                      type: string
+                    name:
+                      description: Name of the workload
+                      type: string
+                    state:
+                      description: State indicates the current state of the workload
+                        (scaled down, suspended, etc.)
+                      type: string
+                  required:
+                  - kind
+                  - name
                   type: object
                 type: array
             type: object

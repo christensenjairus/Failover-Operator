@@ -14,3 +14,9 @@ spec:
   volumeReplications:
     - data-wordpress-mariadb-0
     - wordpress
+  deployments:
+    - wordpress
+  statefulSets:
+    - wordpress-mariadb
+  cronJobs:
+    - wordpress-backup

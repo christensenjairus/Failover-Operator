@@ -3,6 +3,7 @@ package flux
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -48,9 +49,17 @@ func (m *Manager) ProcessFluxResources(ctx context.Context,
 
 	log := log.FromContext(ctx)
 
-	// In active mode, resume Flux resources and enabling reconciliation
-	if desiredState == "active" {
-		log.Info("Active mode: Resuming Flux resources and enabling reconciliation")
+	// Normalize the desired state for consistent handling
+	enableReconciliation := false
+	if strings.EqualFold(desiredState, "active") ||
+		strings.EqualFold(desiredState, "primary") ||
+		strings.ToUpper(desiredState) == "PRIMARY" {
+		enableReconciliation = true
+	}
+
+	// In PRIMARY mode, resume Flux resources and enabling reconciliation
+	if enableReconciliation {
+		log.Info("PRIMARY mode: Resuming Flux resources and enabling reconciliation")
 
 		// Process HelmReleases
 		for _, hr := range helmReleases {
@@ -80,8 +89,8 @@ func (m *Manager) ProcessFluxResources(ctx context.Context,
 			}
 		}
 	} else {
-		// In passive mode, suspend Flux resources and add reconcile disabled annotation
-		log.Info("Passive mode: Suspending Flux resources and disabling reconciliation")
+		// In STANDBY mode, suspend Flux resources and add reconcile disabled annotation
+		log.Info("STANDBY mode: Suspending Flux resources and disabling reconciliation")
 
 		// Process HelmReleases
 		for _, hr := range helmReleases {

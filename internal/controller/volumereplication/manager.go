@@ -445,11 +445,19 @@ func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace str
 func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace string, volReps []string, desiredState string) error {
 	log := log.FromContext(ctx).WithName("volumereplication-manager")
 
-	// Map active/passive to primary/secondary for volume replication
-	volRepDesiredState := desiredState
-	if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") {
+	// Normalize the desired state to ensure consistent handling
+	volRepDesiredState := "primary" // Default
+
+	// Handle all variations of state names for consistent behavior
+	normalizedState := strings.ToUpper(desiredState)
+	if strings.EqualFold(desiredState, "active") ||
+		strings.EqualFold(desiredState, "primary") ||
+		normalizedState == "PRIMARY" {
 		volRepDesiredState = "primary"
-	} else if strings.EqualFold(desiredState, "passive") || strings.EqualFold(desiredState, "secondary") || strings.EqualFold(desiredState, "standby") {
+	} else if strings.EqualFold(desiredState, "passive") ||
+		strings.EqualFold(desiredState, "secondary") ||
+		strings.EqualFold(desiredState, "standby") ||
+		normalizedState == "STANDBY" {
 		volRepDesiredState = "secondary"
 	}
 
@@ -457,10 +465,18 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 		"count", len(volReps),
 		"namespace", namespace,
 		"desiredState", desiredState,
+		"normalizedState", normalizedState,
 		"volRepDesiredState", volRepDesiredState)
+
+	if len(volReps) == 0 {
+		log.Info("No VolumeReplications to process")
+		return nil
+	}
 
 	// Process each volume replication
 	for _, name := range volReps {
+		log.Info("Processing VolumeReplication", "name", name, "namespace", namespace)
+
 		// Get the VolumeReplication resource
 		volumeReplication := &replicationv1alpha1.VolumeReplication{}
 		err := m.client.Get(ctx, types.NamespacedName{
@@ -476,14 +492,29 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 			return err
 		}
 
+		// Get current spec and status
+		currentSpec := strings.ToLower(string(volumeReplication.Spec.ReplicationState))
+		currentStatus := strings.ToLower(string(volumeReplication.Status.State))
+
+		log.Info("VolumeReplication current state",
+			"name", name,
+			"currentSpec", currentSpec,
+			"currentStatus", currentStatus,
+			"desiredState", volRepDesiredState)
+
 		// Skip if volumereplication is already in correct state
-		if strings.ToLower(string(volumeReplication.Spec.ReplicationState)) == volRepDesiredState {
+		if currentSpec == volRepDesiredState {
 			// Already in correct state
 			log.Info("VolumeReplication already in correct state",
 				"name", name,
 				"state", volRepDesiredState)
 			continue
 		}
+
+		log.Info("Updating VolumeReplication state",
+			"name", name,
+			"currentState", currentSpec,
+			"desiredState", volRepDesiredState)
 
 		// Set the desired state and update the resource
 		volumeReplication.Spec.ReplicationState = replicationv1alpha1.ReplicationState(volRepDesiredState)

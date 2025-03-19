@@ -34,11 +34,14 @@ func init() {
 	replicationv1alpha1.SchemeBuilder.Register(&replicationv1alpha1.VolumeReplication{}, &replicationv1alpha1.VolumeReplicationList{})
 }
 
-// Constants for reconciliation intervals
+// Define constants for reconciliation intervals
 const (
-	DefaultActiveReconcileInterval  = 5 * time.Minute
-	DefaultPassiveReconcileInterval = 20 * time.Second
-	HealthCheckInterval             = 30 * time.Second // Run health checks every 30 seconds
+	// Default interval to reconcile when in PASSIVE mode
+	DefaultPassiveReconcileInterval = 10 * time.Second
+	// Default interval to reconcile when in ACTIVE mode
+	DefaultActiveReconcileInterval = 1 * time.Minute
+	// Interval between health checks
+	HealthCheckInterval = 5 * time.Second // Run health checks every 5 seconds
 )
 
 // ReconcileAnnotation defines the annotation to block reconciliation
@@ -170,6 +173,21 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Get the desired state from annotations or spec
 	desiredState := r.getDesiredState(ctx, failoverPolicy)
 
+	// Normalize the desired state for log clarity
+	normalizedState := "PRIMARY"
+	if strings.EqualFold(desiredState, "passive") || strings.EqualFold(desiredState, "secondary") ||
+		strings.EqualFold(desiredState, "standby") || strings.EqualFold(desiredState, "STANDBY") {
+		normalizedState = "STANDBY"
+	} else if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") ||
+		strings.EqualFold(desiredState, "PRIMARY") {
+		normalizedState = "PRIMARY"
+	}
+
+	log.Info("Current desired state",
+		"rawState", desiredState,
+		"normalizedState", normalizedState,
+		"fromAnnotation", failoverPolicy.Annotations["failover-operator.hahomelabs.com/desired-state"])
+
 	// Update the status to reflect the desired state (regardless of whether we'll process workloads)
 	if err := statusMgr.UpdateFailoverStatus(ctx, failoverPolicy, false, ""); err != nil {
 		log.Error(err, "Failed to update FailoverPolicy status")
@@ -177,15 +195,40 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// Process VolumeReplications if any are defined
+	vrNames := []string{}
+
+	// Get VolumeReplications from legacy structure
 	if len(volReps) > 0 {
-		vrNames := getResourceNames(volReps)
-		if err := volRepMgr.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, vrNames, desiredState); err != nil {
+		vrNames = append(vrNames, getResourceNames(volReps)...)
+	}
+
+	// Also get VolumeReplications from components
+	componentResources := extractComponentResources(failoverPolicy)
+	for _, vr := range componentResources.volumeReplications {
+		vrNames = append(vrNames, vr.Name)
+	}
+
+	// Remove duplicates from vrNames
+	vrNamesMap := make(map[string]bool)
+	uniqueVrNames := []string{}
+	for _, name := range vrNames {
+		if _, exists := vrNamesMap[name]; !exists {
+			vrNamesMap[name] = true
+			uniqueVrNames = append(uniqueVrNames, name)
+		}
+	}
+
+	// Process the VolumeReplications if any exist
+	if len(uniqueVrNames) > 0 {
+		log.Info("Processing VolumeReplications", "count", len(uniqueVrNames), "names", uniqueVrNames)
+		if err := volRepMgr.ProcessVolumeReplications(ctx, failoverPolicy.Namespace, uniqueVrNames, normalizedState); err != nil {
 			log.Error(err, "Failed to process VolumeReplications")
 			return ctrl.Result{}, err
 		}
 	}
 
-	// Convert legacy fields to new format for processing
+	// Get resources to manage from both legacy fields and new component structure
+	// First, convert legacy fields to ManagedResource format
 	managedResources := convertLegacyFields(failoverPolicy)
 
 	// Extract resource references by type from the managedResources field
@@ -196,63 +239,77 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	helmReleases := filterResourcesByKind(managedResources, "HelmRelease")
 	kustomizations := filterResourcesByKind(managedResources, "Kustomization")
 
+	// Now, also extract resources from the components structure
+	componentResources = extractComponentResources(failoverPolicy)
+
+	// Merge the resources from both sources
+	allResources := ResourcesByType{
+		deployments:        append(convertToResourceReferences(deployments), componentResources.deployments...),
+		statefulSets:       append(convertToResourceReferences(statefulSets), componentResources.statefulSets...),
+		cronJobs:           append(convertToResourceReferences(cronJobs), componentResources.cronJobs...),
+		virtualServices:    append(convertToResourceReferences(virtualServices), componentResources.virtualServices...),
+		helmReleases:       append(convertToResourceReferences(helmReleases), componentResources.helmReleases...),
+		kustomizations:     append(convertToResourceReferences(kustomizations), componentResources.kustomizations...),
+		volumeReplications: componentResources.volumeReplications,
+	}
+
 	// Process VirtualServices if any are defined
 	virtualServiceMgr := virtualservice.NewManager(r.Client)
-	if len(virtualServices) > 0 {
-		vsNames := getResourceNames(virtualServices)
-		virtualServiceMgr.ProcessVirtualServices(ctx, failoverPolicy.Namespace, vsNames, desiredState)
+	if len(allResources.virtualServices) > 0 {
+		log.Info("Processing VirtualServices", "count", len(allResources.virtualServices))
+		virtualServiceMgr.ProcessVirtualServices(ctx, failoverPolicy.Namespace, getResourceReferenceNames(allResources.virtualServices), normalizedState)
 	}
 
 	// Handle synchronization of workloads based on the policy mode
 	workloadMgr := workload.NewManager(r.Client)
 	fluxMgr := flux.NewManager(r.Client)
 
-	if desiredState == "passive" {
-		// In passive mode, scale down workloads directly if reconciliation is not blocked
+	// Simplify state check - we now handle the normalization in each manager
+	if normalizedState == "STANDBY" {
+		// In STANDBY mode, scale down workloads directly if reconciliation is not blocked
 		if !isReconciliationBlocked(failoverPolicy) {
-			log.Info("Processing workloads in passive mode")
-
-			// Convert ManagedResource slices to ResourceReference slices for the workload manager
-			deploymentRefs := convertToResourceReferences(deployments)
-			statefulSetRefs := convertToResourceReferences(statefulSets)
-			cronJobRefs := convertToResourceReferences(cronJobs)
+			log.Info("Processing workloads in STANDBY mode",
+				"deployments", len(allResources.deployments),
+				"statefulSets", len(allResources.statefulSets),
+				"cronJobs", len(allResources.cronJobs))
 
 			// Process regular K8s workloads
-			if err := workload.ProcessWorkloads(ctx, workloadMgr, deploymentRefs, statefulSetRefs, cronJobRefs, desiredState, failoverPolicy.Namespace); err != nil {
+			if err := workload.ProcessWorkloads(ctx, workloadMgr,
+				allResources.deployments,
+				allResources.statefulSets,
+				allResources.cronJobs,
+				normalizedState, failoverPolicy.Namespace); err != nil {
 				log.Error(err, "Failed to process workloads")
 				return ctrl.Result{}, err
 			}
 
-			// Convert ManagedResource slices to strings for the flux manager
-			helmReleaseRefs := convertToResourceReferences(helmReleases)
-			kustomizationRefs := convertToResourceReferences(kustomizations)
-
 			// Process Flux resources
-			if err := fluxMgr.ProcessFluxResources(ctx, helmReleaseRefs, kustomizationRefs, failoverPolicy.Namespace, desiredState); err != nil {
+			if err := fluxMgr.ProcessFluxResources(ctx,
+				allResources.helmReleases,
+				allResources.kustomizations,
+				failoverPolicy.Namespace, normalizedState); err != nil {
 				log.Error(err, "Failed to process flux resources")
 				return ctrl.Result{}, err
 			}
 		} else {
-			log.Info("Reconciliation blocked in passive mode", "annotation", ReconcileAnnotation)
+			log.Info("Reconciliation blocked in STANDBY mode", "annotation", ReconcileAnnotation)
 		}
-	} else if desiredState == "active" {
-		// In active mode - let Flux handle workload management to restore state
-		log.Info("In active mode - Flux will handle restoring workloads")
-
-		// Convert ManagedResource slices to ResourceReference objects for the flux manager
-		helmReleaseRefs := convertToResourceReferences(helmReleases)
-		kustomizationRefs := convertToResourceReferences(kustomizations)
+	} else { // PRIMARY mode
+		// In PRIMARY mode - let Flux handle workload management to restore state
+		log.Info("In PRIMARY mode - Flux will handle restoring workloads")
 
 		// Process Flux resources to enable them
-		if err := fluxMgr.ProcessFluxResources(ctx, helmReleaseRefs, kustomizationRefs, failoverPolicy.Namespace, desiredState); err != nil {
+		if err := fluxMgr.ProcessFluxResources(ctx,
+			allResources.helmReleases,
+			allResources.kustomizations,
+			failoverPolicy.Namespace, normalizedState); err != nil {
 			log.Error(err, "Failed to process flux resources")
 			return ctrl.Result{}, err
 		}
 
 		// Handle CronJobs directly (since they need to be unsuspended)
-		if len(cronJobs) > 0 {
-			cronJobRefs := convertToResourceReferences(cronJobs)
-			if err := workload.ProcessCronJobs(ctx, workloadMgr, cronJobRefs, desiredState, failoverPolicy.Namespace); err != nil {
+		if len(allResources.cronJobs) > 0 {
+			if err := workload.ProcessCronJobs(ctx, workloadMgr, allResources.cronJobs, normalizedState, failoverPolicy.Namespace); err != nil {
 				log.Error(err, "Failed to process cronjobs")
 				return ctrl.Result{}, err
 			}
@@ -273,7 +330,7 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Determine the next reconciliation time based on the desired state or health check interval, whichever is shorter
 	var requeueTime time.Duration
-	if desiredState == "passive" {
+	if normalizedState == "STANDBY" {
 		requeueTime = DefaultPassiveReconcileInterval
 	} else {
 		requeueTime = DefaultActiveReconcileInterval
@@ -847,28 +904,13 @@ func (r *FailoverPolicyReconciler) getDesiredState(ctx context.Context, policy *
 
 	// First check annotation (preferred method)
 	if anno, ok := policy.Annotations["failover-operator.hahomelabs.com/desired-state"]; ok {
-		// Normalize annotation value
-		desiredAnno := strings.ToLower(anno)
-
-		// Handle both new and old terminology
-		if desiredAnno == "active" || desiredAnno == "primary" {
-			desiredState = "active"
-		} else if desiredAnno == "passive" || desiredAnno == "secondary" || desiredAnno == "inactive" {
-			desiredState = "passive"
-		} else {
-			log.Info("Unknown desired state in annotation, using default",
-				"annotation", desiredAnno,
-				"default", desiredState)
-		}
+		// Just use the raw annotation value to avoid mapping problems
+		desiredState = anno
+		log.Info("Using desired state from annotation", "state", desiredState)
 	} else if policy.Spec.DesiredState != "" {
-		// Legacy field - map old terminology to new
-		if strings.ToLower(policy.Spec.DesiredState) == "primary" {
-			desiredState = "active"
-		} else if strings.ToLower(policy.Spec.DesiredState) == "secondary" {
-			desiredState = "passive"
-		} else {
-			desiredState = strings.ToLower(policy.Spec.DesiredState)
-		}
+		// Legacy field - just pass through the raw value
+		desiredState = policy.Spec.DesiredState
+		log.Info("Using desired state from spec", "state", desiredState)
 	}
 
 	return desiredState
@@ -880,4 +922,85 @@ func isReconciliationBlocked(policy *crdv1alpha1.FailoverPolicy) bool {
 		return strings.ToLower(val) == "true"
 	}
 	return false
+}
+
+// extractComponentResources extracts resources from the components structure
+func extractComponentResources(policy *crdv1alpha1.FailoverPolicy) ResourcesByType {
+	result := ResourcesByType{
+		volumeReplications: make([]crdv1alpha1.ResourceReference, 0),
+		virtualServices:    make([]crdv1alpha1.ResourceReference, 0),
+		deployments:        make([]crdv1alpha1.ResourceReference, 0),
+		statefulSets:       make([]crdv1alpha1.ResourceReference, 0),
+		cronJobs:           make([]crdv1alpha1.ResourceReference, 0),
+		helmReleases:       make([]crdv1alpha1.ResourceReference, 0),
+		kustomizations:     make([]crdv1alpha1.ResourceReference, 0),
+	}
+
+	// Process each component
+	for _, component := range policy.Spec.Components {
+		// Process workloads
+		for _, workload := range component.Workloads {
+			ref := crdv1alpha1.ResourceReference{
+				Name: workload.Name,
+				// Use policy namespace by default
+				Namespace: "",
+			}
+
+			switch workload.Kind {
+			case "Deployment":
+				result.deployments = append(result.deployments, ref)
+			case "StatefulSet":
+				result.statefulSets = append(result.statefulSets, ref)
+			case "CronJob":
+				result.cronJobs = append(result.cronJobs, ref)
+			}
+		}
+
+		// Process volume replications
+		for _, vrName := range component.VolumeReplications {
+			ref := crdv1alpha1.ResourceReference{
+				Name: vrName,
+				// Use policy namespace by default
+				Namespace: "",
+			}
+			result.volumeReplications = append(result.volumeReplications, ref)
+		}
+
+		// Process virtual services
+		for _, vsName := range component.VirtualServices {
+			ref := crdv1alpha1.ResourceReference{
+				Name: vsName,
+				// Use policy namespace by default
+				Namespace: "",
+			}
+			result.virtualServices = append(result.virtualServices, ref)
+		}
+	}
+
+	// Process parent Flux resources
+	for _, fluxResource := range policy.Spec.ParentFluxResources {
+		ref := crdv1alpha1.ResourceReference{
+			Name: fluxResource.Name,
+			// Use policy namespace by default
+			Namespace: "",
+		}
+
+		switch fluxResource.Kind {
+		case "HelmRelease":
+			result.helmReleases = append(result.helmReleases, ref)
+		case "Kustomization":
+			result.kustomizations = append(result.kustomizations, ref)
+		}
+	}
+
+	return result
+}
+
+// getResourceReferenceNames extracts names from a slice of ResourceReference
+func getResourceReferenceNames(refs []crdv1alpha1.ResourceReference) []string {
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = ref.Name
+	}
+	return names
 }

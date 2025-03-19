@@ -28,7 +28,7 @@ func NewManager(c client.Client) *Manager {
 func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSets, cronJobs []crdv1alpha1.ResourceReference, desiredState string, policyNamespace string) error {
 	log := log.FromContext(ctx)
 
-	// Normalize the desired state
+	// Normalize the desired state for consistent handling
 	normalizedState := strings.ToUpper(desiredState)
 	if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") {
 		normalizedState = "PRIMARY"
@@ -36,15 +36,20 @@ func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSe
 		normalizedState = "STANDBY"
 	}
 
-	// Process each type of workload
+	log.Info("Processing workloads",
+		"originalState", desiredState,
+		"normalizedState", normalizedState,
+		"deployments", len(deployments),
+		"statefulSets", len(statefulSets),
+		"cronJobs", len(cronJobs))
+
+	// Process deployments and statefulsets
 	if len(deployments) > 0 || len(statefulSets) > 0 {
 		// In PRIMARY mode, Flux will handle restoring workloads
 		if normalizedState == "PRIMARY" {
 			log.Info("PRIMARY mode: Flux will handle restoring deployments and statefulsets")
 		} else {
-			log.Info("Processing deployments and statefulsets in STANDBY mode",
-				"desiredState", desiredState,
-				"normalizedState", normalizedState)
+			log.Info("STANDBY mode: Scaling down deployments and statefulsets")
 
 			if err := ProcessDeploymentsAndStatefulSets(ctx, mgr, deployments, statefulSets, normalizedState, policyNamespace); err != nil {
 				return err
@@ -52,8 +57,9 @@ func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSe
 		}
 	}
 
+	// Process cronjobs if any are defined
 	if len(cronJobs) > 0 {
-		log.Info("Processing cronjobs", "count", len(cronJobs))
+		log.Info("Processing cronjobs", "count", len(cronJobs), "mode", normalizedState)
 		if err := ProcessCronJobs(ctx, mgr, cronJobs, normalizedState, policyNamespace); err != nil {
 			return err
 		}
@@ -67,17 +73,20 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 	log := log.FromContext(ctx)
 
 	// Normalize the state if needed
-	normalizedState := desiredState
-	if !strings.EqualFold(normalizedState, "PRIMARY") && !strings.EqualFold(normalizedState, "STANDBY") {
-		if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") {
-			normalizedState = "PRIMARY"
-		} else if strings.EqualFold(desiredState, "passive") || strings.EqualFold(desiredState, "secondary") || strings.EqualFold(desiredState, "standby") {
-			normalizedState = "STANDBY"
-		}
+	normalizedState := strings.ToUpper(desiredState)
+	if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") {
+		normalizedState = "PRIMARY"
+	} else if strings.EqualFold(desiredState, "passive") || strings.EqualFold(desiredState, "secondary") || strings.EqualFold(desiredState, "standby") {
+		normalizedState = "STANDBY"
 	}
 
 	// Determine if we should suspend or resume
 	suspend := normalizedState == "STANDBY"
+
+	log.Info("Processing cronjobs",
+		"count", len(cronJobs),
+		"suspend", suspend,
+		"normalizedState", normalizedState)
 
 	// Process all cronjobs
 	for _, cj := range cronJobs {
@@ -99,7 +108,7 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 		}
 
 		// Check if the cronjob needs to be suspended or resumed
-		if *cronjob.Spec.Suspend != suspend {
+		if cronjob.Spec.Suspend == nil || *cronjob.Spec.Suspend != suspend {
 			// Update the suspend field
 			log.Info("Updating CronJob", "name", cj.Name, "namespace", namespace, "suspend", suspend)
 			cronjob.Spec.Suspend = &suspend
@@ -107,6 +116,8 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 				log.Error(err, "Failed to update CronJob", "name", cj.Name, "namespace", namespace)
 				return err
 			}
+		} else {
+			log.Info("CronJob already in correct state", "name", cj.Name, "namespace", namespace, "suspend", suspend)
 		}
 	}
 
@@ -117,7 +128,7 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deployments, statefulSets []crdv1alpha1.ResourceReference, desiredState string, policyNamespace string) error {
 	log := log.FromContext(ctx)
 
-	// Normalize the desired state
+	// Normalize the desired state for consistency
 	normalizedState := strings.ToUpper(desiredState)
 	if strings.EqualFold(desiredState, "active") || strings.EqualFold(desiredState, "primary") {
 		normalizedState = "PRIMARY"
@@ -127,14 +138,12 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 
 	// In primary mode, Flux will handle scaling up deployments and stateful sets
 	if normalizedState == "PRIMARY" {
-		log.Info("Primary mode: Flux will handle restoring deployments and statefulsets")
+		log.Info("PRIMARY mode: Flux will handle restoring deployments and statefulsets")
 		return nil
 	}
 
-	// In all other modes (STANDBY, passive, etc.), scale down to 0
-	log.Info("Processing deployments and statefulsets for scaling down",
-		"desiredState", desiredState,
-		"normalizedState", normalizedState,
+	// In STANDBY mode, scale down to 0
+	log.Info("STANDBY mode: Scaling down workloads",
 		"deployments", len(deployments),
 		"statefulSets", len(statefulSets))
 
@@ -158,7 +167,7 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 		}
 
 		// Scale down to 0 replicas if not already at 0
-		if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas > 0 {
+		if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas > 0 {
 			log.Info("Scaling down Deployment", "name", deployment.Name, "namespace", namespace, "currentReplicas", *deploy.Spec.Replicas)
 			zeroReplicas := int32(0)
 			deploy.Spec.Replicas = &zeroReplicas
@@ -166,6 +175,8 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 				log.Error(err, "Failed to scale down Deployment", "name", deployment.Name, "namespace", namespace)
 				return err
 			}
+		} else {
+			log.Info("Deployment already scaled to 0", "name", deployment.Name, "namespace", namespace)
 		}
 	}
 
@@ -189,7 +200,7 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 		}
 
 		// Scale down to 0 replicas if not already at 0
-		if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
+		if sts.Spec.Replicas == nil || *sts.Spec.Replicas > 0 {
 			log.Info("Scaling down StatefulSet", "name", statefulSet.Name, "namespace", namespace, "currentReplicas", *sts.Spec.Replicas)
 			zeroReplicas := int32(0)
 			sts.Spec.Replicas = &zeroReplicas
@@ -197,6 +208,8 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 				log.Error(err, "Failed to scale down StatefulSet", "name", statefulSet.Name, "namespace", namespace)
 				return err
 			}
+		} else {
+			log.Info("StatefulSet already scaled to 0", "name", statefulSet.Name, "namespace", namespace)
 		}
 	}
 

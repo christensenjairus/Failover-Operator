@@ -134,10 +134,6 @@ spec:
                   - type
                   type: object
                 type: array
-              currentState:
-                description: CurrentState reflects the actual failover state ("primary"
-                  or "secondary") of the system.
-                type: string
               pendingVolumeReplicationUpdates:
                 description: |-
                   PendingVolumeReplicationUpdates represents the number of VolumeReplication objects

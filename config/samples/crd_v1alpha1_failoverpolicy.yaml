@@ -8,36 +8,61 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: failover-operator
   annotations:
-    failover-operator.hahomelabs.com/desired-state: "active"
-  name: failoverpolicy-sample
+    failover-operator.hahomelabs.com/desired-state: "PRIMARY"
+  name: wordpress
+  namespace: wordpress
 spec:
   # FailoverMode determines how failover is handled
   # 'safe' - ensures data is fully synced before failover
   # 'fast' - allows immediate transition without waiting
   failoverMode: safe
   
-  # Define your application components
-  components:
-    - name: my-application
-      # Specify VolumeReplications to manage
-      volumeReplications:
-        - "vol-rep-1"
-        - "vol-rep-2"
-      # Specify workloads (these will be scaled down when in passive mode)
-      workloads:
-        - kind: Deployment
-          name: my-app-deployment
-        - kind: StatefulSet
-          name: my-app-statefulset
-        - kind: CronJob
-          name: my-app-cronjob
-      # Specify VirtualServices for DNS switching
-      virtualServices:
-        - "my-app-service"
-  
-  # Define Flux resources that should be suspended in passive mode
+  # Define Flux resources that should be suspended in STANDBY mode
   parentFluxResources:
     - kind: HelmRelease
-      name: my-app-helm-release
-    - kind: Kustomization
-      name: my-app-kustomization
+      name: wordpress
+  
+  # Define your application components
+  components:
+    # Database component
+    - name: database
+      workloads:
+        - kind: StatefulSet
+          name: wordpress-mariadb-primary
+        - kind: StatefulSet
+          name: wordpress-mariadb-secondary
+      # Specify VolumeReplications to manage
+      volumeReplications:
+        - "data-wordpress-mariadb-primary-0"
+        - "data-wordpress-mariadb-secondary-0"
+        - "data-wordpress-mariadb-secondary-1"
+    
+    # Cache component
+    - name: cache
+      workloads:
+        - kind: StatefulSet
+          name: wordpress-memcached
+    
+    # Web component
+    - name: web
+      workloads:
+        - kind: Deployment
+          name: wordpress
+      # Specify VirtualServices for DNS switching
+      virtualServices:
+        - "wordpress"
+
+status:
+  # Current state: PRIMARY or STANDBY
+  state: "PRIMARY"
+  # Overall health status: OK, DEGRADED, ERROR
+  health: "ERROR"
+  
+  # Component health status
+  components:
+    - name: database
+      health: "ERROR" # pods are crashlooping, or errors with resources like volumereplication not becoming promoted
+    - name: cache
+      health: "DEGRADED" # one pod is not ready (it just barely started)
+    - name: web
+      health: "OK" # pods are all ready

@@ -123,92 +123,136 @@ apiVersion: crd.hahomelabs.com/v1alpha1
 kind: FailoverPolicy
 metadata:
   name: failoverpolicy-sample
+  annotations:
+    # Manage state via annotations (preferred)
+    failover-operator.hahomelabs.com/desired-state: "PRIMARY"
 spec:
-  # Determine the intended state - "primary" or "secondary"
-  desiredState: primary
+  # Determine the failover approach - "safe" or "fast"
+  failoverMode: safe
   
-  # Determine the failover approach - "safe" or "unsafe"
-  mode: safe
-  
-  # Define all managed resources in a single list
-  managedResources:
-    # Volume replications
-    - kind: VolumeReplication
-      name: volume-replication-1
-    - kind: VolumeReplication
-      name: volume-replication-2
-      namespace: different-namespace
+  # Define application components and their resources
+  components:
+    - name: database
+      workloads:
+        - kind: StatefulSet
+          name: mysql
+      volumeReplications:
+        - mysql-data-volume
     
-    # Kubernetes workloads
-    - kind: Deployment
-      name: web-frontend
-    - kind: Deployment
-      name: api-server
-      namespace: api
-    - kind: StatefulSet
-      name: database
-    - kind: CronJob
-      name: backup-job
-    
-    # Flux resources
+    - name: api
+      workloads:
+        - kind: Deployment
+          name: api-server
+        - kind: Deployment
+          name: api-worker
+      volumeReplications:
+        - api-config-volume
+
+    - name: frontend
+      workloads:
+        - kind: Deployment
+          name: web-ui
+      virtualServices:
+        - web-virtualservice
+
+  # Define Flux resources that need to be suspended during failover
+  parentFluxResources:
     - kind: HelmRelease
       name: ingress-nginx
-      namespace: ingress-nginx
     - kind: Kustomization
       name: core-services
-      namespace: flux-system
-    
-    # Istio resources
-    - kind: VirtualService
-      name: web-virtualservice
+      
 ```
 
-### Resource Management Behavior
+### Component-Based Architecture
 
-When a `FailoverPolicy` is in **primary** mode:
-- VolumeReplications are set to `primary` mode
-- Deployments, StatefulSets, CronJobs are managed by Flux
-- Flux resources (HelmReleases, Kustomizations) are active
-- VirtualServices are updated to route traffic to this site
+The operator now supports a component-based approach for defining managed resources:
 
-When a `FailoverPolicy` is in **secondary** mode:
-- Flux resources are suspended first
-- VirtualServices are immediately updated to stop routing traffic
-- CronJobs are suspended 
-- Deployments and StatefulSets are scaled down to 0 replicas
-- System waits for all pods to be fully terminated
-- VolumeReplications are then set to `secondary` mode
+- **Components**: Logical groupings of related resources that make up your application
+- **Workloads**: Deployments, StatefulSets, and CronJobs within each component
+- **VolumeReplications**: Storage resources associated with each component
+- **VirtualServices**: Network routing resources associated with each component
+
+This structure provides:
+1. Better organization and grouping of related resources
+2. More granular health checking at the component level
+3. Clearer status reporting in the FailoverPolicy status
+
+### Health Status Monitoring
+
+The operator performs detailed health checks for each component and reports status at both the component and overall policy levels:
+
+- **Overall Health**: Aggregated health status of all components
+- **Component Health**: Individual health status for each defined component
+- **Detailed Messages**: Human-readable messages explaining any issues
+
+Health status values:
+- `OK`: Everything is working as expected
+- `DEGRADED`: Some resources are not in their desired state but the system is still functional
+- `ERROR`: Critical failures have been detected
 
 ### FailoverPolicy Status Information
 
 The operator updates the `status` field of the FailoverPolicy resource with detailed information:
 
 ```yaml
+# This is an example of the output from the status fields
 status:
-  conditions:
-  - lastTransitionTime: "2023-12-12T12:00:00Z"
-    message: Failover to primary mode completed successfully
-    reason: FailoverComplete
-    status: "True"
-    type: FailoverReady
-  currentState: primary
+  # Overall policy state
+  state: PRIMARY
+  health: OK
+  
+  # Component-level health status
+  components:
+    - name: database
+      health: OK
+    - name: api
+      health: OK
+    - name: frontend
+      health: OK
+  
+  # Transition information
+  lastTransitionMessage: Successfully transitioned to PRIMARY mode
+  lastTransitionReason: Complete
+  lastTransitionTime: "2023-06-15T05:21:34Z"
+  
+  # Volume replication status details
   volumeReplicationStatuses:
-  - currentState: primary
-    error: ""
-    lastUpdateTime: "2023-12-12T12:00:00Z" 
-    name: volume-replication-1
-  workloadStatuses:
-  - kind: Deployment
-    name: web-frontend
-    state: Active
-    error: "Deployment has 3 replicas"
-    lastUpdateTime: "2023-12-12T12:00:00Z"
-  - kind: StatefulSet
-    name: database
-    state: Active
-    error: "StatefulSet has 2 replicas"
-    lastUpdateTime: "2023-12-12T12:00:00Z"
-  workloadStatus: "3/3 active"
+  - name: mysql-data-volume
+    state: primary-rwx
+    lastUpdateTime: "2023-06-15T05:21:34Z"
+  - name: api-config-volume
+    state: primary-rwx
+    lastUpdateTime: "2023-06-15T05:21:34Z"
+```
+
+When issues are detected, the status will show more detailed information:
+
+```yaml
+status:
+  state: PRIMARY
+  health: DEGRADED
+  
+  components:
+    - name: database
+      health: OK
+    - name: api
+      health: DEGRADED
+      message: "Deployment api-worker has 1/3 ready replicas; Container api-cache in pod api-worker-78d9bd6c4-2xvf4 is not ready"
+    - name: frontend
+      health: OK
+  
+  lastTransitionMessage: Successfully transitioned to PRIMARY mode
+  lastTransitionReason: Complete
+  lastTransitionTime: "2023-06-15T05:21:34Z"
+  
+  volumeReplicationStatuses:
+  - name: mysql-data-volume
+    state: primary-rwx
+    lastUpdateTime: "2023-06-15T05:21:34Z"
+  - name: api-config-volume
+    state: primary-rwx
+    lastUpdateTime: "2023-06-15T05:21:34Z"
 ```
 
 ## Failover Modes
@@ -354,42 +398,25 @@ Following are the steps to build the installer and distribute this project to us
 
 1. Build the installer for the image built and published in the registry:
 
-```sh
-make build-installer IMG=<some-registry>/failover-operator:tag
+```
+## Status
+
+The operator maintains the status of the FailoverPolicy, including:
+
+- Current state (active or passive)
+- Health status
+- Last transition details
+
+Example output from status fields:
+
+```yaml
+status:
+  state: PRIMARY
+  health: healthy
+  lastTransition:
+    error: ""
+    timestamp: "2023-06-01T12:30:45Z"
+    transitionSuccessful: true
 ```
 
-NOTE: The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without
-its dependencies.
-
-2. Using the installer
-
-Users can just run kubectl apply -f <URL for YAML BUNDLE> to install the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/failover-operator/<tag or branch>/dist/install.yaml
-```
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+This shows a FailoverPolicy in active mode with a healthy status and successful last transition.

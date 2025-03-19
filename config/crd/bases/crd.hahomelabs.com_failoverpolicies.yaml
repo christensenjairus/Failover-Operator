@@ -124,7 +124,7 @@ spec:
               desiredState:
                 description: |-
                   DesiredState represents the intended failover state ("active" or "passive").
-                  Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead
+                  Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead with values "PRIMARY" or "STANDBY"
                 enum:
                 - active
                 - passive
@@ -311,6 +311,33 @@ spec:
           status:
             description: FailoverPolicyStatus defines the observed state of FailoverPolicy
             properties:
+              components:
+                description: Components contains status information for each component
+                  defined in the spec
+                items:
+                  description: ComponentStatus defines the status of a component
+                  properties:
+                    health:
+                      description: |-
+                        Health indicates the health status of the component
+                        Values: "OK", "DEGRADED", "ERROR"
+                      enum:
+                      - OK
+                      - DEGRADED
+                      - ERROR
+                      type: string
+                    message:
+                      description: Message provides additional details about the component
+                        health
+                      type: string
+                    name:
+                      description: Name of the component
+                      type: string
+                  required:
+                  - health
+                  - name
+                  type: object
+                type: array
               conditions:
                 description: Conditions represent the current state of failover reconciliation.
                 items:
@@ -368,12 +395,14 @@ spec:
                   - type
                   type: object
                 type: array
-              currentState:
-                description: CurrentState reflects the actual failover state ("active"
-                  or "passive") of the system.
-                type: string
               health:
-                description: Health indicates the overall health of the failover policy
+                description: |-
+                  Health indicates the overall health of the failover policy
+                  Values: "OK", "DEGRADED", "ERROR"
+                enum:
+                - OK
+                - DEGRADED
+                - ERROR
                 type: string
               lastTransitionDetails:
                 description: LastTransitionDetails contains detailed information about
@@ -390,6 +419,13 @@ spec:
               lastTransitionTime:
                 description: LastTransitionTime is the time when the last state transition
                   occurred
+                type: string
+              state:
+                description: State reflects the actual failover state ("PRIMARY" or
+                  "STANDBY") of the system.
+                enum:
+                - PRIMARY
+                - STANDBY
                 type: string
               volumeReplicationStatuses:
                 description: VolumeReplicationStatuses contains status information
@@ -410,40 +446,6 @@ spec:
                   required:
                   - name
                   - state
-                  type: object
-                type: array
-              workloadStatus:
-                description: WorkloadStatus indicates whether workloads have been
-                  properly scaled/suspended
-                type: string
-              workloadStatuses:
-                description: WorkloadStatuses contains detailed status information
-                  for individual workloads
-                items:
-                  description: WorkloadStatus defines the status of a managed workload
-                  properties:
-                    error:
-                      description: Error contains any error messages if the workload
-                        couldn't be managed properly
-                      type: string
-                    kind:
-                      description: Kind of the workload (Deployment, StatefulSet,
-                        CronJob)
-                      type: string
-                    lastUpdateTime:
-                      description: LastUpdateTime is the time when the status was
-                        last updated
-                      type: string
-                    name:
-                      description: Name of the workload
-                      type: string
-                    state:
-                      description: State indicates the current state of the workload
-                        (scaled down, suspended, etc.)
-                      type: string
-                  required:
-                  - kind
-                  - name
                   type: object
                 type: array
             type: object

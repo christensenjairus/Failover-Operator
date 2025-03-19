@@ -8,10 +8,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 )
 
 // Manager handles operations related to status updates
@@ -129,20 +132,51 @@ func (m *Manager) updateVolumeReplicationStatus(ctx context.Context, policy *crd
 			namespace = policy.Namespace
 		}
 
+		// Actually get the current VolumeReplication state from the cluster
+		state, err := m.vrManager.GetCurrentVolumeReplicationState(ctx, volRep.Name, namespace)
+		if err != nil {
+			// Handle the error
+			status := crdv1alpha1.VolumeReplicationStatus{
+				Name:           volRep.Name,
+				State:          "unknown",
+				Error:          err.Error(),
+				LastUpdateTime: time.Now().Format(time.RFC3339),
+				Message:        "Error getting volume replication state",
+			}
+			policy.Status.VolumeReplicationStatuses = append(policy.Status.VolumeReplicationStatuses, status)
+			continue
+		}
+
+		// Check for any errors
+		errMsg, hasError := m.vrManager.CheckVolumeReplicationError(ctx, volRep.Name, namespace)
+
 		status := crdv1alpha1.VolumeReplicationStatus{
 			Name:           volRep.Name,
+			State:          state,
 			LastUpdateTime: time.Now().Format(time.RFC3339),
 		}
 
+		// Handle different states based on the desired policy mode
 		switch desiredState {
 		case "PRIMARY":
-			status.State = "primary-rwx"
-			status.Message = "Volume is in primary read-write mode"
+			if hasError {
+				status.Error = errMsg
+				status.Message = "Volume replication error in primary mode"
+			} else if !strings.Contains(state, "primary") {
+				status.Message = "Volume is transitioning to primary mode"
+			} else {
+				status.Message = "Volume is in primary read-write mode"
+			}
 		case "STANDBY":
-			status.State = "secondary-ro"
-			status.Message = "Volume is in secondary read-only mode"
+			if hasError {
+				status.Error = errMsg
+				status.Message = "Volume replication error in secondary mode"
+			} else if !strings.Contains(state, "secondary") {
+				status.Message = "Volume is transitioning to secondary mode"
+			} else {
+				status.Message = "Volume is in secondary read-only mode"
+			}
 		default:
-			status.State = "unknown"
 			status.Message = "Volume replication state is unknown"
 		}
 
@@ -180,12 +214,117 @@ func (m *Manager) updateHealthStatus(ctx context.Context, policy *crdv1alpha1.Fa
 	for _, component := range policy.Spec.Components {
 		compStatus := crdv1alpha1.ComponentStatus{
 			Name:   component.Name,
-			Health: "OK", // Default to OK
+			Health: "OK", // Default to OK, will be updated based on checks
 		}
 
-		// For now, we're just setting default values
-		// In a real implementation, we'd check workload statuses, VolumeReplications, etc.
-		// This is a placeholder for more detailed health checks that will be implemented
+		// Get deployments and statefulsets from component workloads
+		var deployments, statefulSets []string
+		for _, workload := range component.Workloads {
+			if workload.Kind == "Deployment" {
+				deployments = append(deployments, workload.Name)
+			} else if workload.Kind == "StatefulSet" {
+				statefulSets = append(statefulSets, workload.Name)
+			}
+		}
+
+		// Check deployments health
+		for _, deployName := range deployments {
+			// Get the deployment
+			deployment := &appsv1.Deployment{}
+			if err := m.client.Get(ctx, types.NamespacedName{Name: deployName, Namespace: policy.Namespace}, deployment); err != nil {
+				if !errors.IsNotFound(err) {
+					log.Error(err, "Failed to get Deployment", "name", deployName, "namespace", policy.Namespace)
+				}
+				compStatus.Health = "ERROR"
+				compStatus.Message = "Deployment not found or error retrieving it"
+				break
+			}
+
+			// Check if deployment is healthy (all pods available and ready)
+			if deployment.Status.ReadyReplicas < deployment.Status.Replicas ||
+				deployment.Status.AvailableReplicas < deployment.Status.Replicas {
+
+				// If desired state is STANDBY, we expect scaled down resources
+				if policy.Status.State == "STANDBY" && deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
+					// This is expected in STANDBY mode
+					continue
+				}
+
+				if deployment.Status.ReadyReplicas == 0 {
+					compStatus.Health = "ERROR"
+					compStatus.Message = "No ready pods in deployment"
+				} else {
+					compStatus.Health = "DEGRADED"
+					compStatus.Message = "Deployment has unhealthy pods"
+				}
+				break
+			}
+		}
+
+		// Check StatefulSets health if deployment checks passed
+		if compStatus.Health == "OK" {
+			for _, stsName := range statefulSets {
+				// Get the statefulset
+				statefulSet := &appsv1.StatefulSet{}
+				if err := m.client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: policy.Namespace}, statefulSet); err != nil {
+					if !errors.IsNotFound(err) {
+						log.Error(err, "Failed to get StatefulSet", "name", stsName, "namespace", policy.Namespace)
+					}
+					compStatus.Health = "ERROR"
+					compStatus.Message = "StatefulSet not found or error retrieving it"
+					break
+				}
+
+				// Check if statefulset is healthy (all pods ready)
+				if statefulSet.Status.ReadyReplicas < statefulSet.Status.Replicas {
+					// If desired state is STANDBY, we expect scaled down resources
+					if policy.Status.State == "STANDBY" && statefulSet.Spec.Replicas != nil && *statefulSet.Spec.Replicas == 0 {
+						// This is expected in STANDBY mode
+						continue
+					}
+
+					if statefulSet.Status.ReadyReplicas == 0 {
+						compStatus.Health = "ERROR"
+						compStatus.Message = "No ready pods in statefulset"
+					} else {
+						compStatus.Health = "DEGRADED"
+						compStatus.Message = "StatefulSet has unhealthy pods"
+					}
+					break
+				}
+			}
+		}
+
+		// Check VolumeReplications health if other checks passed
+		if compStatus.Health == "OK" && len(component.VolumeReplications) > 0 {
+			for _, volRepName := range component.VolumeReplications {
+				// Check the VolumeReplication state using the interface method
+				state, err := m.vrManager.GetCurrentVolumeReplicationState(ctx, volRepName, policy.Namespace)
+				if err != nil {
+					log.Error(err, "Failed to get VolumeReplication state", "name", volRepName, "namespace", policy.Namespace)
+					compStatus.Health = "ERROR"
+					compStatus.Message = "Failed to get VolumeReplication state"
+					break
+				}
+
+				// Check for errors
+				errMsg, hasError := m.vrManager.CheckVolumeReplicationError(ctx, volRepName, policy.Namespace)
+				if hasError {
+					compStatus.Health = "ERROR"
+					compStatus.Message = "VolumeReplication error: " + errMsg
+					break
+				}
+
+				// Validate state matches expected state based on policy mode
+				if policy.Status.State == "PRIMARY" && !strings.Contains(state, "primary") {
+					compStatus.Health = "DEGRADED"
+					compStatus.Message = "VolumeReplication not in primary state when policy is PRIMARY"
+				} else if policy.Status.State == "STANDBY" && !strings.Contains(state, "secondary") {
+					compStatus.Health = "DEGRADED"
+					compStatus.Message = "VolumeReplication not in secondary state when policy is STANDBY"
+				}
+			}
+		}
 
 		// Add to status
 		policy.Status.Components = append(policy.Status.Components, compStatus)
@@ -244,6 +383,7 @@ func groupResourcesByType(policy *crdv1alpha1.FailoverPolicy) ResourcesByType {
 			Namespace: resource.Namespace,
 		}
 
+		// Use the Kind field from ManagedResource
 		switch resource.Kind {
 		case "VolumeReplication":
 			result.volumeReplications = append(result.volumeReplications, ref)

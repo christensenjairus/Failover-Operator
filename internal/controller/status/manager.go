@@ -58,29 +58,29 @@ func (m *Manager) UpdateStatus(ctx context.Context, policy *crdv1alpha1.Failover
 	return nil
 }
 
-// updateDesiredStateStatus updates the status message based on the desired state
+// updateDesiredStateStatus updates the status based on the desired state annotation or spec field
 func (m *Manager) updateDesiredStateStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) error {
 	if annotation, ok := policy.Annotations["failover-operator.hahomelabs.com/desired-state"]; ok {
-		// Normalize annotation value
-		desiredAnno := strings.ToLower(annotation)
-
-		// Handle both new and old terminology, including 'inactive'
-		if desiredAnno == "active" || desiredAnno == "primary" {
+		// Handle values in the annotation (case-insensitive)
+		switch strings.ToUpper(annotation) {
+		case "PRIMARY", "ACTIVE":
 			policy.Status.State = "PRIMARY"
-		} else if desiredAnno == "passive" || desiredAnno == "secondary" || desiredAnno == "inactive" || desiredAnno == "standby" {
+		case "STANDBY", "SECONDARY", "PASSIVE":
 			policy.Status.State = "STANDBY"
-		} else {
-			policy.Status.State = "Unknown"
+		default:
+			// For unknown values, use uppercase
+			policy.Status.State = strings.ToUpper(annotation)
 		}
 	} else if policy.Spec.DesiredState != "" {
-		// Legacy field - map old terminology to new
-		specState := strings.ToLower(policy.Spec.DesiredState)
-		if specState == "active" || specState == "primary" {
+		// Legacy field - map old terminology to new uppercase format
+		switch strings.ToLower(policy.Spec.DesiredState) {
+		case "active", "primary":
 			policy.Status.State = "PRIMARY"
-		} else if specState == "passive" || specState == "secondary" || specState == "standby" {
+		case "passive", "secondary", "standby":
 			policy.Status.State = "STANDBY"
-		} else {
-			policy.Status.State = "Unknown"
+		default:
+			// For unknown values, use uppercase
+			policy.Status.State = strings.ToUpper(policy.Spec.DesiredState)
 		}
 	} else {
 		// Default to PRIMARY if nothing is specified
@@ -95,23 +95,50 @@ func (m *Manager) updateVolumeReplicationStatus(ctx context.Context, policy *crd
 	// Set the current volume replication status count to 0
 	policy.Status.VolumeReplicationStatuses = []crdv1alpha1.VolumeReplicationStatus{}
 
-	// If no volume replications defined, clear the statuses
-	if len(policy.Spec.VolumeReplications) == 0 {
+	// Group resources by type to get all volumeReplications
+	resourcesByType := groupResourcesByType(policy)
+
+	// If no volume replications defined, return early
+	if len(resourcesByType.volumeReplications) == 0 {
 		return nil
 	}
 
+	// Determine the desired state
+	var desiredState string
+	if val, exists := policy.Annotations["failover-operator.hahomelabs.com/desired-state"]; exists {
+		desiredState = strings.ToUpper(val)
+	} else if policy.Spec.DesiredState != "" {
+		// Map legacy values to new format
+		switch strings.ToLower(policy.Spec.DesiredState) {
+		case "primary", "active":
+			desiredState = "PRIMARY"
+		case "secondary", "passive", "standby":
+			desiredState = "STANDBY"
+		default:
+			desiredState = strings.ToUpper(policy.Spec.DesiredState)
+		}
+	} else {
+		// Default to PRIMARY if not specified
+		desiredState = "PRIMARY"
+	}
+
 	// For each volume replication, add a status entry
-	for _, volRep := range policy.Spec.VolumeReplications {
+	for _, volRep := range resourcesByType.volumeReplications {
+		namespace := volRep.Namespace
+		if namespace == "" {
+			namespace = policy.Namespace
+		}
+
 		status := crdv1alpha1.VolumeReplicationStatus{
 			Name:           volRep.Name,
 			LastUpdateTime: time.Now().Format(time.RFC3339),
 		}
 
-		switch policy.Spec.DesiredState {
-		case "primary":
+		switch desiredState {
+		case "PRIMARY":
 			status.State = "primary-rwx"
 			status.Message = "Volume is in primary read-write mode"
-		case "secondary":
+		case "STANDBY":
 			status.State = "secondary-ro"
 			status.Message = "Volume is in secondary read-only mode"
 		default:
@@ -135,6 +162,20 @@ func (m *Manager) updateHealthStatus(ctx context.Context, policy *crdv1alpha1.Fa
 	// Clear existing components status
 	policy.Status.Components = []crdv1alpha1.ComponentStatus{}
 
+	// Check if there are components defined
+	if len(policy.Spec.Components) == 0 {
+		policy.Status.Health = "OK" // Default to OK if no components
+		log.Info("No components defined in spec, setting default health", "health", policy.Status.Health)
+		return
+	}
+
+	// Maps for counting component health levels
+	healthCounts := map[string]int{
+		"OK":       0,
+		"DEGRADED": 0,
+		"ERROR":    0,
+	}
+
 	// Check health for each component in spec
 	for _, component := range policy.Spec.Components {
 		compStatus := crdv1alpha1.ComponentStatus{
@@ -142,14 +183,34 @@ func (m *Manager) updateHealthStatus(ctx context.Context, policy *crdv1alpha1.Fa
 			Health: "OK", // Default to OK
 		}
 
-		// Various health checks would go here
-		// For now, just add the component with OK status
+		// For now, we're just setting default values
+		// In a real implementation, we'd check workload statuses, VolumeReplications, etc.
+		// This is a placeholder for more detailed health checks that will be implemented
 
 		// Add to status
 		policy.Status.Components = append(policy.Status.Components, compStatus)
+		healthCounts[compStatus.Health]++
 	}
 
-	log.Info("Health status updated", "policy", policy.Name, "health", policy.Status.Health)
+	// Update overall health based on component health counts
+	// If any component is ERROR, the overall health is ERROR
+	// If any component is DEGRADED (and none are ERROR), the overall health is DEGRADED
+	// Otherwise, the overall health is OK
+	if healthCounts["ERROR"] > 0 {
+		policy.Status.Health = "ERROR"
+	} else if healthCounts["DEGRADED"] > 0 {
+		policy.Status.Health = "DEGRADED"
+	} else {
+		policy.Status.Health = "OK"
+	}
+
+	log.Info("Health status updated",
+		"policy", policy.Name,
+		"health", policy.Status.Health,
+		"components", len(policy.Status.Components),
+		"ok", healthCounts["OK"],
+		"degraded", healthCounts["DEGRADED"],
+		"error", healthCounts["ERROR"])
 }
 
 // ResourcesByType holds references to resources grouped by their type
@@ -238,44 +299,29 @@ func getResourceNames(refs []crdv1alpha1.ResourceReference) []string {
 
 // UpdateFailoverStatus updates the status of a FailoverPolicy
 func (m *Manager) UpdateFailoverStatus(ctx context.Context, failoverPolicy *crdv1alpha1.FailoverPolicy, failoverError bool, errorMessage string) error {
-	log := log.FromContext(ctx)
-
 	// Get desired state from annotations (preferred) or spec (legacy)
 	var desiredState string
 	if val, exists := failoverPolicy.Annotations["failover-operator.hahomelabs.com/desired-state"]; exists {
-		// Normalize the annotation value
-		annoVal := strings.ToLower(val)
-
-		if annoVal == "primary" || annoVal == "active" {
-			desiredState = "active"
-		} else if annoVal == "standby" || annoVal == "secondary" || annoVal == "passive" {
-			desiredState = "passive"
-		} else {
-			log.Info("Unknown desired state in annotation", "value", val)
-			desiredState = annoVal
-		}
+		// Normalize the annotation value to uppercase for the new format
+		desiredState = strings.ToUpper(val)
 	} else if failoverPolicy.Spec.DesiredState != "" {
-		// Legacy support for spec.desiredState
-		specState := strings.ToLower(failoverPolicy.Spec.DesiredState)
-		if specState == "primary" {
-			desiredState = "active"
-		} else if specState == "secondary" || specState == "standby" {
-			desiredState = "passive"
-		} else {
-			desiredState = specState
+		// Legacy support for spec.desiredState - map to new uppercase format
+		switch strings.ToLower(failoverPolicy.Spec.DesiredState) {
+		case "primary", "active":
+			desiredState = "PRIMARY"
+		case "secondary", "passive", "standby":
+			desiredState = "STANDBY"
+		default:
+			desiredState = strings.ToUpper(failoverPolicy.Spec.DesiredState)
 		}
 	} else {
-		// Default to active if not specified
-		desiredState = "active"
+		// Default to PRIMARY if not specified
+		desiredState = "PRIMARY"
 	}
 
 	// Update the state of the failover policy
 	if !failoverError {
-		if desiredState == "active" {
-			failoverPolicy.Status.State = "PRIMARY"
-		} else {
-			failoverPolicy.Status.State = "STANDBY"
-		}
+		failoverPolicy.Status.State = desiredState
 	}
 
 	// Update health status

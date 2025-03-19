@@ -199,7 +199,7 @@ type FailoverPolicySpec struct {
 	ManagedResources []ManagedResource `json:"managedResources,omitempty"`
 
 	// DesiredState represents the intended failover state ("active" or "passive").
-	// Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead
+	// Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead with values "PRIMARY" or "STANDBY"
 	// +kubebuilder:validation:Enum=active;passive
 	// +optional
 	DesiredState string `json:"desiredState,omitempty"`
@@ -256,32 +256,35 @@ type VolumeReplicationStatus struct {
 	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
 }
 
-// WorkloadStatus defines the status of a managed workload
-type WorkloadStatus struct {
-	// Name of the workload
+// ComponentStatus defines the status of a component
+type ComponentStatus struct {
+	// Name of the component
 	Name string `json:"name"`
 
-	// Kind of the workload (Deployment, StatefulSet, CronJob)
-	Kind string `json:"kind"`
+	// Health indicates the health status of the component
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	Health string `json:"health"`
 
-	// State indicates the current state of the workload (scaled down, suspended, etc.)
-	State string `json:"state,omitempty"`
-
-	// Error contains any error messages if the workload couldn't be managed properly
-	Error string `json:"error,omitempty"`
-
-	// LastUpdateTime is the time when the status was last updated
-	LastUpdateTime string `json:"lastUpdateTime,omitempty"`
+	// Message provides additional details about the component health
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // FailoverPolicyStatus defines the observed state of FailoverPolicy
 type FailoverPolicyStatus struct {
-	// CurrentState reflects the actual failover state ("active" or "passive") of the system.
-	CurrentState string `json:"currentState,omitempty"`
+	// State reflects the actual failover state ("PRIMARY" or "STANDBY") of the system.
+	// +kubebuilder:validation:Enum=PRIMARY;STANDBY
+	State string `json:"state,omitempty"`
 
 	// Health indicates the overall health of the failover policy
-	// +optional
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
 	Health string `json:"health,omitempty"`
+
+	// Components contains status information for each component defined in the spec
+	// +optional
+	Components []ComponentStatus `json:"components,omitempty"`
 
 	// LastTransitionTime is the time when the last state transition occurred
 	// +optional
@@ -306,14 +309,6 @@ type FailoverPolicyStatus struct {
 	// VolumeReplicationStatuses contains status information for VolumeReplications
 	// +optional
 	VolumeReplicationStatuses []VolumeReplicationStatus `json:"volumeReplicationStatuses,omitempty"`
-
-	// WorkloadStatus indicates whether workloads have been properly scaled/suspended
-	// +optional
-	WorkloadStatus string `json:"workloadStatus,omitempty"`
-
-	// WorkloadStatuses contains detailed status information for individual workloads
-	// +optional
-	WorkloadStatuses []WorkloadStatus `json:"workloadStatuses,omitempty"`
 }
 
 // +kubebuilder:object:root=true

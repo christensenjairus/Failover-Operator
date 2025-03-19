@@ -12,8 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
-	"github.com/christensenjairus/Failover-Operator/internal/controller/flux"
-	"github.com/christensenjairus/Failover-Operator/internal/controller/workload"
 )
 
 // Manager handles operations related to status updates
@@ -38,36 +36,55 @@ func NewManager(client client.Client, vrManager VolumeReplicationStatusGetter) *
 	}
 }
 
-// UpdateStatus updates the failover policy's status based on the current state
+// UpdateStatus updates the status of a FailoverPolicy
 func (m *Manager) UpdateStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) error {
 	log := log.FromContext(ctx)
 
-	// Update the FailoverPolicy status
+	// Update the desired state status
 	if err := m.updateDesiredStateStatus(ctx, policy); err != nil {
+		log.Error(err, "Error updating desired state status")
 		return err
 	}
 
+	// Update volume replication status
 	if err := m.updateVolumeReplicationStatus(ctx, policy); err != nil {
+		log.Error(err, "Error updating volume replication status")
 		return err
 	}
 
-	if err := m.updateWorkloadStatus(ctx, policy); err != nil {
-		return err
-	}
+	// Update component health status
+	m.updateHealthStatus(ctx, policy)
 
-	log.Info("Status updated", "Name", policy.Name, "Namespace", policy.Namespace)
 	return nil
 }
 
 // updateDesiredStateStatus updates the status message based on the desired state
 func (m *Manager) updateDesiredStateStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) error {
-	switch policy.Spec.DesiredState {
-	case "primary":
-		policy.Status.CurrentState = "Primary"
-	case "secondary":
-		policy.Status.CurrentState = "Secondary"
-	default:
-		policy.Status.CurrentState = "Unknown"
+	if annotation, ok := policy.Annotations["failover-operator.hahomelabs.com/desired-state"]; ok {
+		// Normalize annotation value
+		desiredAnno := strings.ToLower(annotation)
+
+		// Handle both new and old terminology, including 'inactive'
+		if desiredAnno == "active" || desiredAnno == "primary" {
+			policy.Status.State = "PRIMARY"
+		} else if desiredAnno == "passive" || desiredAnno == "secondary" || desiredAnno == "inactive" || desiredAnno == "standby" {
+			policy.Status.State = "STANDBY"
+		} else {
+			policy.Status.State = "Unknown"
+		}
+	} else if policy.Spec.DesiredState != "" {
+		// Legacy field - map old terminology to new
+		specState := strings.ToLower(policy.Spec.DesiredState)
+		if specState == "active" || specState == "primary" {
+			policy.Status.State = "PRIMARY"
+		} else if specState == "passive" || specState == "secondary" || specState == "standby" {
+			policy.Status.State = "STANDBY"
+		} else {
+			policy.Status.State = "Unknown"
+		}
+	} else {
+		// Default to PRIMARY if nothing is specified
+		policy.Status.State = "PRIMARY"
 	}
 
 	return nil
@@ -108,117 +125,31 @@ func (m *Manager) updateVolumeReplicationStatus(ctx context.Context, policy *crd
 	return nil
 }
 
-// updateWorkloadStatus updates the status for workloads (deployments, statefulsets, cronjobs, flux resources)
-func (m *Manager) updateWorkloadStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) error {
-	// Group resources by type for both legacy fields and the new managedResources field
-	resourcesByType := groupResourcesByType(policy)
+// updateHealthStatus updates the health status of the policy and its components
+func (m *Manager) updateHealthStatus(ctx context.Context, policy *crdv1alpha1.FailoverPolicy) {
+	log := log.FromContext(ctx)
 
-	// Get resource counts
-	deploymentCount := len(resourcesByType.deployments)
-	statefulsetCount := len(resourcesByType.statefulSets)
-	cronjobCount := len(resourcesByType.cronJobs)
-	fluxCount := len(resourcesByType.helmReleases) + len(resourcesByType.kustomizations)
+	// Initialize overall health as OK, will be updated based on component health
+	policy.Status.Health = "OK"
 
-	// If no workloads or flux resources defined, update status accordingly
-	if deploymentCount == 0 && statefulsetCount == 0 && cronjobCount == 0 && fluxCount == 0 {
-		policy.Status.WorkloadStatus = "No resources defined"
-		policy.Status.WorkloadStatuses = nil
-		return nil
+	// Clear existing components status
+	policy.Status.Components = []crdv1alpha1.ComponentStatus{}
+
+	// Check health for each component in spec
+	for _, component := range policy.Spec.Components {
+		compStatus := crdv1alpha1.ComponentStatus{
+			Name:   component.Name,
+			Health: "OK", // Default to OK
+		}
+
+		// Various health checks would go here
+		// For now, just add the component with OK status
+
+		// Add to status
+		policy.Status.Components = append(policy.Status.Components, compStatus)
 	}
 
-	// Handle primary or secondary mode differently
-	switch policy.Spec.DesiredState {
-	case "primary":
-		// In primary mode, clear detailed workload statuses and just show summary
-		totalWorkloads := deploymentCount + statefulsetCount + cronjobCount
-
-		var parts []string
-		if totalWorkloads > 0 {
-			parts = append(parts, fmt.Sprintf("%d workload(s) managed by Flux", totalWorkloads))
-		}
-
-		if fluxCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d Flux resource(s) active", fluxCount))
-		}
-
-		policy.Status.WorkloadStatus = strings.Join(parts, ", ")
-		policy.Status.WorkloadStatuses = nil // Clear detailed statuses in primary mode
-
-	case "secondary":
-		// In secondary mode, collect detailed workload statuses
-		var allStatuses []crdv1alpha1.WorkloadStatus
-
-		// Get Kubernetes workload statuses if defined
-		if deploymentCount > 0 || statefulsetCount > 0 || cronjobCount > 0 {
-			// Convert to name-only lists for backward compatibility with workload manager
-			deploymentNames := getResourceNames(resourcesByType.deployments)
-			statefulsetNames := getResourceNames(resourcesByType.statefulSets)
-			cronjobNames := getResourceNames(resourcesByType.cronJobs)
-
-			workloadMgr := workload.NewManager(m.client)
-			k8sStatuses := workloadMgr.GetWorkloadStatuses(ctx, policy.Namespace,
-				deploymentNames, statefulsetNames, cronjobNames)
-			allStatuses = append(allStatuses, k8sStatuses...)
-		}
-
-		// Get Flux resource statuses if defined
-		if fluxCount > 0 {
-			fluxMgr := flux.NewManager(m.client)
-			fluxStatuses := fluxMgr.GetFluxStatuses(ctx,
-				resourcesByType.helmReleases, resourcesByType.kustomizations, policy.Namespace)
-			allStatuses = append(allStatuses, fluxStatuses...)
-		}
-
-		// Update the status with the combined workload statuses
-		policy.Status.WorkloadStatuses = allStatuses
-
-		// Calculate summary statistics
-		scaledDownCount := 0
-		suspendedCronJobCount := 0
-		suspendedFluxCount := 0
-
-		for _, status := range allStatuses {
-			switch status.Kind {
-			case "Deployment", "StatefulSet":
-				if status.State == "Scaled Down" {
-					scaledDownCount++
-				}
-			case "CronJob":
-				if status.State == "Suspended" {
-					suspendedCronJobCount++
-				}
-			case "HelmRelease", "Kustomization":
-				if status.State == "Suspended" {
-					suspendedFluxCount++
-				}
-			}
-		}
-
-		// Create the status message parts
-		var parts []string
-
-		if deploymentCount+statefulsetCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d/%d scaled down",
-				scaledDownCount, deploymentCount+statefulsetCount))
-		}
-
-		if cronjobCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d/%d suspended",
-				suspendedCronJobCount, cronjobCount))
-		}
-
-		if fluxCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d/%d Flux resources suspended",
-				suspendedFluxCount, fluxCount))
-		}
-
-		policy.Status.WorkloadStatus = strings.Join(parts, ", ")
-
-	default:
-		policy.Status.WorkloadStatus = "Resource state unknown"
-	}
-
-	return nil
+	log.Info("Health status updated", "policy", policy.Name, "health", policy.Status.Health)
 }
 
 // ResourcesByType holds references to resources grouped by their type
@@ -309,37 +240,63 @@ func getResourceNames(refs []crdv1alpha1.ResourceReference) []string {
 func (m *Manager) UpdateFailoverStatus(ctx context.Context, failoverPolicy *crdv1alpha1.FailoverPolicy, failoverError bool, errorMessage string) error {
 	log := log.FromContext(ctx)
 
-	// Update current state
-	failoverPolicy.Status.CurrentState = failoverPolicy.Spec.DesiredState
+	// Get desired state from annotations (preferred) or spec (legacy)
+	var desiredState string
+	if val, exists := failoverPolicy.Annotations["failover-operator.hahomelabs.com/desired-state"]; exists {
+		// Normalize the annotation value
+		annoVal := strings.ToLower(val)
 
-	// Update workload status
-	m.updateWorkloadStatus(ctx, failoverPolicy)
+		if annoVal == "primary" || annoVal == "active" {
+			desiredState = "active"
+		} else if annoVal == "standby" || annoVal == "secondary" || annoVal == "passive" {
+			desiredState = "passive"
+		} else {
+			log.Info("Unknown desired state in annotation", "value", val)
+			desiredState = annoVal
+		}
+	} else if failoverPolicy.Spec.DesiredState != "" {
+		// Legacy support for spec.desiredState
+		specState := strings.ToLower(failoverPolicy.Spec.DesiredState)
+		if specState == "primary" {
+			desiredState = "active"
+		} else if specState == "secondary" || specState == "standby" {
+			desiredState = "passive"
+		} else {
+			desiredState = specState
+		}
+	} else {
+		// Default to active if not specified
+		desiredState = "active"
+	}
+
+	// Update the state of the failover policy
+	if !failoverError {
+		if desiredState == "active" {
+			failoverPolicy.Status.State = "PRIMARY"
+		} else {
+			failoverPolicy.Status.State = "STANDBY"
+		}
+	}
+
+	// Update health status
+	m.updateHealthStatus(ctx, failoverPolicy)
 
 	if failoverError {
-		// Create error condition
-		condition := metav1.Condition{
-			Type:               "FailoverReady",
+		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, metav1.Condition{
+			Type:               "FailoverComplete",
 			Status:             metav1.ConditionFalse,
 			Reason:             "FailoverError",
 			Message:            errorMessage,
 			LastTransitionTime: metav1.Now(),
-		}
-		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, condition)
+		})
 	} else {
-		// Create success condition
-		condition := metav1.Condition{
-			Type:               "FailoverReady",
+		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, metav1.Condition{
+			Type:               "FailoverComplete",
 			Status:             metav1.ConditionTrue,
 			Reason:             "FailoverComplete",
-			Message:            fmt.Sprintf("Failover to %s mode completed successfully", failoverPolicy.Spec.DesiredState),
+			Message:            fmt.Sprintf("Failover to %s mode completed successfully", desiredState),
 			LastTransitionTime: metav1.Now(),
-		}
-		meta.SetStatusCondition(&failoverPolicy.Status.Conditions, condition)
-	}
-
-	if err := m.client.Status().Update(ctx, failoverPolicy); err != nil {
-		log.Error(err, "Failed to update FailoverPolicy status")
-		return err
+		})
 	}
 
 	return nil

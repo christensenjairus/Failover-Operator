@@ -2,28 +2,42 @@ apiVersion: crd.hahomelabs.com/v1alpha1
 kind: FailoverPolicy
 metadata:
   labels:
-    app.kubernetes.io/name: failover-operator
+    app.kubernetes.io/name: failoverpolicy
+    app.kubernetes.io/instance: failoverpolicy-sample
+    app.kubernetes.io/part-of: failover-operator
     app.kubernetes.io/managed-by: kustomize
-  name: kyverno
-  namespace: kyverno
+    app.kubernetes.io/created-by: failover-operator
+  annotations:
+    failover-operator.hahomelabs.com/desired-state: "active"
+  name: failoverpolicy-sample
 spec:
-  desiredState: "primary"
-  mode: "safe"
-  managedResources:
-    - kind: Deployment
-      name: kyverno-admission-controller
-    - kind: Deployment
-      name: kyverno-background-controller
-    - kind: Deployment
-      name: kyverno-cleanup-controller
-    - kind: Deployment
-      name: kyverno-reports-controller
-    - kind: CronJob
-      name: kyverno-cleanup-admission-reports
-    - kind: CronJob
-      name: kyverno-cleanup-cluster-admission-reports
+  # FailoverMode determines how failover is handled
+  # 'safe' - ensures data is fully synced before failover
+  # 'fast' - allows immediate transition without waiting
+  failoverMode: safe
+  
+  # Define your application components
+  components:
+    - name: my-application
+      # Specify VolumeReplications to manage
+      volumeReplications:
+        - "vol-rep-1"
+        - "vol-rep-2"
+      # Specify workloads (these will be scaled down when in passive mode)
+      workloads:
+        - kind: Deployment
+          name: my-app-deployment
+        - kind: StatefulSet
+          name: my-app-statefulset
+        - kind: CronJob
+          name: my-app-cronjob
+      # Specify VirtualServices for DNS switching
+      virtualServices:
+        - "my-app-service"
+  
+  # Define Flux resources that should be suspended in passive mode
+  parentFluxResources:
     - kind: HelmRelease
-      name: kyverno
+      name: my-app-helm-release
     - kind: Kustomization
-      name: infra-policies-stage-1
-      namespace: flux-system
+      name: my-app-kustomization

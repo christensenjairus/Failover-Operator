@@ -42,8 +42,16 @@ func (m *Manager) UpdateVirtualService(ctx context.Context, name, namespace, sta
 
 	// Determine the correct annotation based on failover state
 	desiredAnnotation := "ignore"
-	if strings.ToLower(state) == "primary" {
+	if strings.ToLower(state) == "active" {
 		desiredAnnotation = "dns-controller"
+	}
+
+	// Add or update reconcile annotation based on state
+	if strings.ToLower(state) == "passive" {
+		annotations["kustomize.toolkit.fluxcd.io/reconcile"] = "disabled"
+	} else {
+		// In active mode, remove the annotation if present
+		delete(annotations, "kustomize.toolkit.fluxcd.io/reconcile")
 	}
 
 	// Check if update is needed
@@ -52,6 +60,18 @@ func (m *Manager) UpdateVirtualService(ctx context.Context, name, namespace, sta
 		annotations["external-dns.alpha.kubernetes.io/controller"] = desiredAnnotation
 		virtualService.SetAnnotations(annotations)
 
+		if err := m.client.Update(ctx, virtualService); err != nil {
+			return false, err
+		}
+		return true, nil // Indicates an update was made
+	}
+
+	// Check if reconcile annotation needs to be updated
+	_, reconcileExists := virtualService.GetAnnotations()["kustomize.toolkit.fluxcd.io/reconcile"]
+	shouldHaveReconcile := strings.ToLower(state) == "passive"
+
+	if (shouldHaveReconcile && !reconcileExists) || (!shouldHaveReconcile && reconcileExists) {
+		virtualService.SetAnnotations(annotations)
 		if err := m.client.Update(ctx, virtualService); err != nil {
 			return false, err
 		}

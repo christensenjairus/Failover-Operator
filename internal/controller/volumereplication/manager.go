@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,6 +41,18 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 	currentSpec := string(volumeReplication.Spec.ReplicationState)
 	currentStatus := strings.ToLower(string(volumeReplication.Status.State))
 	desiredState := strings.ToLower(state)
+
+	// Check if we have no status yet
+	if currentStatus == "" {
+		if strings.EqualFold(currentSpec, desiredState) {
+			log.Info("VolumeReplication has no status yet but spec is already correct",
+				"name", name,
+				"specState", currentSpec,
+				"desiredState", desiredState)
+			// Spec is already correct, just wait for controller to update status
+			return nil
+		}
+	}
 
 	log.Info("Checking VolumeReplication state",
 		"name", name,
@@ -139,8 +152,17 @@ func (m *Manager) CheckVolumeReplicationError(ctx context.Context, name, namespa
 	// Fetch the VolumeReplication object
 	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, volumeReplication)
 	if err != nil {
+		// If the resource doesn't exist, don't treat this as an error condition
+		if client.IgnoreNotFound(err) == nil {
+			log.Info("VolumeReplication not found during error check - it may need to be created manually",
+				"VolumeReplication", name,
+				"Namespace", namespace)
+			return "", false
+		}
+
+		// For other types of errors, report them
 		log.Error(err, "Failed to get VolumeReplication", "VolumeReplication", name)
-		return "", false
+		return fmt.Sprintf("Error accessing VolumeReplication: %v", err), true
 	}
 
 	// Get the current spec and status state
@@ -211,15 +233,34 @@ func (m *Manager) CheckVolumeReplicationError(ctx context.Context, name, namespa
 
 // GetCurrentVolumeReplicationState retrieves the current state of a VolumeReplication resource
 func (m *Manager) GetCurrentVolumeReplicationState(ctx context.Context, name, namespace string) (string, error) {
+	log := log.FromContext(ctx)
 	volumeReplication := &replicationv1alpha1.VolumeReplication{}
 
 	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, volumeReplication)
 	if err != nil {
-		return "", err
+		return "", client.IgnoreNotFound(err)
+	}
+
+	// Get the status state
+	currentStatus := strings.ToLower(string(volumeReplication.Status.State))
+
+	// If the status state is empty, it could be because the CRD was just created
+	// In this case, check if we have a spec state
+	if currentStatus == "" {
+		currentSpec := string(volumeReplication.Spec.ReplicationState)
+		if currentSpec != "" {
+			log.Info("VolumeReplication has no status state yet, using spec state as current state",
+				"name", name,
+				"specState", currentSpec)
+			// Return the spec state with a marker that it's from spec
+			return currentSpec + "-pending", nil
+		}
+		// No spec state either, this is really unknown
+		return "unknown", nil
 	}
 
 	// Convert to lowercase to ensure consistent comparison
-	return strings.ToLower(string(volumeReplication.Status.State)), nil
+	return currentStatus, nil
 }
 
 // isTransitionalState checks if the VolumeReplication is in a transitional state
@@ -239,6 +280,11 @@ func (m *Manager) isTransitionalState(currentSpec, currentStatus, desiredState s
 
 // GetTransitionMessage returns an appropriate message for a volume in transition
 func (m *Manager) GetTransitionMessage(currentSpec, currentStatus, desiredState string) string {
+	// If currentStatus is empty, likely the VR resource exists but hasn't been properly initialized
+	if currentStatus == "" {
+		return "VolumeReplication exists but status not yet reported by controller"
+	}
+
 	// Primary -> Secondary transition
 	if currentStatus == "primary" && (currentSpec == "secondary" || desiredState == "secondary") {
 		return "Transitioning from primary to secondary - temporary degraded state is expected"
@@ -262,6 +308,15 @@ func (m *Manager) GetTransitionMessage(currentSpec, currentStatus, desiredState 
 			return "Transitioning to primary state - please wait for completion"
 		} else if currentSpec == "secondary" {
 			return "Transitioning to secondary state - please wait for completion"
+		}
+	}
+
+	// Current status matches desired state
+	if strings.EqualFold(currentStatus, desiredState) {
+		if currentStatus == "primary" {
+			return "Volume is in primary read-write mode"
+		} else if currentStatus == "secondary" {
+			return "Volume is in secondary read-only mode"
 		}
 	}
 
@@ -292,136 +347,220 @@ func (m *Manager) GetErrorMessage(ctx context.Context, name, namespace string) s
 	return ""
 }
 
-// AreAllVolumesInDesiredState checks if all VolumeReplications have reached the desired state
-func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace string, vrNames []string, desiredState string) (bool, string) {
-	log := log.FromContext(ctx)
-	log.Info("Checking if all VolumeReplications have reached desired state",
-		"count", len(vrNames),
-		"desiredState", desiredState)
+// AreAllVolumesInDesiredState checks if all volume replications are in the desired state
+// Returns a boolean indicating if all volumes are in the desired state and a message
+func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace string, volReps []string, desiredState string) (bool, string) {
+	log := log.FromContext(ctx).WithName("volumereplication-manager")
 
-	// Normal desired state check
-	for _, vrName := range vrNames {
+	// Map active/passive to primary/secondary for volume replication
+	volRepDesiredState := desiredState
+	if desiredState == "active" {
+		volRepDesiredState = "primary"
+	} else if desiredState == "passive" {
+		volRepDesiredState = "secondary"
+	}
+
+	if len(volReps) == 0 {
+		return true, "No VolumeReplications to check"
+	}
+
+	log.Info("Checking if all volumes are in desired state",
+		"count", len(volReps),
+		"namespace", namespace,
+		"desiredState", desiredState,
+		"volRepDesiredState", volRepDesiredState)
+
+	allInDesiredState := true
+	detailedStatus := []string{}
+
+	for _, name := range volReps {
 		volumeReplication := &replicationv1alpha1.VolumeReplication{}
+		err := m.client.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		}, volumeReplication)
 
-		// Fetch the VolumeReplication object
-		err := m.client.Get(ctx, types.NamespacedName{Name: vrName, Namespace: namespace}, volumeReplication)
 		if err != nil {
-			log.Error(err, "Failed to get VolumeReplication", "VolumeReplication", vrName)
-			return false, fmt.Sprintf("Failed to get VolumeReplication %s: %v", vrName, err)
+			if errors.IsNotFound(err) {
+				log.Info("VolumeReplication not found", "name", name, "namespace", namespace)
+				allInDesiredState = false
+				detailedStatus = append(detailedStatus, fmt.Sprintf("%s: notfound", name))
+				continue
+			}
+			log.Error(err, "Failed to get VolumeReplication", "name", name, "namespace", namespace)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: error", name))
+			continue
 		}
 
-		// Get current status state and spec state
-		currentStatus := strings.ToLower(string(volumeReplication.Status.State))
-		currentSpec := string(volumeReplication.Spec.ReplicationState)
+		// Special case if we're in a resync state
+		if IsResyncState(volumeReplication) {
+			log.Info("VolumeReplication is in Resync state, still in progress", "name", name)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: resyncing", name))
+			continue
+		}
 
-		log.Info("Checking VolumeReplication state",
-			"name", vrName,
-			"currentStatus", currentStatus,
-			"currentSpec", currentSpec,
-			"desiredState", desiredState)
+		// Check if the volume replication is in the desired spec state
+		currentStatus := m.getCurrentStatus(volumeReplication)
+		currentSpec := m.getCurrentSpec(volumeReplication)
 
-		// Check if the status matches the desired state
-		if currentStatus != strings.ToLower(desiredState) {
-			log.Info("VolumeReplication not yet in desired state",
-				"name", vrName,
-				"currentStatus", currentStatus,
-				"desiredState", desiredState)
-
-			// If transitioning (spec already updated but status not yet there), report detailed status
-			if currentSpec == desiredState {
-				// Check if in error state
-				if currentStatus == "error" {
-					// Check for a legitimate error vs transitional state
-					for _, condition := range volumeReplication.Status.Conditions {
-						if condition.Type == "Degraded" && condition.Status == metav1.ConditionTrue {
-							return false, fmt.Sprintf("VolumeReplication %s is in error state: %s", vrName, condition.Message)
-						}
-					}
-				}
-
-				return false, fmt.Sprintf("VolumeReplication %s is transitioning from %s to %s",
-					vrName, currentStatus, desiredState)
+		// Handle edge cases for specific state transitions
+		if currentStatus == "primary" && currentSpec == "secondary" && volRepDesiredState == "secondary" {
+			// Still transitioning from primary to secondary
+			log.Info("VolumeReplication is still transitioning to secondary",
+				"name", name,
+				"currentSpec", currentSpec,
+				"currentStatus", currentStatus)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: transitioning (p→s)", name))
+		} else if currentStatus == "secondary" && currentSpec == "primary" && volRepDesiredState == "primary" {
+			// Still transitioning from secondary to primary
+			log.Info("VolumeReplication is still transitioning to primary",
+				"name", name,
+				"currentSpec", currentSpec,
+				"currentStatus", currentStatus)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: transitioning (s→p)", name))
+		} else if currentStatus == "primary" && (currentSpec == "secondary" || volRepDesiredState == "secondary") {
+			// Primary but should be secondary
+			log.Info("VolumeReplication is primary but should be secondary",
+				"name", name,
+				"currentSpec", currentSpec,
+				"currentStatus", currentStatus)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: primary (should be secondary)", name))
+		} else if currentStatus == "secondary" && (currentSpec == "primary" || volRepDesiredState == "primary") {
+			// Secondary but should be primary
+			log.Info("VolumeReplication is secondary but should be primary",
+				"name", name,
+				"currentSpec", currentSpec,
+				"currentStatus", currentStatus)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: secondary (should be primary)", name))
+		} else if currentStatus == volRepDesiredState ||
+			((currentSpec == "secondary" && volRepDesiredState == "secondary") ||
+				(currentSpec == "primary" && volRepDesiredState == "primary")) {
+			// Volume is in desired state
+			log.Info("VolumeReplication is in desired state", "name", name, "state", currentStatus)
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: %s", name, currentStatus))
+		} else {
+			// Any other state is not ready
+			if currentSpec == "primary" {
+				log.Info("VolumeReplication is configured for primary but not there yet", "name", name, "status", currentStatus)
+			} else if currentSpec == "secondary" {
+				log.Info("VolumeReplication is configured for secondary but not there yet", "name", name, "status", currentStatus)
+			} else {
+				log.Info("VolumeReplication is in unknown state", "name", name, "spec", currentSpec, "status", currentStatus)
 			}
-
-			// If spec doesn't match desired state either, the update hasn't been applied yet
-			return false, fmt.Sprintf("VolumeReplication %s needs update: current state %s, spec %s, desired %s",
-				vrName, currentStatus, currentSpec, desiredState)
+			allInDesiredState = false
+			detailedStatus = append(detailedStatus, fmt.Sprintf("%s: %s (spec: %s)", name, currentStatus, currentSpec))
 		}
 	}
 
-	log.Info("All VolumeReplications have reached the desired state", "desiredState", desiredState)
-	return true, ""
+	return allInDesiredState, strings.Join(detailedStatus, ", ")
 }
 
-// ProcessVolumeReplications handles the processing of all VolumeReplications for a FailoverPolicy
-func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace string, vrNames []string, desiredState, mode string) (bool, string) {
-	log := log.FromContext(ctx)
-	var failoverError bool
-	var failoverErrorMessage string
+// ProcessVolumeReplications processes all volumereplication resources based on desired state
+func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace string, volReps []string, desiredState string) error {
+	log := log.FromContext(ctx).WithName("volumereplication-manager")
 
-	// For safe mode, first check if all VolumeReplications are ready for primary transition
-	if mode == "safe" && strings.ToLower(desiredState) == "primary" {
-		allReady := true
-		for _, vrName := range vrNames {
-			currentState, err := m.GetCurrentVolumeReplicationState(ctx, vrName, namespace)
-			if err != nil {
-				failoverErrorMessage = fmt.Sprintf("Failed to retrieve state for VolumeReplication %s", vrName)
-				return true, failoverErrorMessage
-			}
+	// Map active/passive to primary/secondary for volume replication
+	volRepDesiredState := desiredState
+	if desiredState == "active" {
+		volRepDesiredState = "primary"
+	} else if desiredState == "passive" {
+		volRepDesiredState = "secondary"
+	}
 
-			// In safe mode, volumes must be either already primary or secondary before transitioning
-			if currentState != "primary" && currentState != "secondary" {
-				log.Info("Safe mode: waiting for VolumeReplication to be in valid state",
-					"VolumeReplication", vrName,
-					"CurrentState", currentState,
-					"ValidStates", []string{"primary", "secondary"})
-				allReady = false
+	log.Info("Processing VolumeReplications",
+		"count", len(volReps),
+		"namespace", namespace,
+		"desiredState", desiredState,
+		"volRepDesiredState", volRepDesiredState)
+
+	// Process each volume replication
+	for _, name := range volReps {
+		// Get the VolumeReplication resource
+		volumeReplication := &replicationv1alpha1.VolumeReplication{}
+		err := m.client.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		}, volumeReplication)
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				log.Info("VolumeReplication not found", "name", name, "namespace", namespace)
+				continue
 			}
+			return err
 		}
 
-		// If not all volumes are ready in safe mode, we should try again later
-		if !allReady {
-			return false, "Some volume replications are not ready for primary transition in safe mode"
+		// Skip if we're in fast mode and volumereplication is already in correct state
+		if strings.ToLower(string(volumeReplication.Spec.ReplicationState)) == volRepDesiredState {
+			// Already in correct state
+			log.Info("VolumeReplication already in correct state",
+				"name", name,
+				"state", volRepDesiredState)
+			continue
+		}
+
+		// Check current status vs spec state to determine appropriate action
+		currentStatus := m.getCurrentStatus(volumeReplication)
+		currentSpec := m.getCurrentSpec(volumeReplication)
+
+		log.Info("VolumeReplication details",
+			"name", volumeReplication.Name,
+			"namespace", volumeReplication.Namespace,
+			"currentSpec", currentSpec,
+			"currentStatus", currentStatus,
+			"desiredState", volRepDesiredState)
+
+		// Perform the appropriate action based on current state and desired state
+		if currentStatus == "primary" && volRepDesiredState == "secondary" {
+			// Need to async-prepare if going from primary -> secondary
+			log.Info("Starting failover preparation", "name", name, "currentState", currentStatus, "desiredState", volRepDesiredState)
+			if err := m.updateVolumeReplicationState(ctx, volumeReplication, "secondary"); err != nil {
+				log.Error(err, "Failed to update VolumeReplication state for secondary preparation", "name", name)
+				return err
+			}
+		} else if volRepDesiredState == "primary" && currentStatus != "secondary" && currentStatus != "primary" {
+			// We're trying to go to primary, but we're not in secondary or primary yet
+			// This usually happens for a newly created resource - just try to set it directly
+			log.Info("Setting new VolumeReplication directly to primary", "name", name, "currentState", currentStatus)
+			if err := m.updateVolumeReplicationState(ctx, volumeReplication, "primary"); err != nil {
+				log.Error(err, "Failed to set new VolumeReplication to primary", "name", name)
+				return err
+			}
+		} else {
+			// For all other cases, just set it directly to the desired state
+			log.Info("Updating VolumeReplication state", "name", name, "from", currentSpec, "to", volRepDesiredState)
+			if err := m.updateVolumeReplicationState(ctx, volumeReplication, volRepDesiredState); err != nil {
+				log.Error(err, "Failed to update VolumeReplication state", "name", name)
+				return err
+			}
 		}
 	}
 
-	// Process all VolumeReplications
-	for _, vrName := range vrNames {
-		log.Info("Checking VolumeReplication", "VolumeReplication", vrName)
+	return nil
+}
 
-		// Detect VolumeReplication errors
-		errorMessage, errorDetected := m.CheckVolumeReplicationError(ctx, vrName, namespace)
+// getCurrentStatus retrieves the current status of a VolumeReplication resource
+func (m *Manager) getCurrentStatus(volumeReplication *replicationv1alpha1.VolumeReplication) string {
+	return strings.ToLower(string(volumeReplication.Status.State))
+}
 
-		if errorDetected {
-			failoverErrorMessage = fmt.Sprintf("VolumeReplication %s: %s", vrName, errorMessage)
-			failoverError = true
-			continue
-		}
+// getCurrentSpec retrieves the current spec of a VolumeReplication resource
+func (m *Manager) getCurrentSpec(volumeReplication *replicationv1alpha1.VolumeReplication) string {
+	return string(volumeReplication.Spec.ReplicationState)
+}
 
-		// Get current replication state
-		currentState, err := m.GetCurrentVolumeReplicationState(ctx, vrName, namespace)
-		if err != nil {
-			failoverErrorMessage = fmt.Sprintf("Failed to retrieve state for VolumeReplication %s", vrName)
-			failoverError = true
-			continue
-		}
+// updateVolumeReplicationState updates the state of a VolumeReplication resource
+func (m *Manager) updateVolumeReplicationState(ctx context.Context, volumeReplication *replicationv1alpha1.VolumeReplication, desiredState string) error {
+	return m.UpdateVolumeReplication(ctx, volumeReplication.Name, volumeReplication.Namespace, desiredState)
+}
 
-		// If the current state already matches the desired state, no update is needed
-		if strings.EqualFold(currentState, desiredState) {
-			log.Info("VolumeReplication is already in the desired state",
-				"VolumeReplication", vrName,
-				"State", currentState,
-				"DesiredState", desiredState)
-			continue
-		}
-
-		// Attempt to update VolumeReplication
-		err = m.UpdateVolumeReplication(ctx, vrName, namespace, desiredState)
-		if err != nil {
-			log.Error(err, "Failed to update VolumeReplication", "VolumeReplication", vrName)
-			return true, "Failed to update VolumeReplication"
-		}
-	}
-
-	return failoverError, failoverErrorMessage
+// IsResyncState checks if a VolumeReplication is in a resync state
+func IsResyncState(volumeReplication *replicationv1alpha1.VolumeReplication) bool {
+	return strings.ToLower(string(volumeReplication.Spec.ReplicationState)) == "resyncing"
 }

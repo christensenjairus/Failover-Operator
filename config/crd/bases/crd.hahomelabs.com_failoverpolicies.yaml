@@ -39,10 +39,54 @@ spec:
           spec:
             description: FailoverPolicySpec defines the desired state of FailoverPolicy
             properties:
+              components:
+                description: Components defines the application components and their
+                  associated resources
+                items:
+                  description: ComponentSpec defines a component in the application
+                    being managed
+                  properties:
+                    name:
+                      description: Name of the component
+                      type: string
+                    virtualServices:
+                      description: VirtualServices are the Istio virtual services
+                        associated with this component
+                      items:
+                        type: string
+                      type: array
+                    volumeReplications:
+                      description: VolumeReplications are the volume replications
+                        associated with this component
+                      items:
+                        type: string
+                      type: array
+                    workloads:
+                      description: Workloads are the resources that make up this component
+                      items:
+                        description: ResourceRef defines a simple reference to a Kubernetes
+                          resource by kind and name
+                        properties:
+                          kind:
+                            description: Kind of the resource
+                            type: string
+                          name:
+                            description: Name of the resource
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        type: object
+                      type: array
+                  required:
+                  - name
+                  type: object
+                minItems: 1
+                type: array
               cronJobs:
                 description: |-
-                  CronJobs is a list of CronJob objects to suspend when in secondary mode.
-                  Deprecated: Use managedResources instead
+                  CronJobs is a list of CronJob objects to suspend when in passive mode.
+                  Deprecated: Use components[].workloads instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -60,8 +104,8 @@ spec:
                 type: array
               deployments:
                 description: |-
-                  Deployments is a list of Deployment objects to scale down to 0 replicas when in secondary mode.
-                  Deprecated: Use managedResources instead
+                  Deployments is a list of Deployment objects to scale down to 0 replicas when in passive mode.
+                  Deprecated: Use components[].workloads instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -78,16 +122,25 @@ spec:
                   type: object
                 type: array
               desiredState:
-                description: DesiredState represents the intended failover state ("primary"
-                  or "secondary").
+                description: |-
+                  DesiredState represents the intended failover state ("active" or "passive").
+                  Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead
                 enum:
-                - primary
-                - secondary
+                - active
+                - passive
+                type: string
+              failoverMode:
+                description: |-
+                  FailoverMode determines the failover approach: "safe" ensures data is fully synced before failover,
+                  while "fast" allows immediate transition without waiting.
+                enum:
+                - safe
+                - fast
                 type: string
               helmReleases:
                 description: |-
-                  HelmReleases is a list of Flux HelmRelease objects to suspend when in secondary mode.
-                  Deprecated: Use managedResources instead
+                  HelmReleases is a list of Flux HelmRelease objects to suspend when in passive mode.
+                  Deprecated: Use parentFluxResources instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -105,8 +158,8 @@ spec:
                 type: array
               kustomizations:
                 description: |-
-                  Kustomizations is a list of Flux Kustomization objects to suspend when in secondary mode.
-                  Deprecated: Use managedResources instead
+                  Kustomizations is a list of Flux Kustomization objects to suspend when in passive mode.
+                  Deprecated: Use parentFluxResources instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -125,11 +178,7 @@ spec:
               managedResources:
                 description: |-
                   ManagedResources is a list of resources to be managed by this failover policy.
-                  When in secondary mode, the operator will:
-                  - Scale Deployments and StatefulSets to 0 replicas
-                  - Suspend CronJobs
-                  - Suspend Flux HelmReleases and Kustomizations
-                  - Set VolumeReplications to secondary-ro mode
+                  Deprecated: Use Components instead
                 items:
                   description: ManagedResource defines a resource managed by the failover
                     operator
@@ -170,20 +219,38 @@ spec:
                   - kind
                   - name
                   type: object
-                minItems: 1
                 type: array
               mode:
                 description: |-
                   Mode determines the failover approach. "safe" ensures VolumeReplication is fully synced before failover,
                   while "unsafe" allows immediate transition without waiting.
+                  Deprecated: Use failoverMode instead
                 enum:
                 - safe
                 - unsafe
                 type: string
+              parentFluxResources:
+                description: ParentFluxResources defines the Flux resources that need
+                  to be suspended during failover operations
+                items:
+                  description: ResourceRef defines a simple reference to a Kubernetes
+                    resource by kind and name
+                  properties:
+                    kind:
+                      description: Kind of the resource
+                      type: string
+                    name:
+                      description: Name of the resource
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               statefulSets:
                 description: |-
-                  StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in secondary mode.
-                  Deprecated: Use managedResources instead
+                  StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in passive mode.
+                  Deprecated: Use components[].workloads instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -202,7 +269,7 @@ spec:
               virtualServices:
                 description: |-
                   VirtualServices is a list of VirtualService objects to update during failover.
-                  Deprecated: Use managedResources instead
+                  Deprecated: Use components[].virtualServices instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -221,7 +288,7 @@ spec:
               volumeReplications:
                 description: |-
                   VolumeReplications is a list of VolumeReplication objects to manage in this failover policy.
-                  Deprecated: Use managedResources instead
+                  Deprecated: Use components[].volumeReplications instead
                 items:
                   description: |-
                     ResourceReference defines a reference to a Kubernetes resource by name and optional namespace
@@ -238,9 +305,8 @@ spec:
                   type: object
                 type: array
             required:
-            - desiredState
-            - managedResources
-            - mode
+            - components
+            - failoverMode
             type: object
           status:
             description: FailoverPolicyStatus defines the observed state of FailoverPolicy
@@ -303,8 +369,27 @@ spec:
                   type: object
                 type: array
               currentState:
-                description: CurrentState reflects the actual failover state ("primary"
-                  or "secondary") of the system.
+                description: CurrentState reflects the actual failover state ("active"
+                  or "passive") of the system.
+                type: string
+              health:
+                description: Health indicates the overall health of the failover policy
+                type: string
+              lastTransitionDetails:
+                description: LastTransitionDetails contains detailed information about
+                  the last state transition
+                type: string
+              lastTransitionMessage:
+                description: LastTransitionMessage is a human-readable message describing
+                  the last state transition
+                type: string
+              lastTransitionReason:
+                description: LastTransitionReason is the reason for the last state
+                  transition
+                type: string
+              lastTransitionTime:
+                description: LastTransitionTime is the time when the last state transition
+                  occurred
                 type: string
               volumeReplicationStatuses:
                 description: VolumeReplicationStatuses contains status information

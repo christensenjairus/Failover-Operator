@@ -146,58 +146,103 @@ type ManagedResource struct {
 	APIGroup string `json:"apiGroup,omitempty"`
 }
 
+// ResourceRef defines a simple reference to a Kubernetes resource by kind and name
+type ResourceRef struct {
+	// Kind of the resource
+	// +kubebuilder:validation:Required
+	Kind string `json:"kind"`
+
+	// Name of the resource
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+
+// ComponentSpec defines a component in the application being managed
+type ComponentSpec struct {
+	// Name of the component
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Workloads are the resources that make up this component
+	// +optional
+	Workloads []ResourceRef `json:"workloads,omitempty"`
+
+	// VolumeReplications are the volume replications associated with this component
+	// +optional
+	VolumeReplications []string `json:"volumeReplications,omitempty"`
+
+	// VirtualServices are the Istio virtual services associated with this component
+	// +optional
+	VirtualServices []string `json:"virtualServices,omitempty"`
+}
+
 // FailoverPolicySpec defines the desired state of FailoverPolicy
 type FailoverPolicySpec struct {
-	// DesiredState represents the intended failover state ("primary" or "secondary").
-	// +kubebuilder:validation:Enum=primary;secondary
-	DesiredState string `json:"desiredState"`
+	// FailoverMode determines the failover approach: "safe" ensures data is fully synced before failover,
+	// while "fast" allows immediate transition without waiting.
+	// +kubebuilder:validation:Enum=safe;fast
+	// +kubebuilder:validation:Required
+	FailoverMode string `json:"failoverMode"`
+
+	// ParentFluxResources defines the Flux resources that need to be suspended during failover operations
+	// +optional
+	ParentFluxResources []ResourceRef `json:"parentFluxResources,omitempty"`
+
+	// Components defines the application components and their associated resources
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Components []ComponentSpec `json:"components"`
+
+	// ManagedResources is a list of resources to be managed by this failover policy.
+	// Deprecated: Use Components instead
+	// +optional
+	ManagedResources []ManagedResource `json:"managedResources,omitempty"`
+
+	// DesiredState represents the intended failover state ("active" or "passive").
+	// Deprecated: Use metadata.annotations[failover-operator.hahomelabs.com/desired-state] instead
+	// +kubebuilder:validation:Enum=active;passive
+	// +optional
+	DesiredState string `json:"desiredState,omitempty"`
 
 	// Mode determines the failover approach. "safe" ensures VolumeReplication is fully synced before failover,
 	// while "unsafe" allows immediate transition without waiting.
+	// Deprecated: Use failoverMode instead
 	// +kubebuilder:validation:Enum=safe;unsafe
-	Mode string `json:"mode"`
-
-	// ManagedResources is a list of resources to be managed by this failover policy.
-	// When in secondary mode, the operator will:
-	// - Scale Deployments and StatefulSets to 0 replicas
-	// - Suspend CronJobs
-	// - Suspend Flux HelmReleases and Kustomizations
-	// - Set VolumeReplications to secondary-ro mode
-	// +kubebuilder:validation:MinItems=1
-	ManagedResources []ManagedResource `json:"managedResources"`
+	// +optional
+	Mode string `json:"mode,omitempty"`
 
 	// VolumeReplications is a list of VolumeReplication objects to manage in this failover policy.
-	// Deprecated: Use managedResources instead
+	// Deprecated: Use components[].volumeReplications instead
 	// +optional
 	VolumeReplications []ResourceReference `json:"volumeReplications,omitempty"`
 
 	// VirtualServices is a list of VirtualService objects to update during failover.
-	// Deprecated: Use managedResources instead
+	// Deprecated: Use components[].virtualServices instead
 	// +optional
 	VirtualServices []ResourceReference `json:"virtualServices,omitempty"`
 
-	// Deployments is a list of Deployment objects to scale down to 0 replicas when in secondary mode.
-	// Deprecated: Use managedResources instead
+	// Deployments is a list of Deployment objects to scale down to 0 replicas when in passive mode.
+	// Deprecated: Use components[].workloads instead
 	// +optional
 	Deployments []ResourceReference `json:"deployments,omitempty"`
 
-	// StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in secondary mode.
-	// Deprecated: Use managedResources instead
+	// StatefulSets is a list of StatefulSet objects to scale down to 0 replicas when in passive mode.
+	// Deprecated: Use components[].workloads instead
 	// +optional
 	StatefulSets []ResourceReference `json:"statefulSets,omitempty"`
 
-	// CronJobs is a list of CronJob objects to suspend when in secondary mode.
-	// Deprecated: Use managedResources instead
+	// CronJobs is a list of CronJob objects to suspend when in passive mode.
+	// Deprecated: Use components[].workloads instead
 	// +optional
 	CronJobs []ResourceReference `json:"cronJobs,omitempty"`
 
-	// HelmReleases is a list of Flux HelmRelease objects to suspend when in secondary mode.
-	// Deprecated: Use managedResources instead
+	// HelmReleases is a list of Flux HelmRelease objects to suspend when in passive mode.
+	// Deprecated: Use parentFluxResources instead
 	// +optional
 	HelmReleases []ResourceReference `json:"helmReleases,omitempty"`
 
-	// Kustomizations is a list of Flux Kustomization objects to suspend when in secondary mode.
-	// Deprecated: Use managedResources instead
+	// Kustomizations is a list of Flux Kustomization objects to suspend when in passive mode.
+	// Deprecated: Use parentFluxResources instead
 	// +optional
 	Kustomizations []ResourceReference `json:"kustomizations,omitempty"`
 }
@@ -231,14 +276,35 @@ type WorkloadStatus struct {
 
 // FailoverPolicyStatus defines the observed state of FailoverPolicy
 type FailoverPolicyStatus struct {
-	// CurrentState reflects the actual failover state ("primary" or "secondary") of the system.
+	// CurrentState reflects the actual failover state ("active" or "passive") of the system.
 	CurrentState string `json:"currentState,omitempty"`
+
+	// Health indicates the overall health of the failover policy
+	// +optional
+	Health string `json:"health,omitempty"`
+
+	// LastTransitionTime is the time when the last state transition occurred
+	// +optional
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+
+	// LastTransitionReason is the reason for the last state transition
+	// +optional
+	LastTransitionReason string `json:"lastTransitionReason,omitempty"`
+
+	// LastTransitionMessage is a human-readable message describing the last state transition
+	// +optional
+	LastTransitionMessage string `json:"lastTransitionMessage,omitempty"`
+
+	// LastTransitionDetails contains detailed information about the last state transition
+	// +optional
+	LastTransitionDetails string `json:"lastTransitionDetails,omitempty"`
 
 	// Conditions represent the current state of failover reconciliation.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// VolumeReplicationStatuses contains status information for VolumeReplications
+	// +optional
 	VolumeReplicationStatuses []VolumeReplicationStatus `json:"volumeReplicationStatuses,omitempty"`
 
 	// WorkloadStatus indicates whether workloads have been properly scaled/suspended

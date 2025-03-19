@@ -41,58 +41,74 @@ var KustomizationGVK = schema.GroupVersionKind{
 	Kind:    "Kustomization",
 }
 
-// ProcessFluxResources handles suspending or resuming Flux resources based on the desired state
+// ProcessFluxResources handles the processing of HelmReleases and Kustomizations
 func (m *Manager) ProcessFluxResources(ctx context.Context,
 	helmReleases []crdv1alpha1.ResourceReference,
 	kustomizations []crdv1alpha1.ResourceReference,
 	policyNamespace, desiredState string) error {
 
-	logger := log.FromContext(ctx)
+	log := log.FromContext(ctx)
 
-	if desiredState == "primary" {
-		logger.Info("Primary mode - resuming Flux resources")
-		// Resume all HelmReleases
+	// In active mode, resume Flux resources and enabling reconciliation
+	if desiredState == "active" {
+		log.Info("Active mode: Resuming Flux resources and enabling reconciliation")
+
+		// Process HelmReleases
 		for _, hr := range helmReleases {
-			namespace := hr.Namespace
-			if namespace == "" {
-				namespace = policyNamespace
+			// Use namespace from resource reference or fall back to policy namespace
+			ns := hr.Namespace
+			if ns == "" {
+				ns = policyNamespace
 			}
-			if err := m.resumeHelmRelease(ctx, hr.Name, namespace); err != nil {
-				logger.Error(err, "Failed to resume HelmRelease", "name", hr.Name, "namespace", namespace)
+
+			if err := m.updateHelmReleaseReconciliation(ctx, hr.Name, ns, true); err != nil {
+				log.Error(err, "Failed to update HelmRelease reconciliation", "HelmRelease", hr.Name, "Namespace", ns)
+				return err
 			}
 		}
 
-		// Resume all Kustomizations
+		// Process Kustomizations
 		for _, k := range kustomizations {
-			namespace := k.Namespace
-			if namespace == "" {
-				namespace = policyNamespace
+			// Use namespace from resource reference or fall back to policy namespace
+			ns := k.Namespace
+			if ns == "" {
+				ns = policyNamespace
 			}
-			if err := m.resumeKustomization(ctx, k.Name, namespace); err != nil {
-				logger.Error(err, "Failed to resume Kustomization", "name", k.Name, "namespace", namespace)
+
+			if err := m.updateKustomizationReconciliation(ctx, k.Name, ns, true); err != nil {
+				log.Error(err, "Failed to update Kustomization reconciliation", "Kustomization", k.Name, "Namespace", ns)
+				return err
 			}
 		}
 	} else {
-		logger.Info("Secondary mode - suspending Flux resources")
-		// Suspend all HelmReleases
+		// In passive mode, suspend Flux resources and add reconcile disabled annotation
+		log.Info("Passive mode: Suspending Flux resources and disabling reconciliation")
+
+		// Process HelmReleases
 		for _, hr := range helmReleases {
-			namespace := hr.Namespace
-			if namespace == "" {
-				namespace = policyNamespace
+			// Use namespace from resource reference or fall back to policy namespace
+			ns := hr.Namespace
+			if ns == "" {
+				ns = policyNamespace
 			}
-			if err := m.suspendHelmRelease(ctx, hr.Name, namespace); err != nil {
-				logger.Error(err, "Failed to suspend HelmRelease", "name", hr.Name, "namespace", namespace)
+
+			if err := m.updateHelmReleaseReconciliation(ctx, hr.Name, ns, false); err != nil {
+				log.Error(err, "Failed to update HelmRelease reconciliation", "HelmRelease", hr.Name, "Namespace", ns)
+				return err
 			}
 		}
 
-		// Suspend all Kustomizations
+		// Process Kustomizations
 		for _, k := range kustomizations {
-			namespace := k.Namespace
-			if namespace == "" {
-				namespace = policyNamespace
+			// Use namespace from resource reference or fall back to policy namespace
+			ns := k.Namespace
+			if ns == "" {
+				ns = policyNamespace
 			}
-			if err := m.suspendKustomization(ctx, k.Name, namespace); err != nil {
-				logger.Error(err, "Failed to suspend Kustomization", "name", k.Name, "namespace", namespace)
+
+			if err := m.updateKustomizationReconciliation(ctx, k.Name, ns, false); err != nil {
+				log.Error(err, "Failed to update Kustomization reconciliation", "Kustomization", k.Name, "Namespace", ns)
+				return err
 			}
 		}
 	}
@@ -340,4 +356,166 @@ func (m *Manager) suspendKustomization(ctx context.Context, name, namespace stri
 // resumeKustomization resumes a Kustomization
 func (m *Manager) resumeKustomization(ctx context.Context, name, namespace string) error {
 	return m.processKustomization(ctx, name, namespace, false)
+}
+
+// updateHelmReleaseReconciliation updates the suspension and reconciliation status of a HelmRelease
+func (m *Manager) updateHelmReleaseReconciliation(ctx context.Context, name, namespace string, enableReconciliation bool) error {
+	log := log.FromContext(ctx)
+
+	// Get the HelmRelease
+	hr := &unstructured.Unstructured{}
+	hr.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "helm.toolkit.fluxcd.io",
+		Version: "v2beta1",
+		Kind:    "HelmRelease",
+	})
+
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, hr)
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	// Add or remove the reconcile annotation
+	annotations := hr.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	modified := false
+
+	if enableReconciliation {
+		// If we're enabling reconciliation, remove the reconcile: disabled annotation
+		if _, exists := annotations["kustomize.toolkit.fluxcd.io/reconcile"]; exists {
+			delete(annotations, "kustomize.toolkit.fluxcd.io/reconcile")
+			modified = true
+			log.Info("Removed reconcile annotation from HelmRelease", "name", name, "namespace", namespace)
+		}
+
+		// Also unsuspend the resource
+		suspend, found, err := unstructured.NestedBool(hr.Object, "spec", "suspend")
+		if err != nil {
+			return err
+		}
+
+		if found && suspend {
+			err = unstructured.SetNestedField(hr.Object, false, "spec", "suspend")
+			if err != nil {
+				return err
+			}
+			modified = true
+			log.Info("Resumed HelmRelease", "name", name, "namespace", namespace)
+		}
+	} else {
+		// If we're disabling reconciliation, add the annotation
+		if annotations["kustomize.toolkit.fluxcd.io/reconcile"] != "disabled" {
+			annotations["kustomize.toolkit.fluxcd.io/reconcile"] = "disabled"
+			modified = true
+			log.Info("Added reconcile: disabled annotation to HelmRelease", "name", name, "namespace", namespace)
+		}
+
+		// Also suspend the resource
+		suspend, found, err := unstructured.NestedBool(hr.Object, "spec", "suspend")
+		if err != nil {
+			return err
+		}
+
+		if !found || !suspend {
+			err = unstructured.SetNestedField(hr.Object, true, "spec", "suspend")
+			if err != nil {
+				return err
+			}
+			modified = true
+			log.Info("Suspended HelmRelease", "name", name, "namespace", namespace)
+		}
+	}
+
+	if modified {
+		hr.SetAnnotations(annotations)
+		if err := m.client.Update(ctx, hr); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// updateKustomizationReconciliation updates the suspension and reconciliation status of a Kustomization
+func (m *Manager) updateKustomizationReconciliation(ctx context.Context, name, namespace string, enableReconciliation bool) error {
+	log := log.FromContext(ctx)
+
+	// Get the Kustomization
+	k := &unstructured.Unstructured{}
+	k.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kustomize.toolkit.fluxcd.io",
+		Version: "v1beta2",
+		Kind:    "Kustomization",
+	})
+
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, k)
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	// Add or remove the reconcile annotation
+	annotations := k.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	modified := false
+
+	if enableReconciliation {
+		// If we're enabling reconciliation, remove the reconcile: disabled annotation
+		if _, exists := annotations["kustomize.toolkit.fluxcd.io/reconcile"]; exists {
+			delete(annotations, "kustomize.toolkit.fluxcd.io/reconcile")
+			modified = true
+			log.Info("Removed reconcile annotation from Kustomization", "name", name, "namespace", namespace)
+		}
+
+		// Also unsuspend the resource
+		suspend, found, err := unstructured.NestedBool(k.Object, "spec", "suspend")
+		if err != nil {
+			return err
+		}
+
+		if found && suspend {
+			err = unstructured.SetNestedField(k.Object, false, "spec", "suspend")
+			if err != nil {
+				return err
+			}
+			modified = true
+			log.Info("Resumed Kustomization", "name", name, "namespace", namespace)
+		}
+	} else {
+		// If we're disabling reconciliation, add the annotation
+		if annotations["kustomize.toolkit.fluxcd.io/reconcile"] != "disabled" {
+			annotations["kustomize.toolkit.fluxcd.io/reconcile"] = "disabled"
+			modified = true
+			log.Info("Added reconcile: disabled annotation to Kustomization", "name", name, "namespace", namespace)
+		}
+
+		// Also suspend the resource
+		suspend, found, err := unstructured.NestedBool(k.Object, "spec", "suspend")
+		if err != nil {
+			return err
+		}
+
+		if !found || !suspend {
+			err = unstructured.SetNestedField(k.Object, true, "spec", "suspend")
+			if err != nil {
+				return err
+			}
+			modified = true
+			log.Info("Suspended Kustomization", "name", name, "namespace", namespace)
+		}
+	}
+
+	if modified {
+		k.SetAnnotations(annotations)
+		if err := m.client.Update(ctx, k); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

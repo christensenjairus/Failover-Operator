@@ -413,6 +413,7 @@ func (r *FailoverPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		"Name", failoverPolicy.Name,
 		"Namespace", failoverPolicy.Namespace,
 		"DesiredState", failoverPolicy.Spec.DesiredState)
+
 	return ctrl.Result{}, nil
 }
 

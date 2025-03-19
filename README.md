@@ -100,8 +100,7 @@ Only when ALL of these status metrics reach zero is a workload considered fully 
 
 Before resuming Flux in primary mode, the operator verifies that ALL VolumeReplications:
 1. Have reached the `primary` state in their `.status.state` field
-2. Are not in a transitioning state like `resync`
-3. Do not have any error conditions
+2. Do not have any error conditions
 
 This ensures storage is fully ready before workloads are deployed that depend on that storage.
 

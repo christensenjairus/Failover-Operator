@@ -47,13 +47,6 @@ func (m *Manager) UpdateVolumeReplication(ctx context.Context, name, namespace, 
 		"currentStatus", currentStatus,
 		"desiredState", desiredState)
 
-	// If in resync mode, wait for completion
-	if currentStatus == "resync" {
-		log.Info("VolumeReplication is in resync mode - waiting for completion",
-			"name", name)
-		return nil
-	}
-
 	// Handle primary->secondary transition specially
 	if currentStatus == "primary" && desiredState == "secondary" {
 		if currentSpec != state {
@@ -170,27 +163,13 @@ func (m *Manager) CheckVolumeReplicationError(ctx context.Context, name, namespa
 				isExpectedError = true
 			}
 
-			// Check for resync errors which might be temporary
-			if strings.Contains(condition.Message, "failed to resync") {
-				log.Info("VolumeReplication has resync error - this may be temporary",
-					"name", name,
-					"reason", condition.Reason,
-					"message", condition.Message)
-				isExpectedError = true
-			}
-
 			// Primary -> Secondary transition: always expect temporary degraded state
-			if currentSpec == "secondary" && (currentStatus == "primary" || currentStatus == "resync") {
+			if currentSpec == "secondary" && currentStatus == "primary" {
 				isTransitioning = true
 			}
 
 			// After a spec update but before status reflects it, we're in transition
 			if currentSpec != currentStatus && currentStatus != "error" {
-				isTransitioning = true
-			}
-
-			// During resync operations
-			if currentStatus == "resync" {
 				isTransitioning = true
 			}
 
@@ -246,21 +225,12 @@ func (m *Manager) GetCurrentVolumeReplicationState(ctx context.Context, name, na
 // isTransitionalState checks if the VolumeReplication is in a transitional state
 func (m *Manager) isTransitionalState(currentSpec, currentStatus, desiredState string) bool {
 	// Primary -> Secondary transition
-	if (currentStatus == "primary" || currentStatus == "resync") &&
-		currentSpec == "secondary" &&
-		desiredState == "secondary" {
+	if currentStatus == "primary" && currentSpec == "secondary" && desiredState == "secondary" {
 		return true
 	}
 
 	// Secondary -> Primary transition
-	if (currentStatus == "secondary" || currentStatus == "resync") &&
-		currentSpec == "primary" &&
-		desiredState == "primary" {
-		return true
-	}
-
-	// Any resync state is transitional
-	if currentStatus == "resync" {
+	if currentStatus == "secondary" && currentSpec == "primary" && desiredState == "primary" {
 		return true
 	}
 
@@ -270,15 +240,13 @@ func (m *Manager) isTransitionalState(currentSpec, currentStatus, desiredState s
 // GetTransitionMessage returns an appropriate message for a volume in transition
 func (m *Manager) GetTransitionMessage(currentSpec, currentStatus, desiredState string) string {
 	// Primary -> Secondary transition
-	if (currentStatus == "primary" || currentStatus == "resync") &&
-		(currentSpec == "secondary" || desiredState == "secondary") {
+	if currentStatus == "primary" && (currentSpec == "secondary" || desiredState == "secondary") {
 		return "Transitioning from primary to secondary - temporary degraded state is expected"
 	}
 
 	// Secondary -> Primary transition
-	if (currentStatus == "secondary" || currentStatus == "resync") &&
-		(currentSpec == "primary" || desiredState == "primary") {
-		return "Promoting from secondary to primary - please wait for resync to complete"
+	if currentStatus == "secondary" && (currentSpec == "primary" || desiredState == "primary") {
+		return "Promoting from secondary to primary"
 	}
 
 	// Error state but expected during transition
@@ -295,11 +263,6 @@ func (m *Manager) GetTransitionMessage(currentSpec, currentStatus, desiredState 
 		} else if currentSpec == "secondary" {
 			return "Transitioning to secondary state - please wait for completion"
 		}
-	}
-
-	// General resync message
-	if currentStatus == "resync" {
-		return "Volume is resyncing - please wait for completion"
 	}
 
 	return ""
@@ -322,11 +285,6 @@ func (m *Manager) GetErrorMessage(ctx context.Context, name, namespace string) s
 				return "Missing snapshot data - this is normal for newly created volumes"
 			}
 
-			// Handle "failed to resync" error
-			if strings.Contains(condition.Message, "failed to resync") {
-				return "Volume is experiencing temporary resync issues - this should resolve automatically"
-			}
-
 			// Can add more specific error message handling here as needed
 		}
 	}
@@ -341,6 +299,7 @@ func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace str
 		"count", len(vrNames),
 		"desiredState", desiredState)
 
+	// Normal desired state check
 	for _, vrName := range vrNames {
 		volumeReplication := &replicationv1alpha1.VolumeReplication{}
 
@@ -370,11 +329,6 @@ func (m *Manager) AreAllVolumesInDesiredState(ctx context.Context, namespace str
 
 			// If transitioning (spec already updated but status not yet there), report detailed status
 			if currentSpec == desiredState {
-				// Check if in resync state
-				if currentStatus == "resync" {
-					return false, fmt.Sprintf("VolumeReplication %s is in resync state", vrName)
-				}
-
 				// Check if in error state
 				if currentStatus == "error" {
 					// Check for a legitimate error vs transitional state
@@ -437,6 +391,7 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 
 		// Detect VolumeReplication errors
 		errorMessage, errorDetected := m.CheckVolumeReplicationError(ctx, vrName, namespace)
+
 		if errorDetected {
 			failoverErrorMessage = fmt.Sprintf("VolumeReplication %s: %s", vrName, errorMessage)
 			failoverError = true
@@ -455,7 +410,8 @@ func (m *Manager) ProcessVolumeReplications(ctx context.Context, namespace strin
 		if strings.EqualFold(currentState, desiredState) {
 			log.Info("VolumeReplication is already in the desired state",
 				"VolumeReplication", vrName,
-				"State", currentState)
+				"State", currentState,
+				"DesiredState", desiredState)
 			continue
 		}
 

@@ -5,13 +5,6 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
   - apps
   resources:
   - deployments
@@ -35,7 +28,8 @@ rules:
 - apiGroups:
   - crd.hahomelabs.com
   resources:
-  - failoverpolicies
+  - failovergroups
+  - failovers
   verbs:
   - create
   - delete
@@ -47,13 +41,15 @@ rules:
 - apiGroups:
   - crd.hahomelabs.com
   resources:
-  - failoverpolicies/finalizers
+  - failovergroups/finalizers
+  - failovers/finalizers
   verbs:
   - update
 - apiGroups:
   - crd.hahomelabs.com
   resources:
-  - failoverpolicies/status
+  - failovergroups/status
+  - failovers/status
   verbs:
   - get
   - patch
@@ -93,18 +89,8 @@ rules:
   resources:
   - volumereplications
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
   - update
   - watch
-- apiGroups:
-  - replication.storage.openshift.io
-  resources:
-  - volumereplications/status
-  verbs:
-  - get
-  - patch
-  - update

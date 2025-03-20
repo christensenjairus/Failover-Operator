@@ -146,11 +146,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.FailoverPolicyReconciler{
+	if err = (&controller.FailoverGroupReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "FailoverPolicy")
+		setupLog.Error(err, "unable to create controller", "controller", "FailoverGroup")
+		os.Exit(1)
+	}
+
+	if err = (&controller.FailoverReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Failover")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

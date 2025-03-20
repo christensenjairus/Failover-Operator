@@ -43,8 +43,8 @@ var KustomizationGVK = schema.GroupVersionKind{
 
 // ProcessFluxResources handles the processing of HelmReleases and Kustomizations
 func (m *Manager) ProcessFluxResources(ctx context.Context,
-	helmReleases []crdv1alpha1.ResourceReference,
-	kustomizations []crdv1alpha1.ResourceReference,
+	helmReleases []crdv1alpha1.ResourceRef,
+	kustomizations []crdv1alpha1.ResourceRef,
 	policyNamespace, desiredState string) error {
 
 	log := log.FromContext(ctx)
@@ -63,11 +63,8 @@ func (m *Manager) ProcessFluxResources(ctx context.Context,
 
 		// Process HelmReleases
 		for _, hr := range helmReleases {
-			// Use namespace from resource reference or fall back to policy namespace
-			ns := hr.Namespace
-			if ns == "" {
-				ns = policyNamespace
-			}
+			// Use policy namespace for all resources
+			ns := policyNamespace
 
 			if err := m.updateHelmReleaseReconciliation(ctx, hr.Name, ns, true); err != nil {
 				log.Error(err, "Failed to update HelmRelease reconciliation", "HelmRelease", hr.Name, "Namespace", ns)
@@ -77,11 +74,8 @@ func (m *Manager) ProcessFluxResources(ctx context.Context,
 
 		// Process Kustomizations
 		for _, k := range kustomizations {
-			// Use namespace from resource reference or fall back to policy namespace
-			ns := k.Namespace
-			if ns == "" {
-				ns = policyNamespace
-			}
+			// Use policy namespace for all resources
+			ns := policyNamespace
 
 			if err := m.updateKustomizationReconciliation(ctx, k.Name, ns, true); err != nil {
 				log.Error(err, "Failed to update Kustomization reconciliation", "Kustomization", k.Name, "Namespace", ns)
@@ -89,33 +83,27 @@ func (m *Manager) ProcessFluxResources(ctx context.Context,
 			}
 		}
 	} else {
-		// In STANDBY mode, suspend Flux resources and add reconcile disabled annotation
+		// In STANDBY/PASSIVE mode, suspend Flux resources and disable reconciliation
 		log.Info("STANDBY mode: Suspending Flux resources and disabling reconciliation")
 
 		// Process HelmReleases
 		for _, hr := range helmReleases {
-			// Use namespace from resource reference or fall back to policy namespace
-			ns := hr.Namespace
-			if ns == "" {
-				ns = policyNamespace
-			}
+			// Use policy namespace for all resources
+			ns := policyNamespace
 
-			if err := m.updateHelmReleaseReconciliation(ctx, hr.Name, ns, false); err != nil {
-				log.Error(err, "Failed to update HelmRelease reconciliation", "HelmRelease", hr.Name, "Namespace", ns)
+			if err := m.processHelmRelease(ctx, hr.Name, ns, true); err != nil {
+				log.Error(err, "Failed to suspend HelmRelease", "HelmRelease", hr.Name, "Namespace", ns)
 				return err
 			}
 		}
 
 		// Process Kustomizations
 		for _, k := range kustomizations {
-			// Use namespace from resource reference or fall back to policy namespace
-			ns := k.Namespace
-			if ns == "" {
-				ns = policyNamespace
-			}
+			// Use policy namespace for all resources
+			ns := policyNamespace
 
-			if err := m.updateKustomizationReconciliation(ctx, k.Name, ns, false); err != nil {
-				log.Error(err, "Failed to update Kustomization reconciliation", "Kustomization", k.Name, "Namespace", ns)
+			if err := m.processKustomization(ctx, k.Name, ns, true); err != nil {
+				log.Error(err, "Failed to suspend Kustomization", "Kustomization", k.Name, "Namespace", ns)
 				return err
 			}
 		}

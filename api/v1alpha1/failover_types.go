@@ -1,0 +1,129 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// FailoverGroupReference defines a reference to a FailoverGroup resource
+type FailoverGroupReference struct {
+	// Name of the FailoverGroup
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Namespace of the FailoverGroup
+	// If not provided, the Failover's namespace will be used
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Status of the failover operation for this group
+	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS
+	// +optional
+	Status string `json:"status,omitempty"`
+
+	// StartTime is when the failover started for this group
+	// +optional
+	StartTime string `json:"startTime,omitempty"`
+
+	// CompletionTime is when the failover completed for this group
+	// +optional
+	CompletionTime string `json:"completionTime,omitempty"`
+
+	// Message provides additional details about the failover operation
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// FailoverMetrics contains metrics related to the failover operation
+type FailoverMetrics struct {
+	// TotalDowntimeSeconds is the total application downtime during failover
+	// +optional
+	TotalDowntimeSeconds int64 `json:"totalDowntimeSeconds,omitempty"`
+
+	// TotalFailoverTimeSeconds is the total time taken to complete the failover
+	// +optional
+	TotalFailoverTimeSeconds int64 `json:"totalFailoverTimeSeconds,omitempty"`
+}
+
+// FailoverSpec defines the desired state of Failover
+type FailoverSpec struct {
+	// Type of failover:
+	// - "planned" allows for a controlled, sequential failover with minimal downtime
+	// - "emergency" prioritizes availability on the target cluster as quickly as possible
+	// - "recovery" automatically created to reverse a failed failover and prevent deadlocks
+	// +kubebuilder:validation:Enum=planned;emergency;recovery
+	// +kubebuilder:validation:Required
+	Type string `json:"type"`
+
+	// TargetCluster specifies which cluster should become the PRIMARY
+	// +kubebuilder:validation:Required
+	TargetCluster string `json:"targetCluster"`
+
+	// FailoverGroups references the FailoverGroup resources to be failed over
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	FailoverGroups []FailoverGroupReference `json:"failoverGroups"`
+}
+
+// FailoverStatus defines the observed state of Failover
+type FailoverStatus struct {
+	// Status of the failover operation
+	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS
+	Status string `json:"status,omitempty"`
+
+	// FailoverGroups contains status information for each FailoverGroup
+	// +optional
+	FailoverGroups []FailoverGroupReference `json:"failoverGroups,omitempty"`
+
+	// Metrics contains metrics related to the failover operation
+	// +optional
+	Metrics FailoverMetrics `json:"metrics,omitempty"`
+
+	// Conditions represent the current state of the failover operation
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+//+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+//+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+//+kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetCluster`
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// Failover is the Schema for the failovers API
+type Failover struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   FailoverSpec   `json:"spec,omitempty"`
+	Status FailoverStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// FailoverList contains a list of Failover
+type FailoverList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Failover `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&Failover{}, &FailoverList{})
+}

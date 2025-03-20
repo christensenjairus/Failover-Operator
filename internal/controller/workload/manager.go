@@ -25,7 +25,7 @@ func NewManager(c client.Client) *Manager {
 }
 
 // ProcessWorkloads processes workloads based on the desired state
-func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSets, cronJobs []crdv1alpha1.ResourceReference, desiredState string, policyNamespace string) error {
+func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSets, cronJobs []crdv1alpha1.ResourceRef, desiredState string, policyNamespace string) error {
 	log := log.FromContext(ctx)
 
 	// Normalize the desired state for consistent handling
@@ -69,7 +69,7 @@ func ProcessWorkloads(ctx context.Context, mgr *Manager, deployments, statefulSe
 }
 
 // ProcessCronJobs processes CronJobs based on the desired state
-func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.ResourceReference, desiredState string, policyNamespace string) error {
+func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.ResourceRef, desiredState string, policyNamespace string) error {
 	log := log.FromContext(ctx)
 
 	// Normalize the state if needed
@@ -90,34 +90,33 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 
 	// Process all cronjobs
 	for _, cj := range cronJobs {
-		// Use provided namespace or default to policy namespace
-		namespace := cj.Namespace
-		if namespace == "" {
-			namespace = policyNamespace
-		}
+		// Use policy namespace for all resources
+		ns := policyNamespace
 
-		// Get the cronjob
-		cronjob := &batchv1.CronJob{}
-		if err := mgr.client.Get(ctx, types.NamespacedName{Name: cj.Name, Namespace: namespace}, cronjob); err != nil {
+		// Get the CronJob
+		cronJob := &batchv1.CronJob{}
+		err := mgr.client.Get(ctx, types.NamespacedName{Name: cj.Name, Namespace: ns}, cronJob)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
-				log.Info("CronJob not found, skipping", "name", cj.Name, "namespace", namespace)
+				// If not found, log and continue
+				log.Info("CronJob not found, skipping", "name", cj.Name, "namespace", ns)
 				continue
 			}
-			log.Error(err, "Failed to get CronJob", "name", cj.Name, "namespace", namespace)
+			log.Error(err, "Failed to get CronJob", "name", cj.Name, "namespace", ns)
 			return err
 		}
 
 		// Check if the cronjob needs to be suspended or resumed
-		if cronjob.Spec.Suspend == nil || *cronjob.Spec.Suspend != suspend {
+		if cronJob.Spec.Suspend == nil || *cronJob.Spec.Suspend != suspend {
 			// Update the suspend field
-			log.Info("Updating CronJob", "name", cj.Name, "namespace", namespace, "suspend", suspend)
-			cronjob.Spec.Suspend = &suspend
-			if err := mgr.client.Update(ctx, cronjob); err != nil {
-				log.Error(err, "Failed to update CronJob", "name", cj.Name, "namespace", namespace)
+			log.Info("Updating CronJob", "name", cj.Name, "namespace", ns, "suspend", suspend)
+			cronJob.Spec.Suspend = &suspend
+			if err := mgr.client.Update(ctx, cronJob); err != nil {
+				log.Error(err, "Failed to update CronJob", "name", cj.Name, "namespace", ns)
 				return err
 			}
 		} else {
-			log.Info("CronJob already in correct state", "name", cj.Name, "namespace", namespace, "suspend", suspend)
+			log.Info("CronJob already in correct state", "name", cj.Name, "namespace", ns, "suspend", suspend)
 		}
 	}
 
@@ -125,7 +124,7 @@ func ProcessCronJobs(ctx context.Context, mgr *Manager, cronJobs []crdv1alpha1.R
 }
 
 // ProcessDeploymentsAndStatefulSets processes Deployments and StatefulSets
-func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deployments, statefulSets []crdv1alpha1.ResourceReference, desiredState string, policyNamespace string) error {
+func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deployments, statefulSets []crdv1alpha1.ResourceRef, desiredState string, policyNamespace string) error {
 	log := log.FromContext(ctx)
 
 	// Normalize the desired state for consistency
@@ -149,67 +148,65 @@ func ProcessDeploymentsAndStatefulSets(ctx context.Context, mgr *Manager, deploy
 
 	// Process all deployments
 	for _, deployment := range deployments {
-		// Use provided namespace or default to policy namespace
-		namespace := deployment.Namespace
-		if namespace == "" {
-			namespace = policyNamespace
-		}
+		// Use policy namespace for all resources
+		ns := policyNamespace
 
-		// Get the deployment
-		deploy := &appsv1.Deployment{}
-		if err := mgr.client.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: namespace}, deploy); err != nil {
+		// Get the Deployment
+		dep := &appsv1.Deployment{}
+		err := mgr.client.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: ns}, dep)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
-				log.Info("Deployment not found, skipping", "name", deployment.Name, "namespace", namespace)
+				// If not found, log and continue
+				log.Info("Deployment not found, skipping", "name", deployment.Name, "namespace", ns)
 				continue
 			}
-			log.Error(err, "Failed to get Deployment", "name", deployment.Name, "namespace", namespace)
+			log.Error(err, "Failed to get Deployment", "name", deployment.Name, "namespace", ns)
 			return err
 		}
 
 		// Scale down to 0 replicas if not already at 0
-		if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas > 0 {
-			log.Info("Scaling down Deployment", "name", deployment.Name, "namespace", namespace, "currentReplicas", *deploy.Spec.Replicas)
+		if dep.Spec.Replicas == nil || *dep.Spec.Replicas > 0 {
+			log.Info("Scaling down Deployment", "name", deployment.Name, "namespace", ns, "currentReplicas", *dep.Spec.Replicas)
 			zeroReplicas := int32(0)
-			deploy.Spec.Replicas = &zeroReplicas
-			if err := mgr.client.Update(ctx, deploy); err != nil {
-				log.Error(err, "Failed to scale down Deployment", "name", deployment.Name, "namespace", namespace)
+			dep.Spec.Replicas = &zeroReplicas
+			if err := mgr.client.Update(ctx, dep); err != nil {
+				log.Error(err, "Failed to scale down Deployment", "name", deployment.Name, "namespace", ns)
 				return err
 			}
 		} else {
-			log.Info("Deployment already scaled to 0", "name", deployment.Name, "namespace", namespace)
+			log.Info("Deployment already scaled to 0", "name", deployment.Name, "namespace", ns)
 		}
 	}
 
 	// Process all statefulsets
 	for _, statefulSet := range statefulSets {
-		// Use provided namespace or default to policy namespace
-		namespace := statefulSet.Namespace
-		if namespace == "" {
-			namespace = policyNamespace
-		}
+		// Use policy namespace for all resources
+		ns := policyNamespace
 
-		// Get the statefulset
+		// Get the StatefulSet
 		sts := &appsv1.StatefulSet{}
-		if err := mgr.client.Get(ctx, types.NamespacedName{Name: statefulSet.Name, Namespace: namespace}, sts); err != nil {
+		err := mgr.client.Get(ctx, types.NamespacedName{Name: statefulSet.Name, Namespace: ns}, sts)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
-				log.Info("StatefulSet not found, skipping", "name", statefulSet.Name, "namespace", namespace)
+				// If not found, log and continue
+				log.Info("StatefulSet not found, skipping", "name", statefulSet.Name, "namespace", ns)
 				continue
 			}
-			log.Error(err, "Failed to get StatefulSet", "name", statefulSet.Name, "namespace", namespace)
+			log.Error(err, "Failed to get StatefulSet", "name", statefulSet.Name, "namespace", ns)
 			return err
 		}
 
 		// Scale down to 0 replicas if not already at 0
 		if sts.Spec.Replicas == nil || *sts.Spec.Replicas > 0 {
-			log.Info("Scaling down StatefulSet", "name", statefulSet.Name, "namespace", namespace, "currentReplicas", *sts.Spec.Replicas)
+			log.Info("Scaling down StatefulSet", "name", statefulSet.Name, "namespace", ns, "currentReplicas", *sts.Spec.Replicas)
 			zeroReplicas := int32(0)
 			sts.Spec.Replicas = &zeroReplicas
 			if err := mgr.client.Update(ctx, sts); err != nil {
-				log.Error(err, "Failed to scale down StatefulSet", "name", statefulSet.Name, "namespace", namespace)
+				log.Error(err, "Failed to scale down StatefulSet", "name", statefulSet.Name, "namespace", ns)
 				return err
 			}
 		} else {
-			log.Info("StatefulSet already scaled to 0", "name", statefulSet.Name, "namespace", namespace)
+			log.Info("StatefulSet already scaled to 0", "name", statefulSet.Name, "namespace", ns)
 		}
 	}
 

@@ -22,5 +22,7 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- failoverpolicy_editor_role.yaml
-- failoverpolicy_viewer_role.yaml
+- failovergroup_editor_role.yaml
+- failovergroup_viewer_role.yaml
+- failover_editor_role.yaml
+- failover_viewer_role.yaml

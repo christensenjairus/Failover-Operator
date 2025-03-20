@@ -11,6 +11,117 @@ The Failover Operator manages site failovers by:
 3. Managing Flux resources (HelmReleases, Kustomizations)
 4. Updating Istio VirtualServices
 
+## Custom Resource Definitions
+
+The operator uses two Custom Resource Definitions (CRDs) to define and manage failover operations:
+
+### 1. FailoverGroup CRD
+
+The `FailoverGroup` resource defines a group of components that need to be failed over together, along with their desired configurations.
+
+Example:
+
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: FailoverGroup
+metadata:
+  name: application-db-group
+spec:
+  # Default failover mode for all components (if not specified per component)
+  # Options: "safe" or "fast"
+  defaultFailoverMode: safe
+  
+  # Define components within this failover group
+  components:
+    - name: database
+      # Override the default failover mode for this component
+      failoverMode: fast
+      # Workloads to manage
+      workloads:
+        - kind: StatefulSet
+          name: mysql
+      # Volume replications to manage
+      volumeReplications:
+        - mysql-data-volume
+    
+    - name: api
+      workloads:
+        - kind: Deployment
+          name: api-server
+        - kind: Deployment
+          name: api-worker
+      volumeReplications:
+        - api-config-volume
+      # Virtual services to manage
+      virtualServices:
+        - api-virtualservice
+status:
+  # Current state (PRIMARY or STANDBY)
+  state: PRIMARY
+  # Overall health status (OK, DEGRADED, ERROR)
+  health: OK
+  # Component-level status
+  components:
+    - name: database
+      health: OK
+    - name: api
+      health: OK
+```
+
+### 2. Failover CRD
+
+The `Failover` resource defines an actual failover operation to be performed against one or more `FailoverGroup` resources.
+
+Example:
+
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: Failover
+metadata:
+  name: site-failover
+spec:
+  # Type of failover (planned or emergency)
+  type: planned
+  # Target cluster to make PRIMARY
+  targetCluster: cluster-east
+  # FailoverGroups to include in this failover operation
+  failoverGroups:
+    - name: application-db-group
+      namespace: default
+    - name: frontend-group
+      namespace: web
+status:
+  # Overall status of the failover (IN_PROGRESS, SUCCESS, FAILED)
+  status: SUCCESS
+  # Metrics about the failover operation
+  metrics:
+    totalFailoverTimeSeconds: 143
+  # Status of each failover group involved
+  failoverGroups:
+    - name: application-db-group
+      namespace: default
+      status: SUCCESS
+      startTime: "2023-06-15T05:21:34Z"
+      completionTime: "2023-06-15T05:23:12Z"
+    - name: frontend-group
+      namespace: web
+      status: SUCCESS
+      startTime: "2023-06-15T05:21:34Z"
+      completionTime: "2023-06-15T05:23:57Z"
+  # Detailed conditions
+  conditions:
+    - type: Started
+      status: "True"
+      lastTransitionTime: "2023-06-15T05:21:34Z"
+      reason: FailoverStarted
+      message: "Failover operation has started"
+    - type: Completed
+      status: "True"
+      lastTransitionTime: "2023-06-15T05:23:57Z"
+      reason: FailoverCompleted
+      message: "Failover operation completed successfully"
+```
+
 ## Detailed Functionality
 
 ### Orchestration Flow
@@ -120,12 +231,9 @@ Example:
 
 ```yaml
 apiVersion: crd.hahomelabs.com/v1alpha1
-kind: FailoverPolicy
+kind: FailoverGroup
 metadata:
-  name: failoverpolicy-sample
-  annotations:
-    # Manage state via annotations (preferred)
-    failover-operator.hahomelabs.com/desired-state: "PRIMARY"
+  name: failovergroup-sample
 spec:
   # Determine the failover approach - "safe" or "fast"
   failoverMode: safe
@@ -162,7 +270,73 @@ spec:
     - kind: Kustomization
       name: core-services
       
+### Default State Behavior
+
+When a new `FailoverGroup` is created, it is automatically initialized in the `PRIMARY` state. This design decision ensures that:
+
+1. Flux can immediately begin reconciling resources without interference
+2. Workloads can be deployed without manual intervention
+3. The system starts in a fully operational state
+4. No transition is required to begin serving traffic
+
+This behavior is particularly important in GitOps workflows, where Flux or similar tools manage the application lifecycle. By defaulting to the `PRIMARY` state, the operator avoids blocking initial deployments.
+
 ```
+
+## Automatic Failover Recovery
+
+The Failover Operator includes a sophisticated recovery mechanism to automatically handle situations where failover operations fail or become deadlocked.
+
+### Key Features
+
+1. **Automatic Detection**: The operator automatically detects when a failover operation has:
+   - Exceeded maximum allowed duration (30 minutes by default)
+   - Has too many failed components (more than 50% of FailoverGroups)
+   - Detected deadlocked workloads that are stuck in a transition state
+
+2. **Automatic Recovery**: When a failing failover is detected, the operator:
+   - Creates a recovery failover operation that targets the opposite direction
+   - Marks the original failover as failed
+   - Includes annotations to track the reason for recovery
+
+3. **Recovery Failover Type**: The operator supports a special `recovery` failover type:
+   ```yaml
+   apiVersion: crd.hahomelabs.com/v1alpha1
+   kind: Failover
+   spec:
+     # Special type for recovery operations
+     type: recovery
+     targetCluster: original-cluster
+     failoverGroups:
+       - name: application-db-group
+         namespace: default
+   ```
+
+4. **Special Handling for Recovery Operations**: Recovery failovers use more aggressive tactics:
+   - Skip usual waiting periods for workload readiness
+   - Force immediate state transitions to break deadlocks
+   - Prioritize system stability over data consistency
+   - Apply all recovery actions in parallel for faster resolution
+
+### Recovery Process Flow
+
+When a failover operation is detected as failed:
+
+1. The original failover is marked as `FAILED` with a detailed reason
+2. A new recovery failover is created targeting the original cluster
+3. The recovery failover uses aggressive tactics to break deadlocks:
+   - For PRIMARY clusters: Forces immediate transition to STANDBY state
+   - For STANDBY clusters: Forces immediate transition to PRIMARY state
+4. The recovery is tracked with special conditions in the status field
+
+### Deadlock Detection
+
+The operator uses sophisticated detection for workloads stuck in transition:
+
+- Monitors workload state changes over time
+- Detects when replicas are stuck between desired and actual counts
+- Considers a workload deadlocked when a transition hasn't changed in 15+ minutes
+- Records detailed metrics about deadlocks for troubleshooting
 
 ### Component-Based Architecture
 
@@ -300,7 +474,8 @@ spec:
 
 ```bash
 # Apply the CRD
-kubectl apply -f config/crd/bases/crd.hahomelabs.com_failoverpolicies.yaml
+kubectl apply -f config/crd/bases/crd.hahomelabs.com_failovergroups.yaml
+kubectl apply -f config/crd/bases/crd.hahomelabs.com_failovers.yaml
 
 # Deploy the operator
 make deploy

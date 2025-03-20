@@ -79,7 +79,7 @@ if !isSafeMode {
 
 ## Component Responsibilities
 
-### Main Controller (failoverpolicy_controller.go)
+### Main Controller (failover_controller.go)
 
 The main controller is responsible for:
 - Coordinating the overall reconciliation process

@@ -99,22 +99,22 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.handleDeletion(ctx, failover)
 	}
 
-	// Check if this is a recovery operation and log appropriately
-	isRecovery := failover.Spec.Type == "recovery"
-	if isRecovery {
-		// Check for 'recovery-for' annotation to get the original failover name
-		if originalFailover, ok := failover.Annotations["failover.hahomelabs.com/recovery-for"]; ok {
-			logger.Info("Processing recovery failover",
+	// Check if this is an emergency operation and log appropriately
+	isEmergency := failover.Spec.Type == "emergency"
+	if isEmergency {
+		// Check for 'failback-for' annotation to get the original failover name
+		if originalFailover, ok := failover.Annotations["failover.hahomelabs.com/failback-for"]; ok {
+			logger.Info("Processing emergency failback",
 				"originalFailover", originalFailover,
-				"reason", failover.Annotations["failover.hahomelabs.com/recovery-reason"])
+				"reason", failover.Annotations["failover.hahomelabs.com/failure-reason"])
 		} else {
-			logger.Info("Processing recovery failover (no original failover reference)")
+			logger.Info("Processing emergency failover")
 		}
 	}
 
 	// Initialize status if it's empty
 	if failover.Status.Status == "" {
-		logger.Info("Initializing Failover status", "isRecovery", isRecovery)
+		logger.Info("Initializing Failover status", "isEmergency", isEmergency)
 		failover.Status.Status = "IN_PROGRESS"
 		failover.Status.Metrics = crdv1alpha1.FailoverMetrics{}
 
@@ -137,16 +137,16 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		meta.SetStatusCondition(&failover.Status.Conditions, startCondition)
 
-		// If this is a recovery operation, add a special condition
-		if isRecovery {
-			recoveryCondition := metav1.Condition{
-				Type:               "Recovery",
+		// If this is an emergency operation, add a special condition
+		if isEmergency {
+			emergencyCondition := metav1.Condition{
+				Type:               "Emergency",
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "RecoveryOperation",
-				Message:            "This is a recovery operation to fix a failed failover",
+				Reason:             "EmergencyOperation",
+				Message:            "This is an emergency operation to quickly restore service",
 			}
-			meta.SetStatusCondition(&failover.Status.Conditions, recoveryCondition)
+			meta.SetStatusCondition(&failover.Status.Conditions, emergencyCondition)
 		}
 
 		if err := r.Status().Update(ctx, failover); err != nil {
@@ -185,7 +185,7 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					return ctrl.Result{}, err
 				}
 				// Trigger recovery
-				return r.initiateFailoverRecovery(ctx, failover)
+				return r.initiateEmergencyFailback(ctx, failover)
 			}
 		}
 
@@ -283,7 +283,7 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				}
 
 				// Trigger recovery
-				return r.initiateFailoverRecovery(ctx, failover)
+				return r.initiateEmergencyFailback(ctx, failover)
 			}
 		}
 
@@ -320,7 +320,7 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					logger.Error(err, "Failed to update Failover status")
 					return ctrl.Result{}, err
 				}
-				return r.initiateFailoverRecovery(ctx, failover)
+				return r.initiateEmergencyFailback(ctx, failover)
 			}
 
 			if err := r.Status().Update(ctx, failover); err != nil {
@@ -355,41 +355,41 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		"targetCluster", failover.Spec.TargetCluster,
 		"currentCluster", r.ClusterName,
 		"currentState", group.Status.State,
-		"isRecovery", failover.Spec.Type == "recovery")
+		"isEmergency", failover.Spec.Type == "emergency")
 
-	// Check if this is a recovery operation
-	isRecovery := failover.Spec.Type == "recovery"
+	// Check if this is an emergency operation
+	isEmergency := failover.Spec.Type == "emergency"
 
 	// Check if this is a failover to this cluster or away from this cluster
 	isTargetingThisCluster := failover.Spec.TargetCluster == r.ClusterName
 
-	// For recovery operations, we need to be more aggressive in forcing the state changes
-	if isRecovery {
-		logger.Info("This is a recovery operation, handling with special care")
+	// For emergency operations, we need to be more aggressive in forcing the state changes
+	if isEmergency {
+		logger.Info("This is an emergency operation, handling with special care")
 
 		if isTargetingThisCluster {
-			// This is a recovery to make THIS cluster PRIMARY
-			logger.Info("Recovery operation: Setting this cluster to PRIMARY")
+			// This is an emergency to make THIS cluster PRIMARY
+			logger.Info("Emergency operation: Setting this cluster to PRIMARY")
 
 			// Force state to FAILBACK and then to PRIMARY
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
 			if err := r.Status().Update(ctx, group); err != nil {
-				logger.Error(err, "Failed to update FailoverGroup state during recovery")
+				logger.Error(err, "Failed to update FailoverGroup state during emergency")
 				return "FAILED", err
 			}
 
-			// For recovery, immediately resume Flux resources if defined
+			// For emergency, immediately resume Flux resources if defined
 			if len(group.Spec.ParentFluxResources) > 0 {
-				logger.Info("Recovery: Immediately resuming Flux resources")
+				logger.Info("Emergency: Immediately resuming Flux resources")
 				if err := r.resumeFluxResources(ctx, group.Spec.ParentFluxResources, group.Namespace); err != nil {
-					logger.Error(err, "Failed to resume Flux resources during recovery")
-					// Continue despite error for recovery
+					logger.Error(err, "Failed to resume Flux resources during emergency")
+					// Continue despite error for emergency
 				}
 
 				// Force trigger Flux reconciliation
 				if err := r.triggerFluxReconciliation(ctx, group.Spec.ParentFluxResources, group.Namespace); err != nil {
-					logger.Error(err, "Failed to trigger Flux reconciliation during recovery")
-					// Continue despite error for recovery
+					logger.Error(err, "Failed to trigger Flux reconciliation during emergency")
+					// Continue despite error for emergency
 				}
 			}
 
@@ -397,21 +397,20 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			for _, comp := range group.Spec.Components {
 				for _, workload := range comp.Workloads {
 					if err := r.removeFluxReconcileAnnotation(ctx, workload.Kind, workload.Name, group.Namespace); err != nil {
-						logger.Error(err, "Failed to remove Flux reconcile annotation during recovery",
+						logger.Error(err, "Failed to remove Flux reconcile annotation during emergency",
 							"kind", workload.Kind, "name", workload.Name)
-						// Continue despite error for recovery
+						// Continue despite error for emergency
 					}
 				}
 			}
 
-			// Set state to PRIMARY without waiting for all workloads to be ready
-			// This is necessary for recovery to break potential deadlocks
-			logger.Info("Recovery: Setting state to PRIMARY immediately to break potential deadlocks")
+			// This is necessary for emergency to break potential deadlocks
+			logger.Info("Emergency: Setting state to PRIMARY immediately to break potential deadlocks")
 			group.Status.State = string(crdv1alpha1.FailoverGroupStatePrimary)
 			group.Status.LastFailoverTime = time.Now().Format(time.RFC3339)
 
 			if err := r.Status().Update(ctx, group); err != nil {
-				logger.Error(err, "Failed to set state to PRIMARY during recovery")
+				logger.Error(err, "Failed to update FailoverGroup state for emergency")
 				return "FAILED", err
 			}
 
@@ -419,22 +418,22 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			return "SUCCESS", nil
 
 		} else {
-			// This is a recovery to make THIS cluster STANDBY
-			logger.Info("Recovery operation: Setting this cluster to STANDBY")
+			// This is an emergency to make THIS cluster STANDBY
+			logger.Info("Emergency operation: Setting this cluster to STANDBY")
 
-			// For recovery, set state to FAILOVER and then immediately to STANDBY
+			// For emergency, set state to FAILOVER and then immediately to STANDBY
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
 			if err := r.Status().Update(ctx, group); err != nil {
-				logger.Error(err, "Failed to update FailoverGroup state during recovery")
+				logger.Error(err, "Failed to update FailoverGroup state during emergency")
 				return "FAILED", err
 			}
 
 			// Immediately suspend Flux resources if defined
 			if len(group.Spec.ParentFluxResources) > 0 {
-				logger.Info("Recovery: Immediately suspending Flux resources")
+				logger.Info("Emergency: Immediately suspending Flux resources")
 				if err := r.suspendFluxResources(ctx, group.Spec.ParentFluxResources, group.Namespace); err != nil {
-					logger.Error(err, "Failed to suspend Flux resources during recovery")
-					// Continue despite error for recovery
+					logger.Error(err, "Failed to suspend Flux resources during emergency")
+					// Continue despite error for emergency
 				}
 			}
 
@@ -442,28 +441,27 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			for _, comp := range group.Spec.Components {
 				for _, workload := range comp.Workloads {
 					if err := r.addFluxReconcileAnnotation(ctx, workload.Kind, workload.Name, group.Namespace); err != nil {
-						logger.Error(err, "Failed to add Flux reconcile annotation during recovery",
+						logger.Error(err, "Failed to add Flux reconcile annotation during emergency",
 							"kind", workload.Kind, "name", workload.Name)
-						// Continue despite error for recovery
+						// Continue despite error for emergency
 					}
 
-					// Force scale down workloads immediately for recovery
+					// Force scale down workloads immediately for emergency
 					if err := r.scaleWorkload(ctx, workload.Kind, workload.Name, group.Namespace, 0); err != nil {
-						logger.Error(err, "Failed to scale down workload during recovery",
+						logger.Error(err, "Failed to scale down workload during emergency",
 							"kind", workload.Kind, "name", workload.Name)
-						// Continue despite error for recovery
+						// Continue despite error for emergency
 					}
 				}
 			}
 
-			// Set state to STANDBY without waiting for all workloads to be fully scaled down
-			// This is necessary for recovery to break potential deadlocks
-			logger.Info("Recovery: Setting state to STANDBY immediately to break potential deadlocks")
+			// This is necessary for emergency to break potential deadlocks
+			logger.Info("Emergency: Setting state to STANDBY immediately to break potential deadlocks")
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateStandby)
 			group.Status.LastFailoverTime = time.Now().Format(time.RFC3339)
 
 			if err := r.Status().Update(ctx, group); err != nil {
-				logger.Error(err, "Failed to set state to STANDBY during recovery")
+				logger.Error(err, "Failed to update FailoverGroup state for emergency")
 				return "FAILED", err
 			}
 
@@ -481,13 +479,6 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		// Already standby and we want to make another cluster primary, no action needed
 		logger.Info("Group is already STANDBY and target is another cluster, no failover needed")
 		return "SUCCESS", nil
-	}
-
-	// For a planned failover, ensure all components are healthy first
-	if failover.Spec.Type == "planned" && group.Status.Health != "OK" {
-		logger.Info("Cannot proceed with planned failover while group health is not OK",
-			"health", group.Status.Health)
-		return "FAILED", fmt.Errorf("group health is %s, planned failover requires OK health", group.Status.Health)
 	}
 
 	// Set the appropriate transitory state if we're just starting the failover process
@@ -569,30 +560,6 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 				logger.Error(err, "Failed to trigger Flux reconciliation")
 				// Continue despite errors, as this is just to speed up the process
 			}
-		}
-
-		// Check for deadlocks in workloads
-		hasDeadlock := false
-		for _, comp := range group.Spec.Components {
-			for _, workload := range comp.Workloads {
-				deadlocked, err := r.isWorkloadInDeadlock(ctx, workload.Kind, workload.Name, group.Namespace, 15)
-				if err != nil {
-					logger.Error(err, "Failed to check for workload deadlock",
-						"kind", workload.Kind, "name", workload.Name)
-					continue
-				}
-
-				if deadlocked {
-					hasDeadlock = true
-					logger.Error(nil, "Detected deadlock in workload during FAILOVER",
-						"kind", workload.Kind, "name", workload.Name)
-				}
-			}
-		}
-
-		if hasDeadlock {
-			logger.Error(nil, "Deadlocked workloads detected, failover may be stuck")
-			return "FAILED", fmt.Errorf("detected deadlocked workloads during FAILOVER, recovery needed")
 		}
 
 		// Verify that workloads are scaled up before marking as PRIMARY
@@ -697,28 +664,6 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 					}
 				}
 
-				// Check for deadlocks in workloads during scale down
-				hasDeadlock := false
-				for _, workload := range comp.Workloads {
-					deadlocked, err := r.isWorkloadInDeadlock(ctx, workload.Kind, workload.Name, group.Namespace, 15)
-					if err != nil {
-						logger.Error(err, "Failed to check for workload deadlock",
-							"kind", workload.Kind, "name", workload.Name)
-						continue
-					}
-
-					if deadlocked {
-						hasDeadlock = true
-						logger.Error(nil, "Detected deadlock in workload during FAILBACK",
-							"kind", workload.Kind, "name", workload.Name)
-					}
-				}
-
-				if hasDeadlock {
-					logger.Error(nil, "Deadlocked workloads detected during safe component scale down, failback may be stuck")
-					return "FAILED", fmt.Errorf("detected deadlocked workloads during FAILBACK, recovery needed")
-				}
-
 				// Verify all workloads are fully scaled down
 				allScaledDown := true
 				for _, workload := range comp.Workloads {
@@ -771,28 +716,6 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 						"kind", workload.Kind, "name", workload.Name)
 					return "FAILED", err
 				}
-			}
-
-			// Check for deadlocks in non-safe mode components
-			hasDeadlock := false
-			for _, workload := range comp.Workloads {
-				deadlocked, err := r.isWorkloadInDeadlock(ctx, workload.Kind, workload.Name, group.Namespace, 15)
-				if err != nil {
-					logger.Error(err, "Failed to check for workload deadlock",
-						"kind", workload.Kind, "name", workload.Name)
-					continue
-				}
-
-				if deadlocked {
-					hasDeadlock = true
-					logger.Error(nil, "Detected deadlock in workload during FAILBACK",
-						"kind", workload.Kind, "name", workload.Name)
-				}
-			}
-
-			if hasDeadlock {
-				logger.Error(nil, "Deadlocked workloads detected during component scale down, failback may be stuck")
-				return "FAILED", fmt.Errorf("detected deadlocked workloads during FAILBACK, recovery needed")
 			}
 
 			// Demote volume replications immediately for non-safe mode
@@ -1553,19 +1476,20 @@ func (r *FailoverReconciler) removeFluxAnnotationFromCronJob(ctx context.Context
 	return r.Update(ctx, cronjob)
 }
 
-// initiateFailoverRecovery initiates failover recovery by creating a new failover in the reverse direction
-func (r *FailoverReconciler) initiateFailoverRecovery(ctx context.Context, failover *crdv1alpha1.Failover) (ctrl.Result, error) {
+// initiateEmergencyFailback initiates an emergency failback by creating a new failover in the reverse direction
+// This is called when a failover operation fails to return the system to a stable state
+func (r *FailoverReconciler) initiateEmergencyFailback(ctx context.Context, failover *crdv1alpha1.Failover) (ctrl.Result, error) {
 	logger := r.Log.WithValues("failover", fmt.Sprintf("%s/%s", failover.Namespace, failover.Name))
-	logger.Info("Initiating failover recovery", "originalTarget", failover.Spec.TargetCluster)
+	logger.Info("Initiating emergency failback", "originalTarget", failover.Spec.TargetCluster)
 
-	// Create a recovery failover in the opposite direction
-	recoveryFailover := &crdv1alpha1.Failover{
+	// Create an emergency failover in the opposite direction
+	emergencyFailover := &crdv1alpha1.Failover{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-recovery", failover.Name),
+			Name:      fmt.Sprintf("%s-emergency", failover.Name),
 			Namespace: failover.Namespace,
 			Annotations: map[string]string{
-				"failover.hahomelabs.com/recovery-for":    failover.Name,
-				"failover.hahomelabs.com/recovery-reason": getFailureReason(failover.Status.Conditions),
+				"failover.hahomelabs.com/failback-for":   failover.Name,
+				"failover.hahomelabs.com/failure-reason": getFailureReason(failover.Status.Conditions),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -1580,33 +1504,33 @@ func (r *FailoverReconciler) initiateFailoverRecovery(ctx context.Context, failo
 		Spec: crdv1alpha1.FailoverSpec{
 			// Target the source cluster (i.e., current cluster) to reverse the direction
 			TargetCluster: r.ClusterName,
-			// Mark as recovery operation
-			Type: "recovery",
+			// Mark as emergency operation
+			Type: "emergency",
 			// Use the same groups that were being failed over
 			FailoverGroups: failover.Spec.FailoverGroups,
 		},
 	}
 
-	// Create the recovery failover
-	logger.Info("Creating recovery failover", "name", recoveryFailover.Name, "targetCluster", recoveryFailover.Spec.TargetCluster)
-	if err := r.Create(ctx, recoveryFailover); err != nil {
-		logger.Error(err, "Failed to create recovery failover")
+	// Create the emergency failover
+	logger.Info("Creating emergency failback", "name", emergencyFailover.Name, "targetCluster", emergencyFailover.Spec.TargetCluster)
+	if err := r.Create(ctx, emergencyFailover); err != nil {
+		logger.Error(err, "Failed to create emergency failback")
 		return ctrl.Result{}, err
 	}
 
-	// Update the original failover with a reference to the recovery
+	// Update the original failover with a reference to the emergency failback
 	condition := metav1.Condition{
-		Type:               "RecoveryInitiated",
+		Type:               "EmergencyFailbackInitiated",
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
-		Reason:             "FailoverRecovery",
-		Message:            fmt.Sprintf("Recovery failover created: %s", recoveryFailover.Name),
+		Reason:             "FailoverFailed",
+		Message:            fmt.Sprintf("Emergency failback created: %s", emergencyFailover.Name),
 	}
 	meta.SetStatusCondition(&failover.Status.Conditions, condition)
 
 	if err := r.Status().Update(ctx, failover); err != nil {
-		logger.Error(err, "Failed to update original failover with recovery status")
-		// Don't return error as the recovery failover was already created
+		logger.Error(err, "Failed to update original failover with emergency failback status")
+		// Don't return error as the emergency failover was already created
 	}
 
 	return ctrl.Result{}, nil
@@ -1625,106 +1549,4 @@ func getFailureReason(conditions []metav1.Condition) string {
 // boolPtr returns a pointer to a bool
 func boolPtr(b bool) *bool {
 	return &b
-}
-
-// isWorkloadInDeadlock checks if a workload appears to be in a deadlock state
-// This occurs when a workload is stuck in a transition and hasn't changed state in a long time
-func (r *FailoverReconciler) isWorkloadInDeadlock(ctx context.Context, kind, name, namespace string, timeoutMinutes int) (bool, error) {
-	logger := r.Log.WithValues("kind", kind, "name", name, "namespace", namespace)
-
-	switch kind {
-	case "Deployment":
-		// Get the deployment
-		deployment := &appsv1.Deployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, deployment); err != nil {
-			if errors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, err
-		}
-
-		// Get the last transition time from the deployment conditions
-		lastTransition := getLastDeploymentTransitionTime(deployment)
-		if lastTransition == nil {
-			// If we can't determine the last transition time, assume it's not in deadlock
-			logger.Info("Could not determine last transition time for deployment")
-			return false, nil
-		}
-
-		// Check if the deployment is in the middle of scaling (desired != current)
-		if deployment.Status.Replicas != *deployment.Spec.Replicas {
-			// Check how long it's been stuck in this state
-			stuckTime := time.Since(*lastTransition)
-			timeoutDuration := time.Duration(timeoutMinutes) * time.Minute
-
-			if stuckTime > timeoutDuration {
-				logger.Info("Deployment appears to be in deadlock",
-					"desiredReplicas", *deployment.Spec.Replicas,
-					"currentReplicas", deployment.Status.Replicas,
-					"stuckTime", stuckTime.String())
-				return true, nil
-			}
-		}
-
-		return false, nil
-
-	case "StatefulSet":
-		// Get the statefulset
-		statefulset := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, statefulset); err != nil {
-			if errors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, err
-		}
-
-		// Get the last update time - this is approximated from metadata
-		lastUpdate := statefulset.ObjectMeta.GetCreationTimestamp()
-		for _, cond := range statefulset.Status.Conditions {
-			if cond.LastTransitionTime.After(lastUpdate.Time) {
-				lastUpdate = cond.LastTransitionTime
-			}
-		}
-
-		// Check if the statefulset is in the middle of scaling (desired != current)
-		if statefulset.Status.CurrentReplicas != *statefulset.Spec.Replicas {
-			// Check how long it's been stuck in this state
-			stuckTime := time.Since(lastUpdate.Time)
-			timeoutDuration := time.Duration(timeoutMinutes) * time.Minute
-
-			if stuckTime > timeoutDuration {
-				logger.Info("StatefulSet appears to be in deadlock",
-					"desiredReplicas", *statefulset.Spec.Replicas,
-					"currentReplicas", statefulset.Status.CurrentReplicas,
-					"stuckTime", stuckTime.String())
-				return true, nil
-			}
-		}
-
-		return false, nil
-
-	default:
-		return false, nil // Skip other resource types
-	}
-}
-
-// getLastDeploymentTransitionTime returns the most recent transition time from a deployment's conditions
-func getLastDeploymentTransitionTime(deployment *appsv1.Deployment) *time.Time {
-	var lastTime *time.Time
-
-	// Check conditions for the most recent transition
-	for _, condition := range deployment.Status.Conditions {
-		conditionTime := condition.LastTransitionTime.Time
-		if lastTime == nil || conditionTime.After(*lastTime) {
-			lastTime = &conditionTime
-		}
-	}
-
-	// If no conditions are available, check metadata
-	if lastTime == nil {
-		updateTime := deployment.ObjectMeta.GetCreationTimestamp()
-		lastTime = &updateTime.Time
-	}
-
-	return lastTime
 }

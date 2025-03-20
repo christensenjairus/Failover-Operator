@@ -100,11 +100,9 @@ spec:
                   Type of failover:
                   - "planned" allows for a controlled, sequential failover with minimal downtime
                   - "emergency" prioritizes availability on the target cluster as quickly as possible
-                  - "recovery" automatically created to reverse a failed failover and prevent deadlocks
                 enum:
                 - planned
                 - emergency
-                - recovery
                 type: string
             required:
             - failoverGroups

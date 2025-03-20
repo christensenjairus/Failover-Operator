@@ -65,8 +65,7 @@ type FailoverSpec struct {
 	// Type of failover:
 	// - "planned" allows for a controlled, sequential failover with minimal downtime
 	// - "emergency" prioritizes availability on the target cluster as quickly as possible
-	// - "recovery" automatically created to reverse a failed failover and prevent deadlocks
-	// +kubebuilder:validation:Enum=planned;emergency;recovery
+	// +kubebuilder:validation:Enum=planned;emergency
 	// +kubebuilder:validation:Required
 	Type string `json:"type"`
 

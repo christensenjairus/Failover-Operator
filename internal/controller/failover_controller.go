@@ -371,8 +371,8 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			// This is a recovery to make THIS cluster PRIMARY
 			logger.Info("Recovery operation: Setting this cluster to PRIMARY")
 
-			// Force state to FAILOVER and then to PRIMARY
-			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
+			// Force state to FAILBACK and then to PRIMARY
+			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
 			if err := r.Status().Update(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state during recovery")
 				return "FAILED", err
@@ -422,8 +422,8 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			// This is a recovery to make THIS cluster STANDBY
 			logger.Info("Recovery operation: Setting this cluster to STANDBY")
 
-			// For recovery, set state to FAILBACK and then immediately to STANDBY
-			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
+			// For recovery, set state to FAILOVER and then immediately to STANDBY
+			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
 			if err := r.Status().Update(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state during recovery")
 				return "FAILED", err
@@ -491,19 +491,19 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 	}
 
 	// Set the appropriate transitory state if we're just starting the failover process
-	if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailover) &&
-		group.Status.State != string(crdv1alpha1.FailoverGroupStateFailback) {
+	if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailback) &&
+		group.Status.State != string(crdv1alpha1.FailoverGroupStateFailover) {
 
 		// Determine the appropriate transitory state based on the relationship between
 		// the current cluster and the target cluster in the Failover CR
 		var transitionState string
 		if isTargetingThisCluster {
-			// This cluster is becoming PRIMARY (targeted by the failover) - it's a FAILOVER
-			transitionState = string(crdv1alpha1.FailoverGroupStateFailover)
+			// This cluster is becoming PRIMARY (targeted by the failover) - it's a FAILBACK
+			transitionState = string(crdv1alpha1.FailoverGroupStateFailback)
 			logger.Info("Setting transitory state to FAILOVER (becoming PRIMARY)")
 		} else {
-			// This cluster is becoming STANDBY (not targeted by the failover) - it's a FAILBACK
-			transitionState = string(crdv1alpha1.FailoverGroupStateFailback)
+			// This cluster is becoming STANDBY (not targeted by the failover) - it's a FAILOVER
+			transitionState = string(crdv1alpha1.FailoverGroupStateFailover)
 			logger.Info("Setting transitory state to FAILBACK (becoming STANDBY)")
 		}
 
@@ -520,10 +520,10 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 	// If target cluster is this cluster, make it PRIMARY
 	if isTargetingThisCluster {
 		// Verify we're in the FAILOVER state (transitioning to PRIMARY)
-		if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailover) {
+		if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailback) {
 			logger.Info("Group not in FAILOVER state, setting it now",
 				"currentState", group.Status.State)
-			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
+			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
 			if err := r.Status().Update(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state")
 				return "FAILED", err
@@ -642,11 +642,11 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		group.Status.State = string(crdv1alpha1.FailoverGroupStatePrimary)
 
 	} else {
-		// Verify we're in the FAILBACK state (transitioning to STANDBY)
-		if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailback) {
+		// Verify we're in the FAILOVER state (transitioning to STANDBY)
+		if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailover) {
 			logger.Info("Group not in FAILBACK state, setting it now",
 				"currentState", group.Status.State)
-			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
+			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
 			if err := r.Status().Update(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state")
 				return "FAILED", err

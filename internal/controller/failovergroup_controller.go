@@ -118,12 +118,12 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	case string(crdv1alpha1.FailoverGroupStateStandby):
 		// For STANDBY groups, we just monitor health
 		logger.V(1).Info("FailoverGroup is in STANDBY state")
-	case string(crdv1alpha1.FailoverGroupStateFailover):
+	case string(crdv1alpha1.FailoverGroupStateFailback):
 		// Group is transitioning from STANDBY to PRIMARY
 		logger.Info("FailoverGroup is in FAILOVER state - transitioning from STANDBY to PRIMARY")
 		// Reconcile more frequently during state transitions
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	case string(crdv1alpha1.FailoverGroupStateFailback):
+	case string(crdv1alpha1.FailoverGroupStateFailover):
 		// Group is transitioning from PRIMARY to STANDBY
 		logger.Info("FailoverGroup is in FAILBACK state - transitioning from PRIMARY to STANDBY")
 		// Reconcile more frequently during state transitions
@@ -135,8 +135,8 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Requeue periodically to ensure health stays current
 	// More frequent reconciliation for groups in transitory states
-	if failoverGroup.Status.State == string(crdv1alpha1.FailoverGroupStateFailover) ||
-		failoverGroup.Status.State == string(crdv1alpha1.FailoverGroupStateFailback) {
+	if failoverGroup.Status.State == string(crdv1alpha1.FailoverGroupStateFailback) ||
+		failoverGroup.Status.State == string(crdv1alpha1.FailoverGroupStateFailover) {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
@@ -179,8 +179,8 @@ func (r *FailoverGroupReconciler) calculateComponentHealth(ctx context.Context, 
 	hasDegraded := false
 
 	// During transitory states (FAILOVER/FAILBACK), mark health as DEGRADED unless actual errors are found
-	if fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailover) ||
-		fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailback) {
+	if fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailback) ||
+		fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailover) {
 		hasDegraded = true
 		r.Log.Info("Group is in transitory state, marking health as at least DEGRADED",
 			"state", fg.Status.State)
@@ -193,7 +193,7 @@ func (r *FailoverGroupReconciler) calculateComponentHealth(ctx context.Context, 
 
 		// Check workloads if in PRIMARY state or transitioning to PRIMARY (FAILOVER)
 		if fg.Status.State == string(crdv1alpha1.FailoverGroupStatePrimary) ||
-			fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailover) {
+			fg.Status.State == string(crdv1alpha1.FailoverGroupStateFailback) {
 			workloadOk, workloadMsg := r.checkWorkloadsHealth(ctx, comp.Workloads, fg.Namespace)
 			if !workloadOk {
 				health = "DEGRADED"

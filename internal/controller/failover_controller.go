@@ -37,6 +37,8 @@ import (
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Constants for annotations
@@ -404,6 +406,37 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 				}
 			}
 
+			// Process volume replications immediately for emergency
+			for _, comp := range group.Spec.Components {
+				if len(comp.VolumeReplications) > 0 {
+					logger.Info("Emergency: Promoting volume replications to primary state",
+						"component", comp.Name,
+						"volumeReplicationCount", len(comp.VolumeReplications),
+						"targetState", "primary",
+						"mode", "emergency")
+
+					// Process each volume replication to set to primary
+					for _, volRep := range comp.VolumeReplications {
+						logger.Info("Emergency: Setting volume replication to primary",
+							"component", comp.Name,
+							"volumeReplication", volRep,
+							"currentState", group.Status.State,
+							"targetState", "primary")
+
+						if err := r.setVolumeReplicationState(ctx, volRep, group.Namespace, "primary"); err != nil {
+							logger.Error(err, "Failed to promote volume replication in emergency",
+								"component", comp.Name,
+								"volumeReplication", volRep)
+							// Continue despite errors
+						} else {
+							logger.Info("Emergency: Successfully requested primary state for volume replication",
+								"component", comp.Name,
+								"volumeReplication", volRep)
+						}
+					}
+				}
+			}
+
 			// This is necessary for emergency to break potential deadlocks
 			logger.Info("Emergency: Setting state to PRIMARY immediately to break potential deadlocks")
 			group.Status.State = string(crdv1alpha1.FailoverGroupStatePrimary)
@@ -451,6 +484,37 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 						logger.Error(err, "Failed to scale down workload during emergency",
 							"kind", workload.Kind, "name", workload.Name)
 						// Continue despite error for emergency
+					}
+				}
+			}
+
+			// Process volume replications immediately for emergency
+			for _, comp := range group.Spec.Components {
+				if len(comp.VolumeReplications) > 0 {
+					logger.Info("Emergency: Demoting volume replications to secondary state",
+						"component", comp.Name,
+						"volumeReplicationCount", len(comp.VolumeReplications),
+						"targetState", "secondary",
+						"mode", "emergency")
+
+					// Process each volume replication to set to secondary
+					for _, volRep := range comp.VolumeReplications {
+						logger.Info("Emergency: Setting volume replication to secondary",
+							"component", comp.Name,
+							"volumeReplication", volRep,
+							"currentState", group.Status.State,
+							"targetState", "secondary")
+
+						if err := r.setVolumeReplicationState(ctx, volRep, group.Namespace, "secondary"); err != nil {
+							logger.Error(err, "Failed to demote volume replication in emergency",
+								"component", comp.Name,
+								"volumeReplication", volRep)
+							// Continue despite errors
+						} else {
+							logger.Info("Emergency: Successfully requested secondary state for volume replication",
+								"component", comp.Name,
+								"volumeReplication", volRep)
+						}
 					}
 				}
 			}
@@ -536,8 +600,31 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		for _, comp := range group.Spec.Components {
 			if len(comp.VolumeReplications) > 0 {
 				// Process volume replications
-				logger.Info("Processing volume replications for component", "component", comp.Name)
-				// In production code, this would promote the volume replications
+				logger.Info("Processing volume replications for PRIMARY transition",
+					"component", comp.Name,
+					"volumeReplicationCount", len(comp.VolumeReplications),
+					"targetState", "primary")
+
+				// Process each volume replication to set it to primary (read-write) mode
+				for _, volRep := range comp.VolumeReplications {
+					logger.Info("Setting volume replication to primary",
+						"component", comp.Name,
+						"volumeReplication", volRep,
+						"currentState", group.Status.State,
+						"targetState", "primary")
+
+					// Call the volume replication state change method
+					if err := r.setVolumeReplicationState(ctx, volRep, group.Namespace, "primary"); err != nil {
+						logger.Error(err, "Failed to set volume replication to primary",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+						// Continue despite errors to try to set all volume replications
+					} else {
+						logger.Info("Successfully requested primary state for volume replication",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+					}
+				}
 			}
 		}
 
@@ -690,8 +777,30 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 
 				// Now that all workloads are scaled down, demote volume replications
 				logger.Info("All workloads scaled down, demoting volume replications",
-					"component", comp.Name)
-				// In production code, this would demote the volume replications
+					"component", comp.Name,
+					"volumeReplicationCount", len(comp.VolumeReplications),
+					"targetState", "secondary")
+
+				// Process each volume replication to set it to secondary (read-only) mode
+				for _, volRep := range comp.VolumeReplications {
+					logger.Info("Setting volume replication to secondary",
+						"component", comp.Name,
+						"volumeReplication", volRep,
+						"currentState", group.Status.State,
+						"targetState", "secondary")
+
+					// Call the same method we use for safe mode
+					if err := r.setVolumeReplicationState(ctx, volRep, group.Namespace, "secondary"); err != nil {
+						logger.Error(err, "Failed to set volume replication to secondary",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+						// Continue despite errors to try to set all volume replications
+					} else {
+						logger.Info("Successfully requested secondary state for volume replication",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+					}
+				}
 			}
 		}
 
@@ -721,8 +830,30 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			// Demote volume replications immediately for non-safe mode
 			if !componentSafeMode && len(comp.VolumeReplications) > 0 {
 				logger.Info("Demoting volume replications in fast mode",
-					"component", comp.Name)
-				// In production code, this would demote the volume replications
+					"component", comp.Name,
+					"volumeReplicationCount", len(comp.VolumeReplications),
+					"targetState", "secondary")
+
+				// Process each volume replication to set it to secondary (read-only) mode
+				for _, volRep := range comp.VolumeReplications {
+					logger.Info("Setting volume replication to secondary (fast mode)",
+						"component", comp.Name,
+						"volumeReplication", volRep,
+						"currentState", group.Status.State,
+						"targetState", "secondary")
+
+					// Call the same method we use for safe mode
+					if err := r.setVolumeReplicationState(ctx, volRep, group.Namespace, "secondary"); err != nil {
+						logger.Error(err, "Failed to set volume replication to secondary",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+						// Continue despite errors to try to set all volume replications
+					} else {
+						logger.Info("Successfully requested secondary state for volume replication",
+							"component", comp.Name,
+							"volumeReplication", volRep)
+					}
+				}
 			}
 		}
 
@@ -1549,4 +1680,69 @@ func getFailureReason(conditions []metav1.Condition) string {
 // boolPtr returns a pointer to a bool
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// setVolumeReplicationState sets the state of a volume replication
+func (r *FailoverReconciler) setVolumeReplicationState(ctx context.Context, name, namespace, state string) error {
+	logger := r.Log.WithValues("action", "setVolumeReplicationState", "name", name, "namespace", namespace, "state", state)
+	logger.Info("Setting volume replication state")
+
+	// Use dynamic client to get the VolumeReplication resource
+	// Create the unstructured object for VolumeReplication
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "replication.storage.openshift.io",
+		Version: "v1alpha1",
+		Kind:    "VolumeReplication",
+	})
+
+	// Get the VolumeReplication resource
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, u)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("VolumeReplication not found, skipping", "name", name, "namespace", namespace)
+			return nil
+		}
+		logger.Error(err, "Failed to get VolumeReplication", "name", name)
+		return err
+	}
+
+	// Check current spec state
+	spec, found, err := unstructured.NestedMap(u.Object, "spec")
+	if err != nil || !found {
+		logger.Error(err, "Failed to get spec from VolumeReplication", "found", found)
+		return fmt.Errorf("could not get spec from VolumeReplication: %v", err)
+	}
+
+	currentState, found, err := unstructured.NestedString(spec, "replicationState")
+	if err != nil {
+		logger.Error(err, "Failed to get replicationState from spec")
+		return err
+	}
+
+	// Only update if the state is different
+	if !found || currentState != state {
+		logger.Info("Updating VolumeReplication state",
+			"currentState", currentState,
+			"newState", state)
+
+		// Update the replicationState field
+		err = unstructured.SetNestedField(u.Object, state, "spec", "replicationState")
+		if err != nil {
+			logger.Error(err, "Failed to set replicationState field")
+			return err
+		}
+
+		// Update the resource
+		if err := r.Update(ctx, u); err != nil {
+			logger.Error(err, "Failed to update VolumeReplication")
+			return err
+		}
+		logger.Info("Successfully updated VolumeReplication state")
+	} else {
+		logger.Info("VolumeReplication already in desired state, skipping update",
+			"state", state)
+	}
+
+	return nil
 }

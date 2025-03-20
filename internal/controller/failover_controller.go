@@ -116,6 +116,49 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Initialize status if it's empty
 	if failover.Status.Status == "" {
+		// Before initializing, check if there are any other IN_PROGRESS failovers
+		// Emergency failovers can proceed regardless of other failovers in progress
+		if !isEmergency {
+			otherInProgress, err := r.isAnyFailoverInProgress(ctx, failover)
+			if err != nil {
+				logger.Error(err, "Failed to check for in-progress failovers")
+				return ctrl.Result{}, err
+			}
+
+			if otherInProgress {
+				// There's another failover in progress - add a condition to indicate we're waiting
+				logger.Info("Another failover is in progress, waiting for it to complete")
+
+				waitingCondition := metav1.Condition{
+					Type:               "Waiting",
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "AnotherFailoverInProgress",
+					Message:            "Waiting for another failover to complete before starting",
+				}
+
+				// Only update the status if we haven't already set the Waiting condition
+				hasWaitingCondition := false
+				for _, cond := range failover.Status.Conditions {
+					if cond.Type == "Waiting" && cond.Status == metav1.ConditionTrue {
+						hasWaitingCondition = true
+						break
+					}
+				}
+
+				if !hasWaitingCondition {
+					meta.SetStatusCondition(&failover.Status.Conditions, waitingCondition)
+					if err := r.Status().Update(ctx, failover); err != nil {
+						logger.Error(err, "Failed to update Failover waiting status")
+						return ctrl.Result{}, err
+					}
+				}
+
+				// Requeue to check again later
+				return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+			}
+		}
+
 		logger.Info("Initializing Failover status", "isEmergency", isEmergency)
 		failover.Status.Status = "IN_PROGRESS"
 		failover.Status.Metrics = crdv1alpha1.FailoverMetrics{}
@@ -173,6 +216,8 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			if failoverDuration > maxFailoverTime {
 				logger.Info("Failover has exceeded maximum allowed time, marking as failed",
 					"duration", failoverDuration.String(), "maxAllowed", maxFailoverTime.String())
+
+				previousState := failover.Status.Status
 				failover.Status.Status = "FAILED"
 				failedCondition := metav1.Condition{
 					Type:               "Failed",
@@ -186,6 +231,17 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					logger.Error(err, "Failed to update Failover status")
 					return ctrl.Result{}, err
 				}
+
+				// If this failover has just transitioned to FAILED state due to timeout,
+				// process any waiting failovers to allow the next one to start
+				if previousState == "IN_PROGRESS" {
+					logger.Info("Failover has timed out, processing waiting failovers queue")
+					if err := r.processWaitingFailovers(ctx); err != nil {
+						logger.Error(err, "Failed to process waiting failovers")
+						// Don't return an error, as this is a non-critical operation
+					}
+				}
+
 				// Trigger recovery
 				return r.initiateEmergencyFailback(ctx, failover)
 			}
@@ -270,6 +326,7 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				logger.Info("Too many FailoverGroups have failed, initiating recovery",
 					"failed", failedCount, "total", totalCount)
 
+				previousState := failover.Status.Status
 				failover.Status.Status = "FAILED"
 				failedCondition := metav1.Condition{
 					Type:               "Failed",
@@ -284,6 +341,16 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					return ctrl.Result{}, err
 				}
 
+				// If this failover has just transitioned to FAILED state,
+				// process any waiting failovers to allow the next one to start
+				if previousState == "IN_PROGRESS" {
+					logger.Info("Failover has failed due to too many failed groups, processing waiting failovers queue")
+					if err := r.processWaitingFailovers(ctx); err != nil {
+						logger.Error(err, "Failed to process waiting failovers")
+						// Don't return an error, as this is a non-critical operation
+					}
+				}
+
 				// Trigger recovery
 				return r.initiateEmergencyFailback(ctx, failover)
 			}
@@ -296,6 +363,7 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				failover.Status.Metrics.TotalFailoverTimeSeconds = int64(endTime.Sub(*startTime).Seconds())
 			}
 
+			previousState := failover.Status.Status
 			if allSuccess {
 				failover.Status.Status = "SUCCESS"
 				completedCondition := metav1.Condition{
@@ -328,6 +396,16 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			if err := r.Status().Update(ctx, failover); err != nil {
 				logger.Error(err, "Failed to update Failover status")
 				return ctrl.Result{}, err
+			}
+
+			// If this failover has just transitioned to a completed state (SUCCESS or FAILED),
+			// process any waiting failovers to allow the next one to start
+			if previousState == "IN_PROGRESS" {
+				logger.Info("Failover has completed, processing waiting failovers queue")
+				if err := r.processWaitingFailovers(ctx); err != nil {
+					logger.Error(err, "Failed to process waiting failovers")
+					// Don't return an error, as this is a non-critical operation
+				}
 			}
 
 			// No need to requeue after completion
@@ -1912,4 +1990,244 @@ func (r *FailoverReconciler) setVolumeReplicationState(ctx context.Context, name
 	}
 
 	return fmt.Errorf("failed to update VolumeReplication state after %d retries", maxRetries)
+}
+
+// isAnyFailoverInProgress checks if any other Failover resources are currently in progress
+// for the same FailoverGroups as the current failover
+func (r *FailoverReconciler) isAnyFailoverInProgress(ctx context.Context, currentFailover *crdv1alpha1.Failover) (bool, error) {
+	logger := r.Log.WithValues("currentFailover", fmt.Sprintf("%s/%s", currentFailover.Namespace, currentFailover.Name))
+
+	// Create a map of the FailoverGroups in the current request for quick lookup
+	currentGroups := make(map[string]bool)
+	for _, group := range currentFailover.Spec.FailoverGroups {
+		// Create a unique key for the group using namespace and name
+		var namespace string
+		if group.Namespace == "" {
+			namespace = currentFailover.Namespace // Use failover namespace if group namespace is not specified
+		} else {
+			namespace = group.Namespace
+		}
+		groupKey := fmt.Sprintf("%s/%s", namespace, group.Name)
+		currentGroups[groupKey] = true
+	}
+
+	// List all Failover resources
+	failoverList := &crdv1alpha1.FailoverList{}
+	if err := r.List(ctx, failoverList); err != nil {
+		logger.Error(err, "Failed to list Failover resources")
+		return false, err
+	}
+
+	// Check each Failover resource
+	for _, failover := range failoverList.Items {
+		// Skip the current failover
+		if failover.Namespace == currentFailover.Namespace && failover.Name == currentFailover.Name {
+			continue
+		}
+
+		// Check if this failover is in progress
+		if failover.Status.Status == "IN_PROGRESS" {
+			// Check if it affects any of the same FailoverGroups
+			for _, group := range failover.Spec.FailoverGroups {
+				var namespace string
+				if group.Namespace == "" {
+					namespace = failover.Namespace
+				} else {
+					namespace = group.Namespace
+				}
+				groupKey := fmt.Sprintf("%s/%s", namespace, group.Name)
+
+				if currentGroups[groupKey] {
+					// Found an in-progress failover that affects one of our groups
+					logger.Info("Found another Failover in progress for group",
+						"failoverName", failover.Name,
+						"failoverNamespace", failover.Namespace,
+						"groupName", group.Name,
+						"groupNamespace", namespace,
+						"startTime", getFailoverStartTime(failover.Status.Conditions))
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// No other in-progress failovers found for the same groups
+	return false, nil
+}
+
+// processWaitingFailovers finds the oldest waiting failover for each FailoverGroup and removes its waiting condition
+// so it can proceed with the failover process on the next reconciliation
+func (r *FailoverReconciler) processWaitingFailovers(ctx context.Context) error {
+	logger := r.Log.WithValues("action", "processWaitingFailovers")
+
+	// List all Failover resources
+	failoverList := &crdv1alpha1.FailoverList{}
+	if err := r.List(ctx, failoverList); err != nil {
+		logger.Error(err, "Failed to list Failover resources")
+		return err
+	}
+
+	// Map of active groups (those that have an IN_PROGRESS failover)
+	// Key format: "namespace/name"
+	activeGroups := make(map[string]bool)
+
+	// First, identify all groups that have an active failover
+	for _, failover := range failoverList.Items {
+		if failover.Status.Status == "IN_PROGRESS" {
+			// Add all groups from this failover to the activeGroups map
+			for _, group := range failover.Spec.FailoverGroups {
+				var namespace string
+				if group.Namespace == "" {
+					namespace = failover.Namespace
+				} else {
+					namespace = group.Namespace
+				}
+				groupKey := fmt.Sprintf("%s/%s", namespace, group.Name)
+				activeGroups[groupKey] = true
+			}
+		}
+	}
+
+	// Map of groups to their oldest waiting failover
+	// Key format: "namespace/name"
+	type waitingFailover struct {
+		failover *crdv1alpha1.Failover
+		waitTime time.Time
+	}
+	oldestWaitingPerGroup := make(map[string]waitingFailover)
+
+	// Find the oldest waiting failover for each group
+	for i := range failoverList.Items {
+		failover := &failoverList.Items[i]
+
+		// Skip failovers that are already processing or completed
+		if failover.Status.Status != "" {
+			continue
+		}
+
+		// Check if this failover has a Waiting condition
+		isWaiting := false
+		waitingTime := time.Time{}
+
+		for _, cond := range failover.Status.Conditions {
+			if cond.Type == "Waiting" && cond.Status == metav1.ConditionTrue {
+				isWaiting = true
+
+				// Get the transition time
+				t, err := time.Parse(time.RFC3339, cond.LastTransitionTime.Format(time.RFC3339))
+				if err == nil {
+					waitingTime = t
+				}
+				break
+			}
+		}
+
+		if isWaiting {
+			// Process each group in this waiting failover
+			for _, group := range failover.Spec.FailoverGroups {
+				var namespace string
+				if group.Namespace == "" {
+					namespace = failover.Namespace
+				} else {
+					namespace = group.Namespace
+				}
+				groupKey := fmt.Sprintf("%s/%s", namespace, group.Name)
+
+				// Check if there's already an older waiting failover for this group
+				current, exists := oldestWaitingPerGroup[groupKey]
+				if !exists || waitingTime.Before(current.waitTime) {
+					oldestWaitingPerGroup[groupKey] = waitingFailover{
+						failover: failover,
+						waitTime: waitingTime,
+					}
+				}
+			}
+		}
+	}
+
+	// Track which failovers we've processed to avoid processing the same one multiple times
+	processedFailovers := make(map[string]bool)
+
+	// Process the oldest waiting failover for each inactive group
+	for groupKey, waiting := range oldestWaitingPerGroup {
+		// Skip if this group is active
+		if activeGroups[groupKey] {
+			logger.Info("Group has an active failover, skipping waiting failovers", "group", groupKey)
+			continue
+		}
+
+		failover := waiting.failover
+		failoverKey := fmt.Sprintf("%s/%s", failover.Namespace, failover.Name)
+
+		// Skip if we've already processed this failover
+		if processedFailovers[failoverKey] {
+			continue
+		}
+
+		// Check if all groups in this failover are inactive
+		allGroupsInactive := true
+		for _, group := range failover.Spec.FailoverGroups {
+			var namespace string
+			if group.Namespace == "" {
+				namespace = failover.Namespace
+			} else {
+				namespace = group.Namespace
+			}
+			groupKey := fmt.Sprintf("%s/%s", namespace, group.Name)
+
+			if activeGroups[groupKey] {
+				allGroupsInactive = false
+				break
+			}
+		}
+
+		if !allGroupsInactive {
+			logger.Info("Failover has some groups that are still active, waiting for all to be inactive",
+				"name", failover.Name, "namespace", failover.Namespace)
+			continue
+		}
+
+		// Mark this failover as processed
+		processedFailovers[failoverKey] = true
+
+		logger.Info("Processing waiting failover for inactive groups",
+			"name", failover.Name,
+			"namespace", failover.Namespace,
+			"waitingSince", waiting.waitTime)
+
+		// Find and remove the Waiting condition
+		updated := false
+		for i, cond := range failover.Status.Conditions {
+			if cond.Type == "Waiting" && cond.Status == metav1.ConditionTrue {
+				// Remove this condition (replace with the last one and shrink slice)
+				lastIdx := len(failover.Status.Conditions) - 1
+				failover.Status.Conditions[i] = failover.Status.Conditions[lastIdx]
+				failover.Status.Conditions = failover.Status.Conditions[:lastIdx]
+				updated = true
+				break
+			}
+		}
+
+		// Add a new condition indicating this failover is now allowed to proceed
+		if updated {
+			proceedCondition := metav1.Condition{
+				Type:               "ReadyToProcess",
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "GroupsAvailable",
+				Message:            "Target FailoverGroups are not being processed by other failovers, proceeding with this failover",
+			}
+			meta.SetStatusCondition(&failover.Status.Conditions, proceedCondition)
+
+			// Update the failover
+			if err := r.Status().Update(ctx, failover); err != nil {
+				logger.Error(err, "Failed to update waiting failover status")
+				return err
+			}
+
+			logger.Info("Successfully updated waiting failover to proceed")
+		}
+	}
+
+	return nil
 }

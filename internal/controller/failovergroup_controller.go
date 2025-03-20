@@ -89,7 +89,7 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			failoverGroup.Status.Components = append(failoverGroup.Status.Components, compStatus)
 		}
 
-		if err := r.Status().Update(ctx, failoverGroup); err != nil {
+		if err := r.updateStatusWithRetry(ctx, failoverGroup); err != nil {
 			logger.Error(err, "Failed to initialize failoverGroup status")
 			return ctrl.Result{}, err
 		}
@@ -104,7 +104,7 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		logger.Info("Updating FailoverGroup health status",
 			"previous", failoverGroup.Status.Health, "new", updatedHealth)
 		failoverGroup.Status.Health = updatedHealth
-		if err := r.Status().Update(ctx, failoverGroup); err != nil {
+		if err := r.updateStatusWithRetry(ctx, failoverGroup); err != nil {
 			logger.Error(err, "Failed to update FailoverGroup health status")
 			return ctrl.Result{}, err
 		}
@@ -120,12 +120,12 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		logger.V(1).Info("FailoverGroup is in STANDBY state")
 	case string(crdv1alpha1.FailoverGroupStateFailback):
 		// Group is transitioning from STANDBY to PRIMARY
-		logger.Info("FailoverGroup is in FAILOVER state - transitioning from STANDBY to PRIMARY")
+		logger.Info("FailoverGroup is in FAILBACK state - transitioning from STANDBY to PRIMARY")
 		// Reconcile more frequently during state transitions
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	case string(crdv1alpha1.FailoverGroupStateFailover):
 		// Group is transitioning from PRIMARY to STANDBY
-		logger.Info("FailoverGroup is in FAILBACK state - transitioning from PRIMARY to STANDBY")
+		logger.Info("FailoverGroup is in FAILOVER state - transitioning from PRIMARY to STANDBY")
 		// Reconcile more frequently during state transitions
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	default:
@@ -355,6 +355,56 @@ func (r *FailoverGroupReconciler) isWorkloadReady(ctx context.Context, kind, nam
 		logger.Info("Unsupported workload kind for readiness check, skipping", "kind", kind)
 		return true, nil // Skip unknown workload kinds
 	}
+}
+
+// updateStatusWithRetry updates a FailoverGroup's status with retries to handle conflicts
+func (r *FailoverGroupReconciler) updateStatusWithRetry(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	logger := r.Log.WithValues("failovergroup", fmt.Sprintf("%s/%s", failoverGroup.Namespace, failoverGroup.Name))
+	maxRetries := 5
+	retryDelay := 200 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		err := r.Status().Update(ctx, failoverGroup)
+		if err == nil {
+			return nil // Success
+		}
+
+		// Check if it's a conflict error
+		if errors.IsConflict(err) {
+			logger.Info("Conflict updating FailoverGroup status, retrying",
+				"attempt", i+1, "maxRetries", maxRetries)
+
+			// Get the latest version
+			latestGroup := &crdv1alpha1.FailoverGroup{}
+			if getErr := r.Get(ctx, types.NamespacedName{
+				Namespace: failoverGroup.Namespace,
+				Name:      failoverGroup.Name,
+			}, latestGroup); getErr != nil {
+				logger.Error(getErr, "Failed to get latest FailoverGroup version")
+				return getErr
+			}
+
+			// Preserve the status fields we wanted to update
+			latestGroup.Status.State = failoverGroup.Status.State
+			latestGroup.Status.Health = failoverGroup.Status.Health
+			latestGroup.Status.Components = failoverGroup.Status.Components
+			latestGroup.Status.LastFailoverTime = failoverGroup.Status.LastFailoverTime
+
+			// Use the latest version for the next attempt
+			failoverGroup = latestGroup
+
+			// Wait before retry
+			time.Sleep(retryDelay)
+			// Increase delay for next potential retry (exponential backoff)
+			retryDelay = retryDelay * 2
+			continue
+		}
+
+		// Not a conflict error, return it
+		return err
+	}
+
+	return fmt.Errorf("failed to update FailoverGroup status after %d retries", maxRetries)
 }
 
 // SetupWithManager sets up the controller with the Manager.

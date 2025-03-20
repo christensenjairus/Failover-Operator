@@ -348,6 +348,54 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return ctrl.Result{RequeueAfter: time.Minute * 30}, nil
 }
 
+// updateFailoverGroupWithRetry updates a FailoverGroup's status with retries to handle conflicts
+func (r *FailoverReconciler) updateFailoverGroupWithRetry(ctx context.Context, group *crdv1alpha1.FailoverGroup) error {
+	logger := r.Log.WithValues("group", fmt.Sprintf("%s/%s", group.Namespace, group.Name))
+	maxRetries := 5
+	retryDelay := 200 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		err := r.Status().Update(ctx, group)
+		if err == nil {
+			return nil // Success
+		}
+
+		// Check if it's a conflict error
+		if errors.IsConflict(err) {
+			logger.Info("Conflict updating FailoverGroup status, retrying",
+				"attempt", i+1, "maxRetries", maxRetries)
+
+			// Get the latest version
+			latestGroup := &crdv1alpha1.FailoverGroup{}
+			if getErr := r.Get(ctx, types.NamespacedName{
+				Namespace: group.Namespace,
+				Name:      group.Name,
+			}, latestGroup); getErr != nil {
+				logger.Error(getErr, "Failed to get latest FailoverGroup version")
+				return getErr
+			}
+
+			// Preserve the important fields we wanted to update
+			latestGroup.Status.State = group.Status.State
+			latestGroup.Status.LastFailoverTime = group.Status.LastFailoverTime
+
+			// Use the latest version for the next attempt
+			group = latestGroup
+
+			// Wait before retry
+			time.Sleep(retryDelay)
+			// Increase delay for next potential retry (exponential backoff)
+			retryDelay = retryDelay * 2
+			continue
+		}
+
+		// Not a conflict error, return it
+		return err
+	}
+
+	return fmt.Errorf("failed to update FailoverGroup status after %d retries", maxRetries)
+}
+
 // processGroupFailover handles the failover logic for a specific FailoverGroup
 func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover *crdv1alpha1.Failover, group *crdv1alpha1.FailoverGroup) (string, error) {
 	logger := r.Log.WithValues("group", fmt.Sprintf("%s/%s", group.Namespace, group.Name))
@@ -375,7 +423,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 
 			// Force state to FAILBACK and then to PRIMARY
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state during emergency")
 				return "FAILED", err
 			}
@@ -442,7 +490,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			group.Status.State = string(crdv1alpha1.FailoverGroupStatePrimary)
 			group.Status.LastFailoverTime = time.Now().Format(time.RFC3339)
 
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state for emergency")
 				return "FAILED", err
 			}
@@ -456,7 +504,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 
 			// For emergency, set state to FAILOVER and then immediately to STANDBY
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state during emergency")
 				return "FAILED", err
 			}
@@ -524,7 +572,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateStandby)
 			group.Status.LastFailoverTime = time.Now().Format(time.RFC3339)
 
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state for emergency")
 				return "FAILED", err
 			}
@@ -534,16 +582,10 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		}
 	}
 
-	// First, check if any action is needed
-	if group.Status.State == string(crdv1alpha1.FailoverGroupStatePrimary) && isTargetingThisCluster {
-		// Already primary in the correct cluster, no action needed
-		logger.Info("Group is already PRIMARY in the target cluster, no failover needed")
-		return "SUCCESS", nil
-	} else if group.Status.State == string(crdv1alpha1.FailoverGroupStateStandby) && !isTargetingThisCluster {
-		// Already standby and we want to make another cluster primary, no action needed
-		logger.Info("Group is already STANDBY and target is another cluster, no failover needed")
-		return "SUCCESS", nil
-	}
+	// REMOVED: The checks that skip failover when already in desired state
+	// Always proceed with failover process regardless of current state
+	// This helps clean drift and forces reconciliation
+	logger.Info("Always proceeding with failover to ensure state consistency and reconciliation")
 
 	// Set the appropriate transitory state if we're just starting the failover process
 	if group.Status.State != string(crdv1alpha1.FailoverGroupStateFailback) &&
@@ -563,7 +605,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 		}
 
 		group.Status.State = transitionState
-		if err := r.Status().Update(ctx, group); err != nil {
+		if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 			logger.Error(err, "Failed to update FailoverGroup to transitory state",
 				"state", transitionState)
 			return "FAILED", err
@@ -579,7 +621,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			logger.Info("Group not in FAILOVER state, setting it now",
 				"currentState", group.Status.State)
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailback)
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state")
 				return "FAILED", err
 			}
@@ -701,7 +743,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 			logger.Info("Group not in FAILBACK state, setting it now",
 				"currentState", group.Status.State)
 			group.Status.State = string(crdv1alpha1.FailoverGroupStateFailover)
-			if err := r.Status().Update(ctx, group); err != nil {
+			if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 				logger.Error(err, "Failed to update FailoverGroup state")
 				return "FAILED", err
 			}
@@ -913,7 +955,7 @@ func (r *FailoverReconciler) processGroupFailover(ctx context.Context, failover 
 	}
 
 	// Update the group status
-	if err := r.Status().Update(ctx, group); err != nil {
+	if err := r.updateFailoverGroupWithRetry(ctx, group); err != nil {
 		logger.Error(err, "Failed to update FailoverGroup status")
 		return "FAILED", err
 	}
@@ -949,30 +991,134 @@ func (r *FailoverReconciler) triggerFluxReconciliation(ctx context.Context, reso
 
 // triggerHelmReleaseReconciliation forces a HelmRelease to reconcile
 func (r *FailoverReconciler) triggerHelmReleaseReconciliation(ctx context.Context, name, namespace string) error {
-	// This is a stub implementation - for a complete implementation, use the Flux API
 	logger := r.Log.WithValues("type", "HelmRelease", "name", name, "namespace", namespace)
-	logger.Info("Would trigger HelmRelease reconciliation (stub implementation)")
+	logger.Info("Triggering HelmRelease reconciliation")
 
-	// In a real implementation:
-	// 1. Get the HelmRelease as unstructured.Unstructured
-	// 2. Add or update annotation: "reconcile.fluxcd.io/requestedAt: <current-timestamp>"
-	// 3. Update the HelmRelease
+	maxRetries := 5
+	retryDelay := 200 * time.Millisecond
 
-	return nil
+	for i := 0; i < maxRetries; i++ {
+		// Create an unstructured object for the HelmRelease
+		helmRelease := &unstructured.Unstructured{}
+		helmRelease.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "helm.toolkit.fluxcd.io",
+			Version: "v2beta1",
+			Kind:    "HelmRelease",
+		})
+
+		// Get the HelmRelease
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		}, helmRelease); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
+		// Add reconciliation annotation to force reconciliation
+		annotations := helmRelease.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+
+		// Set the requestedAt annotation with current timestamp
+		// This is the standard way to force Flux to reconcile a resource
+		annotations["reconcile.fluxcd.io/requestedAt"] = time.Now().Format(time.RFC3339Nano)
+
+		// Also add our own annotation as a backup mechanism
+		annotations["failover-operator.hahomelabs.com/reconcile"] = time.Now().Format(time.RFC3339)
+
+		helmRelease.SetAnnotations(annotations)
+
+		// Update the HelmRelease to apply the annotations
+		err := r.Update(ctx, helmRelease)
+		if err == nil {
+			logger.Info("Successfully requested HelmRelease reconciliation")
+			return nil
+		}
+
+		// If it's a conflict error, retry
+		if errors.IsConflict(err) {
+			logger.Info("Conflict updating HelmRelease for reconciliation, retrying",
+				"attempt", i+1, "maxRetries", maxRetries)
+
+			// Wait before retry with exponential backoff
+			time.Sleep(retryDelay)
+			retryDelay = retryDelay * 2
+			continue
+		}
+
+		// Not a conflict error
+		logger.Error(err, "Failed to update HelmRelease for forced reconciliation")
+		return err
+	}
+
+	return fmt.Errorf("failed to update HelmRelease for reconciliation after %d retries", maxRetries)
 }
 
 // triggerKustomizationReconciliation forces a Kustomization to reconcile
 func (r *FailoverReconciler) triggerKustomizationReconciliation(ctx context.Context, name, namespace string) error {
-	// This is a stub implementation - for a complete implementation, use the Flux API
 	logger := r.Log.WithValues("type", "Kustomization", "name", name, "namespace", namespace)
-	logger.Info("Would trigger Kustomization reconciliation (stub implementation)")
+	logger.Info("Triggering Kustomization reconciliation")
 
-	// In a real implementation:
-	// 1. Get the Kustomization as unstructured.Unstructured
-	// 2. Add or update annotation: "reconcile.fluxcd.io/requestedAt: <current-timestamp>"
-	// 3. Update the Kustomization
+	maxRetries := 5
+	retryDelay := 200 * time.Millisecond
 
-	return nil
+	for i := 0; i < maxRetries; i++ {
+		// Create an unstructured object for the Kustomization
+		kustomization := &unstructured.Unstructured{}
+		kustomization.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "kustomize.toolkit.fluxcd.io",
+			Version: "v1beta2", // Using v1beta2 as per the flux manager implementation
+			Kind:    "Kustomization",
+		})
+
+		// Get the Kustomization
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		}, kustomization); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
+		// Add reconciliation annotation to force reconciliation
+		annotations := kustomization.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+
+		// Set the requestedAt annotation with current timestamp
+		// This is the standard way to force Flux to reconcile a resource
+		annotations["reconcile.fluxcd.io/requestedAt"] = time.Now().Format(time.RFC3339Nano)
+
+		// Also add our own annotation as a backup mechanism
+		annotations["failover-operator.hahomelabs.com/reconcile"] = time.Now().Format(time.RFC3339)
+
+		kustomization.SetAnnotations(annotations)
+
+		// Update the Kustomization to apply the annotations
+		err := r.Update(ctx, kustomization)
+		if err == nil {
+			logger.Info("Successfully requested Kustomization reconciliation")
+			return nil
+		}
+
+		// If it's a conflict error, retry
+		if errors.IsConflict(err) {
+			logger.Info("Conflict updating Kustomization for reconciliation, retrying",
+				"attempt", i+1, "maxRetries", maxRetries)
+
+			// Wait before retry with exponential backoff
+			time.Sleep(retryDelay)
+			retryDelay = retryDelay * 2
+			continue
+		}
+
+		// Not a conflict error
+		logger.Error(err, "Failed to update Kustomization for forced reconciliation")
+		return err
+	}
+
+	return fmt.Errorf("failed to update Kustomization for reconciliation after %d retries", maxRetries)
 }
 
 // handleDeletion handles cleanup when a Failover resource is being deleted
@@ -1682,67 +1828,88 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
-// setVolumeReplicationState sets the state of a volume replication
+// setVolumeReplicationState sets the state of a volume replication with retries
 func (r *FailoverReconciler) setVolumeReplicationState(ctx context.Context, name, namespace, state string) error {
 	logger := r.Log.WithValues("action", "setVolumeReplicationState", "name", name, "namespace", namespace, "state", state)
 	logger.Info("Setting volume replication state")
 
-	// Use dynamic client to get the VolumeReplication resource
-	// Create the unstructured object for VolumeReplication
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "replication.storage.openshift.io",
-		Version: "v1alpha1",
-		Kind:    "VolumeReplication",
-	})
+	maxRetries := 5
+	retryDelay := 200 * time.Millisecond
 
-	// Get the VolumeReplication resource
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, u)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("VolumeReplication not found, skipping", "name", name, "namespace", namespace)
-			return nil
-		}
-		logger.Error(err, "Failed to get VolumeReplication", "name", name)
-		return err
-	}
+	for i := 0; i < maxRetries; i++ {
+		// Use dynamic client to get the VolumeReplication resource
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "replication.storage.openshift.io",
+			Version: "v1alpha1",
+			Kind:    "VolumeReplication",
+		})
 
-	// Check current spec state
-	spec, found, err := unstructured.NestedMap(u.Object, "spec")
-	if err != nil || !found {
-		logger.Error(err, "Failed to get spec from VolumeReplication", "found", found)
-		return fmt.Errorf("could not get spec from VolumeReplication: %v", err)
-	}
-
-	currentState, found, err := unstructured.NestedString(spec, "replicationState")
-	if err != nil {
-		logger.Error(err, "Failed to get replicationState from spec")
-		return err
-	}
-
-	// Only update if the state is different
-	if !found || currentState != state {
-		logger.Info("Updating VolumeReplication state",
-			"currentState", currentState,
-			"newState", state)
-
-		// Update the replicationState field
-		err = unstructured.SetNestedField(u.Object, state, "spec", "replicationState")
+		// Get the VolumeReplication resource
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, u)
 		if err != nil {
-			logger.Error(err, "Failed to set replicationState field")
+			if errors.IsNotFound(err) {
+				logger.Info("VolumeReplication not found, skipping", "name", name, "namespace", namespace)
+				return nil
+			}
+			logger.Error(err, "Failed to get VolumeReplication", "name", name)
 			return err
 		}
 
-		// Update the resource
-		if err := r.Update(ctx, u); err != nil {
+		// Check current spec state
+		spec, found, err := unstructured.NestedMap(u.Object, "spec")
+		if err != nil || !found {
+			logger.Error(err, "Failed to get spec from VolumeReplication", "found", found)
+			return fmt.Errorf("could not get spec from VolumeReplication: %v", err)
+		}
+
+		currentState, found, err := unstructured.NestedString(spec, "replicationState")
+		if err != nil {
+			logger.Error(err, "Failed to get replicationState from spec")
+			return err
+		}
+
+		// Only update if the state is different
+		if !found || currentState != state {
+			logger.Info("Updating VolumeReplication state",
+				"currentState", currentState,
+				"newState", state,
+				"attempt", i+1)
+
+			// Update the replicationState field
+			err = unstructured.SetNestedField(u.Object, state, "spec", "replicationState")
+			if err != nil {
+				logger.Error(err, "Failed to set replicationState field")
+				return err
+			}
+
+			// Update the resource
+			err := r.Update(ctx, u)
+			if err == nil {
+				logger.Info("Successfully updated VolumeReplication state")
+				return nil
+			}
+
+			// Handle conflict error with retry
+			if errors.IsConflict(err) {
+				logger.Info("Conflict updating VolumeReplication, retrying",
+					"attempt", i+1, "maxRetries", maxRetries)
+
+				// Wait before retry with exponential backoff
+				time.Sleep(retryDelay)
+				retryDelay = retryDelay * 2
+				continue
+			}
+
+			// Not a conflict error
 			logger.Error(err, "Failed to update VolumeReplication")
 			return err
+		} else {
+			logger.Info("VolumeReplication already in desired state, skipping update",
+				"state", state)
+			return nil
 		}
-		logger.Info("Successfully updated VolumeReplication state")
-	} else {
-		logger.Info("VolumeReplication already in desired state, skipping update",
-			"state", state)
 	}
 
-	return nil
+	return fmt.Errorf("failed to update VolumeReplication state after %d retries", maxRetries)
 }

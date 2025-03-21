@@ -664,7 +664,7 @@ func (m *OperationsManager) IsLocked(ctx context.Context, namespace, name string
 	}
 
 	// Check if the item was found
-	if result.Item == nil || len(result.Item) == 0 {
+	if len(result.Item) == 0 {
 		// No lock exists
 		return false, "", nil
 	}

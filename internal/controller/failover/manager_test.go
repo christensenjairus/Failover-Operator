@@ -133,38 +133,20 @@ func TestProcessFailover(t *testing.T) {
 		WithObjects(failoverGroup, failover).
 		Build()
 
-	// Create a mock DynamoDB service, but don't use it yet as our implementation is not complete
-	// mockDynamoDB := &MockDynamoDBService{
-	// 	OperatorID:  "test-operator",
-	// 	ClusterName: "test-cluster",
-	// 	AcquireLock: func(ctx context.Context, groupName, namespace string) (bool, error) {
-	// 		return true, nil
-	// 	},
-	// 	ReleaseLock: func(ctx context.Context, groupName, namespace string) error {
-	// 		return nil
-	// 	},
-	// 	UpdateState: func(ctx context.Context, groupName, namespace, activeCluster string) error {
-	// 		return nil
-	// 	},
-	// 	GetState: func(ctx context.Context, groupName, namespace string) (*mockFailoverGroupState, error) {
-	// 		return &mockFailoverGroupState{
-	// 			ActiveCluster: "source-cluster",
-	// 			Clusters: map[string]mockClusterState{
-	// 				"source-cluster": {
-	// 					Role:   "PRIMARY",
-	// 					Health: "OK",
-	// 				},
-	// 				"target-cluster": {
-	// 					Role:   "STANDBY",
-	// 					Health: "OK",
-	// 				},
-	// 			},
-	// 		}, nil
-	// 	},
-	// }
+	// Verify the objects exist in the fake client before proceeding
+	testFailover := &crdv1alpha1.Failover{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "test-failover"}, testFailover)
+	require.NoError(t, err, "Failed to verify failover object in fake client")
+
+	// Enable deeper validation in client config
+	validatingClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(failoverGroup, failover).
+		WithStatusSubresource(&crdv1alpha1.Failover{}).
+		Build()
 
 	// Create the failover manager
-	manager := NewManager(fakeClient, "test-cluster", zap.New(zap.UseDevMode(true)))
+	manager := NewManager(validatingClient, "test-cluster", zap.New(zap.UseDevMode(true)))
 
 	// Set the mock DynamoDB service
 	manager.DynamoDBManager = &dynamodb.DynamoDBService{}
@@ -176,7 +158,7 @@ func TestProcessFailover(t *testing.T) {
 
 	// Verify the failover status was updated
 	updatedFailover := &crdv1alpha1.Failover{}
-	err = fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-failover"}, updatedFailover)
+	err = validatingClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-failover"}, updatedFailover)
 	require.NoError(t, err)
 
 	// Since our implementation just has placeholders, we're just checking basic behavior
@@ -356,11 +338,17 @@ func TestUpdateFailoverStatus(t *testing.T) {
 		},
 	}
 
-	// Create a fake client
+	// Create a fake client with status subresource support
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(failover).
+		WithStatusSubresource(&crdv1alpha1.Failover{}).
 		Build()
+
+	// Verify the objects exist in the fake client before proceeding
+	testFailover := &crdv1alpha1.Failover{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "test-failover"}, testFailover)
+	require.NoError(t, err, "Failed to verify failover object in fake client")
 
 	// Create the failover manager
 	manager := NewManager(fakeClient, "test-cluster", zap.New(zap.UseDevMode(true)))

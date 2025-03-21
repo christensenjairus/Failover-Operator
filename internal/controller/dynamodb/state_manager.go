@@ -78,7 +78,7 @@ func (m *BaseManager) GetGroupState(ctx context.Context, namespace, name string)
 		failoverReason = "Latest failover reason not available"
 	}
 
-	if history != nil && len(history) > 0 {
+	if len(history) > 0 {
 		failoverCount = len(history)
 		if lastFailover == nil {
 			t := history[0].StartTime
@@ -127,7 +127,7 @@ func (m *BaseManager) GetGroupConfig(ctx context.Context, namespace, name string
 	}
 
 	// Check if the item was found
-	if result.Item == nil || len(result.Item) == 0 {
+	if len(result.Item) == 0 {
 		// Create a default configuration if not found
 		defaultConfig := &GroupConfigRecord{
 			PK:                pk,
@@ -319,7 +319,7 @@ func (m *BaseManager) UpdateGroupConfig(ctx context.Context, config *GroupConfig
 	item["timeouts"] = &types.AttributeValueMemberM{Value: timeoutsMap}
 
 	// Add metadata if it exists
-	if config.Metadata != nil && len(config.Metadata) > 0 {
+	if len(config.Metadata) > 0 {
 		metadataMap := make(map[string]types.AttributeValue)
 		for k, v := range config.Metadata {
 			metadataMap[k] = &types.AttributeValueMemberS{Value: v}
@@ -393,7 +393,7 @@ func (m *BaseManager) GetClusterStatus(ctx context.Context, namespace, name, clu
 	}
 
 	// Check if the item was found
-	if result.Item == nil || len(result.Item) == 0 {
+	if len(result.Item) == 0 {
 		// Return nil to indicate no status exists yet
 		return nil, nil
 	}
@@ -587,7 +587,7 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 	}
 
 	// Check if any items were found
-	if result.Items == nil || len(result.Items) == 0 {
+	if len(result.Items) == 0 {
 		return make(map[string]*ClusterStatusRecord), nil
 	}
 
@@ -693,7 +693,7 @@ func (m *BaseManager) GetFailoverHistory(ctx context.Context, namespace, name st
 	}
 
 	// Check if any items were found
-	if result.Items == nil || len(result.Items) == 0 {
+	if len(result.Items) == 0 {
 		return []HistoryRecord{}, nil
 	}
 

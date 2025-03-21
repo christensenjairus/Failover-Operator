@@ -50,7 +50,7 @@ type ClusterInfo struct {
 	Role string `json:"role,omitempty"`
 
 	// Health status of the cluster
-	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR;UNKNOWN
 	// +optional
 	Health string `json:"health,omitempty"`
 

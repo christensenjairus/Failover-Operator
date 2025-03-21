@@ -176,7 +176,7 @@ func (m *Manager) verifyFailoverPossible(ctx context.Context, failoverGroup *crd
 		return fmt.Errorf("failover group is suspended: %s", failoverGroup.Spec.SuspensionReason)
 	}
 
-	// Verify the target cluster exists in the global state
+	// First try to find the target cluster in the failoverGroup status
 	var targetClusterFound bool
 	for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
 		if cluster.Name == targetCluster {
@@ -187,6 +187,35 @@ func (m *Manager) verifyFailoverPossible(ctx context.Context, failoverGroup *crd
 				return fmt.Errorf("target cluster is in ERROR health state")
 			}
 			break
+		}
+	}
+
+	// If target cluster wasn't found in status and DynamoDB is configured,
+	// check DynamoDB directly (the FailoverGroup status might not be fully synced yet)
+	if !targetClusterFound && m.DynamoDBManager != nil {
+		log.Info("Target cluster not found in FailoverGroup status, checking DynamoDB directly")
+
+		// Get all cluster statuses from DynamoDB
+		statuses, err := m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
+		if err != nil {
+			log.Error(err, "Failed to get cluster statuses from DynamoDB")
+			return fmt.Errorf("failed to verify target cluster in DynamoDB: %w", err)
+		}
+
+		// Check if target cluster exists in DynamoDB
+		for clusterName := range statuses {
+			if clusterName == targetCluster {
+				targetClusterFound = true
+				log.Info("Found target cluster in DynamoDB", "cluster", targetCluster)
+				break
+			}
+		}
+
+		// If the target is this cluster but not found in DynamoDB yet, consider it valid
+		// (might be a new cluster not yet registered)
+		if !targetClusterFound && targetCluster == m.ClusterName {
+			log.Info("Target is this cluster but not found in DynamoDB yet, allowing failover")
+			targetClusterFound = true
 		}
 	}
 
@@ -224,6 +253,26 @@ func (m *Manager) processFailoverGroup(ctx context.Context,
 	groupIndex int) error {
 
 	log := m.Log.WithValues("failoverGroup", failoverGroup.Name, "namespace", failoverGroup.Namespace)
+
+	// If this is the target cluster, ensure it's registered in DynamoDB
+	if m.ClusterName == failover.Spec.TargetCluster && m.DynamoDBManager != nil {
+		log.Info("Registering this cluster in DynamoDB before failover")
+
+		// Update cluster status in DynamoDB with nil status data
+		if err := m.DynamoDBManager.UpdateClusterStatus(
+			ctx,
+			failoverGroup.Namespace,
+			failoverGroup.Name,
+			"OK",
+			"STANDBY",
+			nil, // Use nil for StatusData
+		); err != nil {
+			log.Error(err, "Failed to register cluster in DynamoDB")
+			// Continue anyway - the verification might still succeed
+		} else {
+			log.Info("Successfully registered cluster in DynamoDB")
+		}
+	}
 
 	// 1. Verify prerequisites before starting the failover
 	log.Info("Verifying failover prerequisites",

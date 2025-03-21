@@ -436,8 +436,15 @@ func (m *BaseManager) GetClusterStatus(ctx context.Context, namespace, name, clu
 	// Extract timestamp
 	if v, ok := result.Item["lastHeartbeat"]; ok {
 		if sv, ok := v.(*types.AttributeValueMemberS); ok {
-			if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
-				status.LastHeartbeat = t
+			if sv.Value != "" {
+				if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+					status.LastHeartbeat = t
+				} else {
+					logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
+						"clusterName", clusterName,
+						"timestamp", sv.Value)
+					// Keep default time.Now() value
+				}
 			}
 		}
 	}
@@ -650,14 +657,25 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 		// Extract lastHeartbeat timestamp
 		if v, ok := item["lastHeartbeat"]; ok {
 			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
-					status.LastHeartbeat = t
+				if sv.Value != "" {
+					if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+						status.LastHeartbeat = t
+					} else {
+						logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
+							"clusterName", clusterName,
+							"timestamp", sv.Value)
+						// Keep default time.Now() value
+					}
 				}
 			}
 		}
 
-		// Add to the map
-		statuses[clusterName] = status
+		// Add to the map - ensure we don't add nil values
+		if status != nil {
+			statuses[clusterName] = status
+		} else {
+			logger.Info("Skipping nil status record", "clusterName", clusterName)
+		}
 	}
 
 	return statuses, nil

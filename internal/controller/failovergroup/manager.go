@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -70,7 +71,9 @@ func (m *Manager) SyncWithDynamoDB(ctx context.Context, failoverGroup *crdv1alph
 	groupState, err := m.DynamoDBManager.GetGroupState(ctx, failoverGroup.Namespace, failoverGroup.Name)
 	if err != nil {
 		log.Error(err, "Failed to get group state from DynamoDB")
-		return err
+		// Continue with a nil groupState - don't fail the sync completely
+		// This allows the operator to work even when DynamoDB is unavailable
+		// or when no state has been written yet
 	}
 
 	// Update the local FailoverGroup status based on the global state
@@ -177,13 +180,24 @@ func (m *Manager) determineClusterRole(failoverGroup *crdv1alpha1.FailoverGroup)
 
 // updateLocalStatus updates the local FailoverGroup status based on the global state from DynamoDB
 func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup, groupState *dynamodb.ManagerGroupState) error {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
 	// Update the FailoverGroup status based on the DynamoDB state
 	updated := false
 
 	// Get config directly from DynamoDB service
-	config, err := m.DynamoDBManager.GetGroupConfig(ctx, failoverGroup.Namespace, failoverGroup.Name)
-	if err != nil {
-		return fmt.Errorf("failed to get group config: %w", err)
+	var config *dynamodb.GroupConfigRecord
+	var err error
+	if m.DynamoDBManager != nil {
+		config, err = m.DynamoDBManager.GetGroupConfig(ctx, failoverGroup.Namespace, failoverGroup.Name)
+		if err != nil {
+			log.Error(err, "Failed to get group config, will use current state")
+			// Continue with what we have - don't fail the sync completely
+		}
+	} else {
+		log.Info("DynamoDB manager not configured, using default config")
 	}
 
 	// Initialize GlobalState if needed
@@ -192,14 +206,122 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		failoverGroup.Status.GlobalState = crdv1alpha1.GlobalStateInfo{
 			ThisCluster: m.ClusterName,
 		}
+		updated = true
+	}
+
+	// Always ensure ThisCluster is set to the current cluster
+	if failoverGroup.Status.GlobalState.ThisCluster != m.ClusterName {
+		failoverGroup.Status.GlobalState.ThisCluster = m.ClusterName
+		updated = true
+	}
+
+	// Determine active cluster (owner cluster)
+	activeCluster := failoverGroup.Status.GlobalState.ActiveCluster
+	if config != nil && config.OwnerCluster != "" {
+		activeCluster = config.OwnerCluster
+	} else if activeCluster == "" {
+		// If no active cluster is set and we couldn't get it from DynamoDB,
+		// use this cluster as the active cluster
+		activeCluster = m.ClusterName
+		log.Info("No active cluster found in config, using current cluster",
+			"cluster", m.ClusterName)
 	}
 
 	// Update owner cluster if different
-	if failoverGroup.Status.GlobalState.ActiveCluster != config.OwnerCluster {
-		failoverGroup.Status.GlobalState.ActiveCluster = config.OwnerCluster
+	if failoverGroup.Status.GlobalState.ActiveCluster != activeCluster {
+		log.Info("Updating active cluster",
+			"from", failoverGroup.Status.GlobalState.ActiveCluster,
+			"to", activeCluster)
+		failoverGroup.Status.GlobalState.ActiveCluster = activeCluster
 		updated = true
+	}
 
-		// Configure resources based on role
+	// Get all cluster statuses to build a complete picture
+	var clusterStatuses map[string]*dynamodb.ClusterStatusRecord
+	if m.DynamoDBManager != nil {
+		clusterStatuses, err = m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
+		if err != nil {
+			log.Error(err, "Failed to get all cluster statuses")
+			// Initialize an empty map to prevent nil pointer dereference
+			clusterStatuses = make(map[string]*dynamodb.ClusterStatusRecord)
+		} else {
+			// Add debug info
+			clusterNames := make([]string, 0, len(clusterStatuses))
+			for name := range clusterStatuses {
+				clusterNames = append(clusterNames, name)
+			}
+			log.V(1).Info("Retrieved cluster statuses from DynamoDB",
+				"count", len(clusterStatuses),
+				"clusters", clusterNames)
+		}
+	} else {
+		log.Info("DynamoDB manager not configured, using empty cluster status map")
+		clusterStatuses = make(map[string]*dynamodb.ClusterStatusRecord)
+	}
+
+	// Build a map of existing clusters in the status for easy lookup
+	existingClusters := make(map[string]int)
+	for i, cluster := range failoverGroup.Status.GlobalState.Clusters {
+		existingClusters[cluster.Name] = i
+	}
+
+	// Update existing clusters and add new ones from DynamoDB
+	var newClusters []crdv1alpha1.ClusterInfo
+
+	// Always include this cluster (even if not found in DynamoDB yet)
+	thisClusterFound := false
+
+	// Process clusters from DynamoDB
+	for clusterName, status := range clusterStatuses {
+		// Skip nil status entries
+		if status == nil {
+			log.Info("Skipping nil status for cluster", "clusterName", clusterName)
+			continue
+		}
+
+		// Format heartbeat time, handling nil or zero values
+		heartbeatTime := time.Now().Format(time.RFC3339)
+		if !status.LastHeartbeat.IsZero() {
+			heartbeatTime = status.LastHeartbeat.Format(time.RFC3339)
+		}
+
+		clusterInfo := crdv1alpha1.ClusterInfo{
+			Name:          clusterName,
+			Role:          status.State,
+			Health:        status.Health,
+			LastHeartbeat: heartbeatTime,
+		}
+
+		if clusterName == m.ClusterName {
+			thisClusterFound = true
+		}
+
+		newClusters = append(newClusters, clusterInfo)
+	}
+
+	// Add this cluster if not found in DynamoDB
+	if !thisClusterFound {
+		role := "STANDBY"
+		if activeCluster == m.ClusterName {
+			role = "PRIMARY"
+		}
+
+		newClusters = append(newClusters, crdv1alpha1.ClusterInfo{
+			Name:          m.ClusterName,
+			Role:          role,
+			Health:        "UNKNOWN", // Use "UNKNOWN" until proper health is determined
+			LastHeartbeat: time.Now().Format(time.RFC3339),
+		})
+	}
+
+	// If clusters changed, update the status
+	if len(newClusters) > 0 {
+		failoverGroup.Status.GlobalState.Clusters = newClusters
+		updated = true
+	}
+
+	// Configure resources based on role if active cluster changed
+	if updated && failoverGroup.Status.GlobalState.ActiveCluster != "" {
 		if failoverGroup.Status.GlobalState.ActiveCluster == m.ClusterName {
 			if err := m.configureAsPrimary(ctx, failoverGroup); err != nil {
 				m.Log.Error(err, "Failed to configure as PRIMARY")
@@ -215,10 +337,57 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 
 	// Update the FailoverGroup resource if status changed
 	if updated {
-		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
-			m.Log.Error(err, "Failed to update FailoverGroup status")
+		// Implement retry logic for handling resource conflicts
+		maxRetries := 3
+		for retry := 0; retry < maxRetries; retry++ {
+			err := m.Client.Status().Update(ctx, failoverGroup)
+			if err == nil {
+				log.Info("Updated FailoverGroup status from DynamoDB",
+					"activeCluster", failoverGroup.Status.GlobalState.ActiveCluster,
+					"clusterCount", len(failoverGroup.Status.GlobalState.Clusters),
+					"retry", retry)
+				return nil
+			}
+
+			// Check if it's a conflict error
+			if k8sErrors.IsConflict(err) {
+				// If this is a conflict, get the latest version of the resource
+				log.Info("Detected conflict while updating FailoverGroup status, retrying with latest version",
+					"retry", retry+1, "maxRetries", maxRetries)
+
+				// Get the latest version of the FailoverGroup
+				latestFG := &crdv1alpha1.FailoverGroup{}
+				namespacedName := types.NamespacedName{
+					Namespace: failoverGroup.Namespace,
+					Name:      failoverGroup.Name,
+				}
+
+				if getErr := m.Client.Get(ctx, namespacedName, latestFG); getErr != nil {
+					log.Error(getErr, "Failed to get latest FailoverGroup resource")
+					return getErr
+				}
+
+				// Transfer our status changes to the latest version
+				// Preserve our changes to GlobalState, which is what we're primarily updating
+				latestFG.Status.GlobalState.ThisCluster = failoverGroup.Status.GlobalState.ThisCluster
+				latestFG.Status.GlobalState.ActiveCluster = failoverGroup.Status.GlobalState.ActiveCluster
+				latestFG.Status.GlobalState.Clusters = failoverGroup.Status.GlobalState.Clusters
+
+				// Update our reference to point to the latest version
+				failoverGroup = latestFG
+
+				// Very short backoff before retry
+				time.Sleep(time.Millisecond * 100 * time.Duration(retry+1))
+				continue
+			}
+
+			// For other errors, return immediately
+			log.Error(err, "Failed to update FailoverGroup status")
 			return err
 		}
+
+		// If we exhausted retries
+		return fmt.Errorf("failed to update FailoverGroup status after %d retries", maxRetries)
 	}
 
 	return nil

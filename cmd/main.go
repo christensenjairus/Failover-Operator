@@ -97,6 +97,7 @@ DYNAMODB_TABLE_NAME=failover-operator
 # Operator Configuration
 CLUSTER_NAME=test-cluster
 OPERATOR_ID=failover-operator
+HEALTH_PROBE_PORT=8081
 
 # Timeouts and intervals
 RECONCILE_INTERVAL=30s
@@ -129,7 +130,13 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	// Check if HEALTH_PROBE_PORT environment variable is set
+	healthProbePort := os.Getenv("HEALTH_PROBE_PORT")
+	defaultProbeAddr := ":8081"
+	if healthProbePort != "" {
+		defaultProbeAddr = ":" + healthProbePort
+	}
+	flag.StringVar(&probeAddr, "health-probe-bind-address", defaultProbeAddr, "The address the probe endpoint binds to.")
 	flag.StringVar(&clusterName, "cluster-name", "", "The name of this cluster for multi-cluster operations.")
 	flag.StringVar(&operatorID, "operator-id", "", "The unique ID for this operator instance.")
 	flag.StringVar(&dynamoDBTableName, "dynamodb-table-name", "", "The name of the DynamoDB table to use.")

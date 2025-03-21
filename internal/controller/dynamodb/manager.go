@@ -2,6 +2,7 @@ package dynamodb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -378,7 +379,23 @@ func (s *DynamoDBService) GetAllClusterStatuses(ctx context.Context, namespace, 
 	if err != nil {
 		return nil, err
 	}
-	statuses[s.ClusterName] = status
+
+	// Only add non-nil status to the map
+	if status != nil {
+		statuses[s.ClusterName] = status
+	} else {
+		// Create a default status if none exists yet
+		defaultStatus := &ClusterStatusRecord{
+			GroupNamespace: namespace,
+			GroupName:      name,
+			ClusterName:    s.ClusterName,
+			Health:         "UNKNOWN",
+			State:          "STANDBY",
+			LastHeartbeat:  time.Now(),
+		}
+		statuses[s.ClusterName] = defaultStatus
+		logger.V(1).Info("Created default cluster status", "clusterName", s.ClusterName)
+	}
 
 	return statuses, nil
 }
@@ -394,6 +411,16 @@ func (s *DynamoDBService) UpdateClusterStatus(ctx context.Context, namespace, na
 	)
 	logger.V(1).Info("Updating cluster status")
 
-	// Forward to base manager implementation
-	return s.UpdateClusterStatusLegacy(ctx, namespace, name, health, state, nil)
+	// Convert StatusData to JSON for components if provided
+	componentsJSON := ""
+	if statusData != nil {
+		jsonBytes, err := json.Marshal(statusData)
+		if err != nil {
+			return fmt.Errorf("failed to marshal status data: %w", err)
+		}
+		componentsJSON = string(jsonBytes)
+	}
+
+	// Forward to base manager implementation with the current cluster name
+	return s.BaseManager.UpdateClusterStatus(ctx, namespace, name, s.ClusterName, health, state, componentsJSON)
 }

@@ -50,6 +50,10 @@ type ComponentSpec struct {
 	// VirtualServices are the Istio virtual services associated with this component
 	// +optional
 	VirtualServices []string `json:"virtualServices,omitempty"`
+
+	// Ingresses are the Kubernetes ingress resources associated with this component
+	// +optional
+	Ingresses []string `json:"ingresses,omitempty"`
 }
 
 // ComponentStatus contains status information for a component
@@ -128,6 +132,13 @@ var (
 		APIGroup:        "kustomize.toolkit.fluxcd.io",
 		DefaultAPIGroup: "kustomize.toolkit.fluxcd.io",
 	}
+
+	// IngressKind represents Ingress resources
+	IngressKind = SupportedResourceKind{
+		Kind:            "Ingress",
+		APIGroup:        "networking.k8s.io",
+		DefaultAPIGroup: "networking.k8s.io",
+	}
 )
 
 // AllSupportedResourceKinds defines all resource kinds supported by the operator
@@ -139,6 +150,7 @@ var AllSupportedResourceKinds = []SupportedResourceKind{
 	VirtualServiceKind,
 	HelmReleaseKind,
 	KustomizationKind,
+	IngressKind,
 }
 
 // GetSupportedKinds returns a list of all supported resource kinds

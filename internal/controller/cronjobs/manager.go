@@ -248,75 +248,113 @@ func (m *Manager) GetAnnotation(ctx context.Context, name, namespace, key string
 	// Get the annotation if it exists
 	if cronjob.Annotations != nil {
 		value, exists := cronjob.Annotations[key]
-		logger.V(1).Info("CronJob annotation status", "key", key, "exists", exists, "value", value)
 		return value, exists, nil
 	}
 
-	logger.V(1).Info("CronJob has no annotations")
 	return "", false, nil
 }
 
-// AddFluxAnnotation adds the Flux reconcile annotation to a CronJob with a value of "disabled"
-// This is used to prevent Flux from reconciling the CronJob during failover
+// AddFluxAnnotation adds a Flux reconciliation annotation to disable Flux reconciliation
+// This is used to prevent Flux from overwriting changes made by the operator
 func (m *Manager) AddFluxAnnotation(ctx context.Context, name, namespace string) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Adding Flux reconcile annotation to CronJob")
+	logger.Info("Disabling Flux reconciliation for CronJob")
 
 	return m.AddAnnotation(ctx, name, namespace, FluxReconcileAnnotation, DisabledValue)
 }
 
-// RemoveFluxAnnotation removes the Flux reconcile annotation from a CronJob
-// This allows Flux to resume reconciling the CronJob after failover is complete
+// RemoveFluxAnnotation removes the Flux reconciliation annotation
+// This re-enables Flux reconciliation for the CronJob
 func (m *Manager) RemoveFluxAnnotation(ctx context.Context, name, namespace string) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Removing Flux reconcile annotation from CronJob")
+	logger.Info("Re-enabling Flux reconciliation for CronJob")
 
 	return m.RemoveAnnotation(ctx, name, namespace, FluxReconcileAnnotation)
 }
 
-// ProcessCronJobs processes a list of CronJobs
-// Suspends or resumes them based on the active parameter
+// ProcessCronJobs processes a list of CronJobs in a namespace
+// If active is true, it resumes them; if false, it suspends them
 func (m *Manager) ProcessCronJobs(ctx context.Context, namespace string, names []string, active bool) {
 	logger := log.FromContext(ctx).WithValues("namespace", namespace)
-	logger.Info("Processing CronJobs", "count", len(names), "active", active)
+	action := "Resuming"
+	if !active {
+		action = "Suspending"
+	}
+	logger.Info(fmt.Sprintf("%s CronJobs", action), "count", len(names))
 
 	for _, name := range names {
+		var err error
 		if active {
-			if err := m.Resume(ctx, name, namespace); err != nil {
-				logger.Error(err, "Failed to resume CronJob", "cronjob", name)
-			}
+			err = m.Resume(ctx, name, namespace)
 		} else {
-			if err := m.Suspend(ctx, name, namespace); err != nil {
-				logger.Error(err, "Failed to suspend CronJob", "cronjob", name)
-			}
+			err = m.Suspend(ctx, name, namespace)
+		}
+
+		if err != nil {
+			logger.Error(err, fmt.Sprintf("Failed to %s CronJob", action), "name", name)
 		}
 	}
 }
 
 // WaitForAllCronJobsState waits for all CronJobs to reach the desired state
-// Used during failover to ensure all CronJobs are properly suspended or resumed
+// Returns an error if any CronJob fails to reach the desired state within timeout
 func (m *Manager) WaitForAllCronJobsState(ctx context.Context, namespace string, names []string, shouldBeSuspended bool, timeout time.Duration) error {
 	logger := log.FromContext(ctx).WithValues("namespace", namespace)
-	stateText := "resumed"
+	state := "resumed"
 	if shouldBeSuspended {
-		stateText = "suspended"
+		state = "suspended"
 	}
-	logger.Info("Waiting for all CronJobs to be "+stateText, "count", len(names), "timeout", timeout)
+	logger.Info(fmt.Sprintf("Waiting for all CronJobs to be %s", state), "count", len(names), "timeout", timeout)
 
+	errChan := make(chan error, len(names))
+	doneChan := make(chan bool, len(names))
+
+	// Process each CronJob concurrently
 	for _, name := range names {
-		var err error
-		if shouldBeSuspended {
-			err = m.WaitForSuspended(ctx, name, namespace, timeout)
-		} else {
-			err = m.WaitForResumed(ctx, name, namespace, timeout)
-		}
+		go func(name string) {
+			err := wait.PollImmediate(2*time.Second, timeout, func() (bool, error) {
+				isReady, err := m.IsReady(ctx, name, namespace, shouldBeSuspended)
+				if err != nil {
+					logger.Error(err, "Failed to check CronJob state", "name", name)
+					return false, nil // Continue polling
+				}
 
-		if err != nil {
-			logger.Error(err, "Timeout waiting for CronJob state change", "cronjob", name, "targetState", stateText)
-			return fmt.Errorf("timeout waiting for CronJob %s to be %s: %w", name, stateText, err)
+				if isReady {
+					logger.V(1).Info("CronJob reached desired state", "name", name, "state", state)
+					return true, nil
+				}
+
+				logger.V(1).Info("CronJob not yet in desired state", "name", name, "state", state)
+				return false, nil
+			})
+
+			if err != nil {
+				errChan <- fmt.Errorf("timeout waiting for CronJob %s to be %s", name, state)
+			} else {
+				doneChan <- true
+			}
+		}(name)
+	}
+
+	// Wait for all goroutines to complete
+	var errs []error
+	for i := 0; i < len(names); i++ {
+		select {
+		case err := <-errChan:
+			errs = append(errs, err)
+		case <-doneChan:
+			// CronJob reached desired state
 		}
 	}
 
-	logger.Info("All CronJobs are now " + stateText)
+	if len(errs) > 0 {
+		errMsg := fmt.Sprintf("%d CronJobs failed to reach %s state:", len(errs), state)
+		for _, err := range errs {
+			errMsg += "\n- " + err.Error()
+		}
+		return fmt.Errorf(errMsg)
+	}
+
+	logger.Info(fmt.Sprintf("All CronJobs successfully %s", state))
 	return nil
 }

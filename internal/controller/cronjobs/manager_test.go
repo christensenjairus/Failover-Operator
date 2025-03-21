@@ -3,6 +3,7 @@ package cronjobs
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	batchv1 "k8s.io/api/batch/v1"
@@ -148,7 +149,7 @@ func TestIsReady(t *testing.T) {
 	ctx := context.Background()
 
 	// Test with unsuspended CronJob (should be ready)
-	ready, err := manager.IsReady(ctx, cronjob.Name, cronjob.Namespace)
+	ready, err := manager.IsReady(ctx, cronjob.Name, cronjob.Namespace, false)
 	assert.NoError(t, err)
 	assert.True(t, ready)
 
@@ -158,10 +159,15 @@ func TestIsReady(t *testing.T) {
 	err = manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Test with suspended CronJob (should not be ready)
-	ready, err = manager.IsReady(ctx, cronjob.Name, cronjob.Namespace)
+	// Test with suspended CronJob (should not be ready when we want it unsuspended)
+	ready, err = manager.IsReady(ctx, cronjob.Name, cronjob.Namespace, false)
 	assert.NoError(t, err)
 	assert.False(t, ready)
+
+	// Test with suspended CronJob (should be ready when we want it suspended)
+	ready, err = manager.IsReady(ctx, cronjob.Name, cronjob.Namespace, true)
+	assert.NoError(t, err)
+	assert.True(t, ready)
 }
 
 // TestIsSuspended tests checking if a CronJob is suspended
@@ -316,4 +322,139 @@ func TestRemoveFluxAnnotation(t *testing.T) {
 	// Assert flux annotation was removed
 	_, exists := updatedCronJob.Annotations[FluxReconcileAnnotation]
 	assert.False(t, exists)
+}
+
+// TestProcessCronJobs tests processing multiple CronJobs
+func TestProcessCronJobs(t *testing.T) {
+	// Setup
+	manager, cronjob := setupTestManager()
+	ctx := context.Background()
+
+	// Create additional CronJobs
+	suspend := false
+	cronjob2 := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cronjob-2",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+	}
+	cronjob3 := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cronjob-3",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+	}
+
+	err := manager.client.Create(ctx, cronjob2)
+	assert.NoError(t, err)
+	err = manager.client.Create(ctx, cronjob3)
+	assert.NoError(t, err)
+
+	// List of CronJob names
+	cronJobNames := []string{cronjob.Name, cronjob2.Name, cronjob3.Name}
+
+	// Test suspending CronJobs
+	manager.ProcessCronJobs(ctx, "default", cronJobNames, false)
+
+	// Verify all CronJobs are suspended
+	for _, name := range cronJobNames {
+		updatedCronJob := &batchv1.CronJob{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, updatedCronJob)
+		assert.NoError(t, err)
+		assert.True(t, *updatedCronJob.Spec.Suspend, "CronJob %s should be suspended", name)
+	}
+
+	// Test resuming CronJobs
+	manager.ProcessCronJobs(ctx, "default", cronJobNames, true)
+
+	// Verify all CronJobs are resumed
+	for _, name := range cronJobNames {
+		updatedCronJob := &batchv1.CronJob{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, updatedCronJob)
+		assert.NoError(t, err)
+		assert.False(t, *updatedCronJob.Spec.Suspend, "CronJob %s should be resumed", name)
+	}
+}
+
+// TestWaitForAllCronJobsState tests waiting for all CronJobs to reach a desired state
+func TestWaitForAllCronJobsState(t *testing.T) {
+	// Setup
+	manager, cronjob := setupTestManager()
+	ctx := context.Background()
+
+	// Create additional CronJobs
+	suspend := false
+	cronjob2 := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cronjob-2",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+	}
+	cronjob3 := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cronjob-3",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+	}
+
+	err := manager.client.Create(ctx, cronjob2)
+	assert.NoError(t, err)
+	err = manager.client.Create(ctx, cronjob3)
+	assert.NoError(t, err)
+
+	// List of CronJob names
+	cronJobNames := []string{cronjob.Name, cronjob2.Name, cronjob3.Name}
+
+	// Test with CronJobs already in the desired state (resumed)
+	// Because fake client has immediate updates, this should pass immediately
+	err = manager.WaitForAllCronJobsState(ctx, "default", cronJobNames, false, 1*time.Second)
+	assert.NoError(t, err)
+
+	// Suspend all CronJobs first
+	for _, name := range cronJobNames {
+		err := manager.Suspend(ctx, name, "default")
+		assert.NoError(t, err)
+	}
+
+	// Test with CronJobs already in suspended state
+	// Because fake client has immediate updates, this should pass immediately
+	err = manager.WaitForAllCronJobsState(ctx, "default", cronJobNames, true, 1*time.Second)
+	assert.NoError(t, err)
+
+	// Test with fake client mocking implementation
+	// Instead of using goroutines which might cause race conditions,
+	// we'll patch the IsReady method for the test
+
+	// Create a simple mock implementation that simulates resuming all CronJobs
+	// by pre-updating them all to the unsuspended state
+	for _, name := range cronJobNames {
+		updatedCronJob := &batchv1.CronJob{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, updatedCronJob)
+		assert.NoError(t, err)
+
+		unsuspend := false
+		updatedCronJob.Spec.Suspend = &unsuspend
+		err = manager.client.Update(ctx, updatedCronJob)
+		assert.NoError(t, err)
+	}
+
+	// Now verify they're all in resumed state
+	err = manager.WaitForAllCronJobsState(ctx, "default", cronJobNames, false, 1*time.Second)
+	assert.NoError(t, err)
 }

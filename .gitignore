@@ -26,5 +26,6 @@ go.work
 *.swo
 *~
 
-.env
+/.env
 /setup-dynamodb
+/failover-operator

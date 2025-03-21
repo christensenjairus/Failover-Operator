@@ -19,12 +19,15 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/joho/godotenv"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -55,18 +58,84 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// loadEnvFromFile loads environment variables from .env file
+func loadEnvFromFile() {
+	// Try to find .env file in different locations
+	locations := []string{
+		".env",                                   // Current directory
+		filepath.Join("..", ".env"),              // One directory up
+		filepath.Join(os.Getenv("HOME"), ".env"), // Home directory
+	}
+
+	for _, location := range locations {
+		if _, err := os.Stat(location); err == nil {
+			fmt.Printf("Loading environment from file: %s\n", location)
+			err := godotenv.Load(location)
+			if err != nil {
+				fmt.Printf("Error loading .env file from %s: %v\n", location, err)
+			} else {
+				fmt.Printf("Successfully loaded environment from %s\n", location)
+				return
+			}
+		}
+	}
+
+	// Create a .env file with default values if none exists
+	if _, err := os.Stat(".env"); os.IsNotExist(err) {
+		fmt.Println("No .env file found. Creating one with default values.")
+		defaultEnv := `# AWS Configuration
+AWS_REGION=us-west-2
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=
+AWS_ENDPOINT=
+AWS_USE_LOCAL_ENDPOINT=false
+
+# DynamoDB Configuration
+DYNAMODB_TABLE_NAME=failover-operator
+
+# Operator Configuration
+CLUSTER_NAME=test-cluster
+OPERATOR_ID=failover-operator
+
+# Timeouts and intervals
+RECONCILE_INTERVAL=30s
+DEFAULT_HEARTBEAT_INTERVAL=30s
+`
+		err := os.WriteFile(".env", []byte(defaultEnv), 0644)
+		if err != nil {
+			fmt.Printf("Error creating default .env file: %v\n", err)
+		} else {
+			fmt.Println("Created default .env file. Please update it with your configuration.")
+		}
+	}
+}
+
 func main() {
+	// Load environment variables from .env file
+	loadEnvFromFile()
+
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var clusterName string
+	var operatorID string
+	var dynamoDBTableName string
+	var awsRegion string
+	var awsEndpoint string
+	var useLocalEndpoint bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&clusterName, "cluster-name", "default-cluster", "The name of this cluster for multi-cluster operations.")
+	flag.StringVar(&clusterName, "cluster-name", "", "The name of this cluster for multi-cluster operations.")
+	flag.StringVar(&operatorID, "operator-id", "", "The unique ID for this operator instance.")
+	flag.StringVar(&dynamoDBTableName, "dynamodb-table-name", "", "The name of the DynamoDB table to use.")
+	flag.StringVar(&awsRegion, "aws-region", "", "The AWS region where DynamoDB is located.")
+	flag.StringVar(&awsEndpoint, "aws-endpoint", "", "Custom endpoint for AWS services (for local testing).")
+	flag.BoolVar(&useLocalEndpoint, "use-local-endpoint", false, "Whether to use a local AWS endpoint.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -156,16 +225,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Override cluster name from command line if provided
-	if clusterName != "default-cluster" {
+	// Override config with command line arguments if provided
+	if clusterName != "" {
 		operatorConfig.ClusterName = clusterName
+	}
+	if operatorID != "" {
+		operatorConfig.OperatorID = operatorID
+	}
+	if dynamoDBTableName != "" {
+		operatorConfig.DynamoDBTableName = dynamoDBTableName
+	}
+	if awsRegion != "" {
+		operatorConfig.AWSRegion = awsRegion
+	}
+	if awsEndpoint != "" {
+		operatorConfig.AWSEndpoint = awsEndpoint
+	}
+	if useLocalEndpoint {
+		operatorConfig.AWSUseLocalEndpoint = useLocalEndpoint
 	}
 
 	setupLog.Info("starting with configuration",
 		"clusterName", operatorConfig.ClusterName,
 		"operatorID", operatorConfig.OperatorID,
 		"dynamoDBTable", operatorConfig.DynamoDBTableName,
-		"awsRegion", operatorConfig.AWSRegion)
+		"awsRegion", operatorConfig.AWSRegion,
+		"awsEndpoint", operatorConfig.AWSEndpoint,
+		"useLocalEndpoint", operatorConfig.AWSUseLocalEndpoint)
 
 	// Setup all controllers
 	if err = controller.SetupControllers(mgr, operatorConfig); err != nil {

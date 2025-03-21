@@ -29,59 +29,78 @@ func RegisterSchemes(scheme *runtime.Scheme) error {
 // SetupControllers sets up all controllers with the manager
 func SetupControllers(mgr ctrl.Manager, config *config.Config) error {
 	// Set up Failover controller
-	if err := (&failover.FailoverReconciler{
+	failoverReconciler := &failover.FailoverReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		ClusterName: config.ClusterName,
 		Logger:      mgr.GetLogger().WithName("controllers").WithName("Failover"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("failed to setup Failover controller: %w", err)
 	}
 
 	// Set up FailoverGroup controller
-	if err := (&failovergroup.FailoverGroupReconciler{
+	failoverGroupReconciler := &failovergroup.FailoverGroupReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		ClusterName: config.ClusterName,
 		Log:         mgr.GetLogger().WithName("controllers").WithName("FailoverGroup"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("failed to setup FailoverGroup controller: %w", err)
 	}
 
 	// Setup DynamoDB if configured
-	if err := setupDynamoDB(mgr.GetLogger(), config); err != nil {
+	dynamoDBService, err := setupDynamoDB(mgr.GetLogger(), config)
+	if err != nil {
 		return fmt.Errorf("failed to setup DynamoDB: %w", err)
+	}
+
+	// If DynamoDB is configured, set the manager in the controllers
+	if dynamoDBService != nil {
+		// Create the FailoverGroup manager and set the DynamoDB service
+		failoverGroupManager := failovergroup.NewManager(mgr.GetClient(), config.ClusterName, failoverGroupReconciler.Log)
+		failoverGroupManager.SetDynamoDBManager(dynamoDBService)
+		failoverGroupReconciler.FailoverGroupManager = failoverGroupManager
+
+		// Create the Failover manager and set the DynamoDB service
+		failoverManager := failover.NewManager(mgr.GetClient(), config.ClusterName, failoverReconciler.Logger)
+		failoverManager.SetDynamoDBManager(dynamoDBService)
+	}
+
+	// Register the controllers with the manager
+	if err := failoverReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to setup Failover controller: %w", err)
+	}
+
+	if err := failoverGroupReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to setup FailoverGroup controller: %w", err)
 	}
 
 	return nil
 }
 
-// setupDynamoDB initializes DynamoDB for the operator
-func setupDynamoDB(logger logr.Logger, cfg *config.Config) error {
+// setupDynamoDB initializes DynamoDB for the operator and returns a DynamoDB service instance
+func setupDynamoDB(logger logr.Logger, cfg *config.Config) (*dynamodb.DynamoDBService, error) {
 	ctx := context.Background()
 	log := logger.WithName("dynamodb-setup")
 
 	// Skip if no table name is specified
 	if cfg.DynamoDBTableName == "" {
 		log.Info("DynamoDB table name not specified, skipping setup")
-		return nil
+		return nil, nil
 	}
 
 	// Create AWS client factory and DynamoDB client
 	factory := config.NewAWSClientFactory(cfg)
 	dynamoClient, err := factory.CreateDynamoDBClient(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create DynamoDB client: %w", err)
+		return nil, fmt.Errorf("failed to create DynamoDB client: %w", err)
 	}
 
-	// Setup DynamoDB table
-	log.Info("Setting up DynamoDB table", "tableName", cfg.DynamoDBTableName)
+	// Skip table creation - assume the table already exists
+	log.Info("Skipping DynamoDB table creation - assuming table already exists", "tableName", cfg.DynamoDBTableName)
 
-	options := dynamodb.DefaultTableSetupOptions(cfg.DynamoDBTableName)
-	if err := dynamodb.SetupDynamoDBTable(ctx, dynamoClient, options); err != nil {
-		return fmt.Errorf("failed to setup DynamoDB table: %w", err)
-	}
+	// Create and return a DynamoDB service instance
+	dynamoDBService := dynamodb.NewDynamoDBService(dynamoClient, cfg.DynamoDBTableName, cfg.ClusterName, cfg.OperatorID)
+	log.Info("Created DynamoDB service",
+		"tableName", cfg.DynamoDBTableName,
+		"clusterName", cfg.ClusterName,
+		"operatorID", cfg.OperatorID)
 
-	log.Info("DynamoDB setup completed successfully")
-	return nil
+	return dynamoDBService, nil
 }

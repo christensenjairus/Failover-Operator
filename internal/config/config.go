@@ -31,21 +31,56 @@ type Config struct {
 
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
+	// Get environment variables with logging
+	awsRegion := getEnv("AWS_REGION", "us-west-2")
+	awsAccessKey := getEnv("AWS_ACCESS_KEY_ID", "")
+	awsSecretKey := getEnv("AWS_SECRET_ACCESS_KEY", "")
+	awsSessionToken := getEnv("AWS_SESSION_TOKEN", "")
+	awsEndpoint := getEnv("AWS_ENDPOINT", "")
+	awsUseLocalEndpoint := getEnvBool("AWS_USE_LOCAL_ENDPOINT", false)
+
+	// Only use local endpoint if explicitly requested AND endpoint is specified
+	if awsUseLocalEndpoint && awsEndpoint == "" {
+		fmt.Println("WARNING: AWS_USE_LOCAL_ENDPOINT is true but AWS_ENDPOINT is not set. Disabling local endpoint.")
+		awsUseLocalEndpoint = false
+	}
+
+	// If real AWS credentials are provided, prefer those over local endpoint
+	// unless local endpoint was explicitly requested
+	hasAwsCredentials := awsAccessKey != "" && awsSecretKey != ""
+	if hasAwsCredentials && awsUseLocalEndpoint {
+		fmt.Println("NOTE: Both AWS credentials and local endpoint configuration detected.")
+		fmt.Println("Using configuration specified by AWS_USE_LOCAL_ENDPOINT:", awsUseLocalEndpoint)
+	}
+
+	dynamoDBTableName := getEnv("DYNAMODB_TABLE_NAME", "failover-operator")
+	clusterName := getEnv("CLUSTER_NAME", "default-cluster")
+	operatorID := getEnv("OPERATOR_ID", "failover-operator")
+
+	// Log the loaded environment variables
+	fmt.Printf("Loaded environment variables:\n")
+	fmt.Printf("AWS_REGION: %s\n", awsRegion)
+	fmt.Printf("AWS_ENDPOINT: %s\n", awsEndpoint)
+	fmt.Printf("AWS_USE_LOCAL_ENDPOINT: %v\n", awsUseLocalEndpoint)
+	fmt.Printf("DYNAMODB_TABLE_NAME: %s\n", dynamoDBTableName)
+	fmt.Printf("CLUSTER_NAME: %s\n", clusterName)
+	fmt.Printf("OPERATOR_ID: %s\n", operatorID)
+
 	config := &Config{
 		// AWS Configuration
-		AWSRegion:           getEnv("AWS_REGION", "us-west-2"),
-		AWSAccessKey:        getEnv("AWS_ACCESS_KEY_ID", ""),
-		AWSSecretKey:        getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		AWSSessionToken:     getEnv("AWS_SESSION_TOKEN", ""),
-		AWSEndpoint:         getEnv("AWS_ENDPOINT", ""),
-		AWSUseLocalEndpoint: getEnvBool("AWS_USE_LOCAL_ENDPOINT", false),
+		AWSRegion:           awsRegion,
+		AWSAccessKey:        awsAccessKey,
+		AWSSecretKey:        awsSecretKey,
+		AWSSessionToken:     awsSessionToken,
+		AWSEndpoint:         awsEndpoint,
+		AWSUseLocalEndpoint: awsUseLocalEndpoint,
 
 		// DynamoDB Configuration
-		DynamoDBTableName: getEnv("DYNAMODB_TABLE_NAME", "failover-operator"),
+		DynamoDBTableName: dynamoDBTableName,
 
 		// Operator Configuration
-		ClusterName: getEnv("CLUSTER_NAME", "default-cluster"),
-		OperatorID:  getEnv("OPERATOR_ID", "failover-operator"),
+		ClusterName: clusterName,
+		OperatorID:  operatorID,
 
 		// Timeouts and intervals (with defaults)
 		ReconcileInterval:        getEnvDuration("RECONCILE_INTERVAL", 30*time.Second),

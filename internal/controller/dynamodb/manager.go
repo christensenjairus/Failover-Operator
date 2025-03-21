@@ -7,20 +7,49 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Record types for DynamoDB
+// RecordType defines the types of records stored in DynamoDB
+type RecordType string
+
 const (
-	RecordTypeOwnership       = "OWNERSHIP"        // Stores which cluster is PRIMARY for a FailoverGroup
-	RecordTypeHeartbeat       = "HEARTBEAT"        // Heartbeat records for cluster health monitoring
-	RecordTypeLock            = "LOCK"             // Used for distributed locking during failover operations
-	RecordTypeConfig          = "CONFIG"           // Stores configuration information shared across clusters
-	RecordTypeFailoverHistory = "FAILOVER_HISTORY" // Failover history records for auditing
+	// OwnershipRecord represents a record that tracks which cluster owns a FailoverGroup
+	OwnershipRecord RecordType = "OWNERSHIP"
+
+	// HeartbeatRecord represents a record that tracks heartbeats from operator instances
+	HeartbeatRecord RecordType = "HEARTBEAT"
+
+	// LockRecord represents a record used for distributed locking during failover operations
+	LockRecord RecordType = "LOCK"
+
+	// ConfigRecord represents a record that stores configuration for a FailoverGroup
+	ConfigRecord RecordType = "CONFIG"
+
+	// FailoverHistoryRecord represents a record that stores the history of failover events
+	FailoverHistoryRecord RecordType = "FAILOVER_HISTORY"
 )
 
-// Transaction types for failover operations
+// TransactionType defines the types of transactions that can be executed
+type TransactionType string
+
 const (
-	TransactionTypeFailover = "FAILOVER" // Regular failover (standby to primary)
-	TransactionTypeFailback = "FAILBACK" // Failback operation (returning to original primary)
-	TransactionTypeCleanup  = "CLEANUP"  // Cleanup after a failover/failback operation
+	// FailoverTransaction represents a transaction for failing over from one cluster to another
+	FailoverTransaction TransactionType = "FAILOVER"
+
+	// FailbackTransaction represents a transaction for failing back to the original primary cluster
+	FailbackTransaction TransactionType = "FAILBACK"
+
+	// CleanupTransaction represents a transaction for cleaning up resources after failover
+	CleanupTransaction TransactionType = "CLEANUP"
+)
+
+// ClusterRole defines the possible roles for a cluster in a FailoverGroup
+type ClusterRole string
+
+const (
+	// PrimaryRole indicates the cluster is active and serving traffic
+	PrimaryRole ClusterRole = "PRIMARY"
+
+	// StandbyRole indicates the cluster is passive and not serving traffic
+	StandbyRole ClusterRole = "STANDBY"
 )
 
 // Health status constants
@@ -38,37 +67,31 @@ const (
 	StateFailback = "FAILBACK" // Transitioning from STANDBY to PRIMARY
 )
 
-// OwnershipRecord represents the ownership information for a FailoverGroup
-// This record tracks which cluster is PRIMARY for a given FailoverGroup
-type OwnershipRecord struct {
-	GroupKey         string             `json:"groupKey"`                   // Composite key: {operatorID}:{namespace}:{name}
-	RecordType       string             `json:"recordType"`                 // Always "OWNERSHIP"
-	OperatorID       string             `json:"operatorID"`                 // ID of the operator instance managing this group
-	GroupNamespace   string             `json:"groupNamespace"`             // Kubernetes namespace of the FailoverGroup
-	GroupName        string             `json:"groupName"`                  // Name of the FailoverGroup
-	OwnerCluster     string             `json:"ownerCluster"`               // Name of the cluster that is PRIMARY
-	Version          int                `json:"version"`                    // Used for optimistic concurrency control
-	LastUpdated      time.Time          `json:"lastUpdated"`                // When the ownership was last updated
-	LastFailover     *FailoverReference `json:"lastFailover,omitempty"`     // Reference to the most recent failover
-	Suspended        bool               `json:"suspended"`                  // Whether automatic failovers are disabled
-	SuspensionReason string             `json:"suspensionReason,omitempty"` // Why failovers are suspended
-	SuspendedBy      string             `json:"suspendedBy,omitempty"`      // Which user/system suspended
-	SuspendedAt      string             `json:"suspendedAt,omitempty"`      // When it was suspended
+// OwnershipData represents the data structure for tracking ownership of a FailoverGroup
+type OwnershipData struct {
+	// GroupID is the unique identifier for the FailoverGroup
+	GroupID string
+
+	// CurrentOwner is the name of the cluster that currently owns the FailoverGroup
+	CurrentOwner string
+
+	// PreviousOwner is the name of the cluster that previously owned the FailoverGroup
+	PreviousOwner string
+
+	// LastUpdated is the timestamp when the record was last updated
+	LastUpdated time.Time
 }
 
-// HeartbeatRecord represents the health status of a cluster for a FailoverGroup
-// Each cluster updates its heartbeat periodically to indicate it's alive and healthy
-type HeartbeatRecord struct {
-	GroupKey       string            `json:"groupKey"`       // Composite key: {operatorID}:{namespace}:{name}
-	RecordType     string            `json:"recordType"`     // "HEARTBEAT:{clusterName}"
-	OperatorID     string            `json:"operatorID"`     // ID of the operator instance
-	GroupNamespace string            `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
-	GroupName      string            `json:"groupName"`      // Name of the FailoverGroup
-	ClusterName    string            `json:"clusterName"`    // Name of the cluster
-	Health         string            `json:"health"`         // Overall health: OK, DEGRADED, ERROR
-	State          string            `json:"state"`          // Current state: PRIMARY, STANDBY, etc.
-	Timestamp      time.Time         `json:"timestamp"`      // When heartbeat was last updated
-	Components     []ComponentStatus `json:"components"`     // Health status of individual components
+// HeartbeatData represents the data structure for operator heartbeats
+type HeartbeatData struct {
+	// ClusterName is the name of the cluster sending the heartbeat
+	ClusterName string
+
+	// OperatorID is the unique identifier for the operator instance
+	OperatorID string
+
+	// LastUpdated is the timestamp when the record was last updated
+	LastUpdated time.Time
 }
 
 // LockRecord represents a distributed lock for a FailoverGroup
@@ -148,321 +171,311 @@ type TimeoutSettings struct {
 	Heartbeat        string `json:"heartbeat"`        // Time without heartbeats before auto-failover
 }
 
-// Manager handles operations related to DynamoDB for coordination between controllers
-// This manager provides methods to handle distributed coordination, locking, and history tracking
+// Manager handles operations related to DynamoDB
+// This manager provides methods for interacting with DynamoDB to coordinate failover operations
 type Manager struct {
-	// DynamoDB client for AWS API interactions
+	// DynamoDB client for API interactions
 	client interface{}
 
 	// Table name for the DynamoDB table
 	tableName string
 
-	// ClusterID identifies the current cluster in multi-cluster deployments
-	clusterID string
+	// ClusterName is the name of the local cluster
+	clusterName string
 
-	// OperatorID uniquely identifies this operator instance
+	// OperatorID is the unique identifier for this operator instance
 	operatorID string
 }
 
 // NewManager creates a new DynamoDB manager
-// The session is used to create a DynamoDB client, and the tableName is used to specify
-// which DynamoDB table to interact with for coordination
-func NewManager(client interface{}, tableName, clusterID, operatorID string) *Manager {
+// Takes a DynamoDB client, table name, cluster name, and operator ID
+func NewManager(client interface{}, tableName, clusterName, operatorID string) *Manager {
 	return &Manager{
-		client:     client,
-		tableName:  tableName,
-		clusterID:  clusterID,
-		operatorID: operatorID,
+		client:      client,
+		tableName:   tableName,
+		clusterName: clusterName,
+		operatorID:  operatorID,
 	}
 }
 
 // GetOwnership retrieves the current ownership record for a FailoverGroup
-// Used to determine which cluster is currently the PRIMARY for a given FailoverGroup
-func (m *Manager) GetOwnership(ctx context.Context, failoverGroupName string) (string, error) {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
+// This determines which cluster is currently the PRIMARY for the group
+func (m *Manager) GetOwnership(ctx context.Context, groupID string) (*OwnershipData, error) {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID)
 	logger.V(1).Info("Getting ownership record")
 
-	// TODO: Implement fetching ownership record
-	// 1. Query DynamoDB for the OWNERSHIP record for the specified FailoverGroup
-	// 2. Return the ClusterID from the record, which indicates the PRIMARY cluster
-	// 3. If no record exists, return empty string and no error
-	// 4. If error occurs during query, return error
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for the ownership record
+	// 2. Return the ownership record if found, or nil with an error if not
 
-	return "", nil
+	// Placeholder implementation
+	return &OwnershipData{
+		GroupID:       groupID,
+		CurrentOwner:  "placeholder-cluster",
+		PreviousOwner: "",
+		LastUpdated:   time.Now(),
+	}, nil
 }
 
-// UpdateOwnership updates or creates the ownership record for a FailoverGroup
-// Used during failover to change which cluster is designated as PRIMARY
-func (m *Manager) UpdateOwnership(ctx context.Context, failoverGroupName, clusterID string) error {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
-	logger.Info("Updating ownership record", "clusterID", clusterID)
+// UpdateOwnership updates the ownership record for a FailoverGroup
+// Called during failover to change the PRIMARY cluster for a FailoverGroup
+func (m *Manager) UpdateOwnership(ctx context.Context, groupID, newOwner, previousOwner string) error {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID, "newOwner", newOwner, "previousOwner", previousOwner)
+	logger.Info("Updating ownership record")
 
-	// TODO: Implement updating ownership record
-	// 1. Create a PutItem request for the OWNERSHIP record
-	// 2. Include failoverGroupName as the partition key and OWNERSHIP as the sort key
-	// 3. Set clusterID, updatedAt timestamp, and operatorID
-	// 4. Execute the PutItem operation
-	// 5. Handle any errors that occur
+	// TODO: Implement actual DynamoDB update
+	// 1. Create or update the ownership record in DynamoDB
+	// 2. Use conditional expressions to ensure atomicity
+	// 3. Return an error if the update fails
 
 	return nil
 }
 
-// AcquireLock attempts to acquire a distributed lock for a FailoverGroup
-// Used to ensure only one operator can perform failover operations at a time
-func (m *Manager) AcquireLock(ctx context.Context, failoverGroupName string, ttl time.Duration) (bool, error) {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
-	logger.Info("Attempting to acquire lock", "ttl", ttl)
+// AcquireLock attempts to acquire a distributed lock for failover operations
+// Returns true if the lock was acquired, false otherwise
+func (m *Manager) AcquireLock(ctx context.Context, groupID string, duration time.Duration) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID, "duration", duration)
+	logger.Info("Attempting to acquire lock")
 
-	// TODO: Implement acquiring lock
-	// 1. Create a PutItem request with a condition expression that ensures the item doesn't exist
-	//    or is expired (based on TTL value)
-	// 2. Include failoverGroupName as the partition key and LOCK as the sort key
-	// 3. Set operatorID, clusterID, acquiredAt timestamp, and TTL attributes
-	// 4. If PutItem succeeds, return true (lock acquired)
-	// 5. If condition check fails, return false (lock not acquired)
-	// 6. For other errors, return false and the error
+	// TODO: Implement actual DynamoDB lock acquisition
+	// 1. Try to create a lock record in DynamoDB with a TTL
+	// 2. Use conditional expressions to ensure atomicity
+	// 3. Return true if successful, false if already locked
 
-	return false, nil
+	return true, nil
 }
 
-// ReleaseLock releases a previously acquired lock for a FailoverGroup
-// Used after completing a failover operation to allow other operations to proceed
-func (m *Manager) ReleaseLock(ctx context.Context, failoverGroupName string) error {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
+// ReleaseLock releases a previously acquired lock
+// Should be called after failover operations are complete or if they fail
+func (m *Manager) ReleaseLock(ctx context.Context, groupID string) error {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID)
 	logger.Info("Releasing lock")
 
-	// TODO: Implement releasing lock
-	// 1. Create a DeleteItem request for the LOCK record
-	// 2. Include a condition expression to ensure only the lock owner can release it
-	// 3. Include failoverGroupName as the partition key and LOCK as the sort key
-	// 4. Execute the DeleteItem operation
-	// 5. Handle any errors, including if the lock doesn't exist or is owned by another operator
+	// TODO: Implement actual DynamoDB lock release
+	// 1. Delete the lock record in DynamoDB
+	// 2. Use conditional expressions to ensure atomicity
+	// 3. Return an error if the deletion fails
 
 	return nil
 }
 
 // UpdateHeartbeat updates the heartbeat record for this operator instance
-// Used to indicate that the operator is healthy and actively monitoring FailoverGroups
-func (m *Manager) UpdateHeartbeat(ctx context.Context, ttl time.Duration) error {
-	logger := log.FromContext(ctx)
-	logger.V(1).Info("Updating heartbeat", "operatorID", m.operatorID)
+// Should be called periodically to indicate the operator is still alive
+func (m *Manager) UpdateHeartbeat(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithValues("clusterName", m.clusterName, "operatorID", m.operatorID)
+	logger.V(1).Info("Updating heartbeat")
 
-	// TODO: Implement updating heartbeat
-	// 1. Create a PutItem request for the HEARTBEAT record
-	// 2. Include operatorID as the partition key and HEARTBEAT as the sort key
-	// 3. Set clusterID, lastHeartbeat timestamp, and TTL attributes
-	// 4. Execute the PutItem operation
-	// 5. Handle any errors that occur
+	// TODO: Implement actual DynamoDB heartbeat update
+	// 1. Create or update the heartbeat record in DynamoDB
+	// 2. Set a TTL for automatic cleanup
+	// 3. Return an error if the update fails
 
 	return nil
 }
 
-// GetHeartbeats retrieves all active heartbeats from all operator instances
-// Used to detect if other operators are alive and if failover should be initiated
-func (m *Manager) GetHeartbeats(ctx context.Context) (map[string]time.Time, error) {
+// GetHeartbeats retrieves all active heartbeats from operator instances
+// Used to determine which operators are active across all clusters
+func (m *Manager) GetHeartbeats(ctx context.Context) ([]HeartbeatData, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Getting all heartbeats")
 
-	// TODO: Implement getting all heartbeats
-	// 1. Scan or Query DynamoDB for all HEARTBEAT records
-	// 2. Build a map of operatorID to lastHeartbeat timestamp
-	// 3. Filter out expired heartbeats based on their TTL
-	// 4. Return the map of active operators and their last heartbeat times
-	// 5. Handle any errors that occur during the scan operation
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for all heartbeat records
+	// 2. Filter out expired heartbeats
+	// 3. Return the list of active heartbeats
 
-	return nil, nil
+	// Placeholder implementation
+	return []HeartbeatData{
+		{
+			ClusterName: m.clusterName,
+			OperatorID:  m.operatorID,
+			LastUpdated: time.Now(),
+		},
+	}, nil
 }
 
 // RecordFailoverEvent records a failover event in the history
-// Used to maintain an audit trail of all failover operations for a FailoverGroup
-func (m *Manager) RecordFailoverEvent(ctx context.Context, failoverGroupName string, transactionType string, fromCluster, toCluster string, reason string) error {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
-	logger.Info("Recording failover event", "type", transactionType, "from", fromCluster, "to", toCluster)
+// Used for auditing, reporting, and analyzing failover patterns
+func (m *Manager) RecordFailoverEvent(ctx context.Context, groupID string, fromCluster, toCluster string, reason string) error {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID, "fromCluster", fromCluster, "toCluster", toCluster)
+	logger.Info("Recording failover event", "reason", reason)
 
-	// TODO: Implement recording failover event
-	// 1. Create a PutItem request for the FAILOVER_HISTORY record
-	// 2. Include failoverGroupName as the partition key
-	// 3. Generate a sort key using timestamp and a unique identifier
-	// 4. Set transactionType, fromCluster, toCluster, reason, operatorID, and timestamp attributes
-	// 5. Execute the PutItem operation
-	// 6. Handle any errors that occur
+	// TODO: Implement actual DynamoDB item creation
+	// 1. Create a new failover history record in DynamoDB
+	// 2. Include all relevant information such as timestamps and reasons
+	// 3. Return an error if the creation fails
 
 	return nil
 }
 
 // GetFailoverHistory retrieves the failover history for a FailoverGroup
-// Used to analyze past failover events and troubleshoot issues
-func (m *Manager) GetFailoverHistory(ctx context.Context, failoverGroupName string, limit int) ([]map[string]interface{}, error) {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
-	logger.V(1).Info("Getting failover history", "limit", limit)
+// Used for auditing, reporting, and analyzing failover patterns
+func (m *Manager) GetFailoverHistory(ctx context.Context, groupID string, limit int) ([]interface{}, error) {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID, "limit", limit)
+	logger.V(1).Info("Getting failover history")
 
-	// TODO: Implement getting failover history
-	// 1. Query DynamoDB for FAILOVER_HISTORY records for the specified FailoverGroup
-	// 2. Sort by timestamp in descending order
-	// 3. Limit the number of results based on the limit parameter
-	// 4. Convert DynamoDB items to maps for easier processing
-	// 5. Handle any errors that occur during the query operation
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for failover history records
+	// 2. Sort by timestamp and limit the number of results
+	// 3. Return the list of failover events
 
-	return nil, nil
+	// Placeholder implementation
+	return []interface{}{}, nil
 }
 
-// GetConfig retrieves configuration data for a FailoverGroup
-// Used to store and retrieve shared configuration between clusters
-func (m *Manager) GetConfig(ctx context.Context, failoverGroupName string) (map[string]interface{}, error) {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
+// GetConfig retrieves the configuration for a FailoverGroup
+// This includes settings such as failover thresholds, timeouts, etc.
+func (m *Manager) GetConfig(ctx context.Context, groupID string) (map[string]interface{}, error) {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID)
 	logger.V(1).Info("Getting configuration")
 
-	// TODO: Implement getting configuration
-	// 1. Query DynamoDB for the CONFIG record for the specified FailoverGroup
-	// 2. Return the configuration data as a map
-	// 3. If no record exists, return empty map and no error
-	// 4. Handle any errors that occur during the query operation
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for the configuration record
+	// 2. Return the configuration if found, or a default if not
 
-	return nil, nil
+	// Placeholder implementation
+	return map[string]interface{}{
+		"failoverThreshold":   3,
+		"heartbeatInterval":   30,
+		"failoverTimeout":     300,
+		"healthCheckInterval": 15,
+	}, nil
 }
 
-// UpdateConfig updates configuration data for a FailoverGroup
-// Used to share configuration between clusters
-func (m *Manager) UpdateConfig(ctx context.Context, failoverGroupName string, config map[string]interface{}) error {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
+// UpdateConfig updates the configuration for a FailoverGroup
+// Used to change settings such as failover thresholds, timeouts, etc.
+func (m *Manager) UpdateConfig(ctx context.Context, groupID string, config map[string]interface{}) error {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID)
 	logger.Info("Updating configuration")
 
-	// TODO: Implement updating configuration
-	// 1. Create a PutItem request for the CONFIG record
-	// 2. Include failoverGroupName as the partition key and CONFIG as the sort key
-	// 3. Set the config data, operatorID, and updatedAt timestamp
-	// 4. Execute the PutItem operation
-	// 5. Handle any errors that occur
+	// TODO: Implement actual DynamoDB update
+	// 1. Create or update the configuration record in DynamoDB
+	// 2. Use conditional expressions to ensure atomicity
+	// 3. Return an error if the update fails
 
 	return nil
 }
 
-// ExecuteTransaction executes a transaction with multiple operations
-// Used for atomic operations where multiple records need to be updated together
-func (m *Manager) ExecuteTransaction(ctx context.Context, items []interface{}) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Executing transaction", "itemCount", len(items))
+// ExecuteTransaction executes a transaction for failover operations
+// This ensures all related operations succeed or fail together
+func (m *Manager) ExecuteTransaction(ctx context.Context, txType TransactionType, operations []interface{}) error {
+	logger := log.FromContext(ctx).WithValues("transactionType", txType)
+	logger.Info("Executing transaction", "operationCount", len(operations))
 
-	// TODO: Implement executing transaction
-	// 1. Create a TransactWriteItems input with the provided items
-	// 2. Execute the TransactWriteItems operation
-	// 3. Handle any errors, including transaction conflicts
-	// 4. Retry with exponential backoff if appropriate
+	// TODO: Implement actual DynamoDB transaction
+	// 1. Use TransactWriteItems to execute all operations atomically
+	// 2. Handle errors and retries as needed
+	// 3. Return an error if the transaction fails
 
 	return nil
 }
 
-// PrepareFailoverTransaction prepares a transaction for failover
-// Used to create all the necessary transaction items for a failover operation
-func (m *Manager) PrepareFailoverTransaction(ctx context.Context, failoverGroupName, fromCluster, toCluster, reason string) ([]interface{}, error) {
-	logger := log.FromContext(ctx).WithValues("failoverGroup", failoverGroupName)
-	logger.Info("Preparing failover transaction", "from", fromCluster, "to", toCluster)
+// PrepareFailoverTransaction prepares a transaction for failing over a FailoverGroup
+// Returns a list of operations to be executed atomically
+func (m *Manager) PrepareFailoverTransaction(ctx context.Context, groupID, fromCluster, toCluster string, reason string) ([]interface{}, error) {
+	logger := log.FromContext(ctx).WithValues("groupID", groupID, "fromCluster", fromCluster, "toCluster", toCluster)
+	logger.Info("Preparing failover transaction", "reason", reason)
 
-	// TODO: Implement preparing failover transaction
-	// 1. Create transaction items for:
-	//    a. Updating the ownership record to the new PRIMARY cluster
-	//    b. Recording a failover event in the history
-	//    c. Updating any necessary configuration data
-	// 2. Return the list of transaction items to be executed
-	// 3. Handle any errors that occur during preparation
+	// TODO: Implement transaction preparation
+	// 1. Create operations for updating ownership
+	// 2. Create operations for recording history
+	// 3. Create operations for any other necessary updates
+	// 4. Return the list of operations
 
-	return nil, nil
+	// Placeholder implementation
+	return []interface{}{}, nil
 }
 
-// CheckClusterHealth checks the health of a specific cluster based on heartbeats
-// Used to determine if a cluster is healthy and responsive
-func (m *Manager) CheckClusterHealth(ctx context.Context, clusterID string, maxAge time.Duration) (bool, error) {
-	logger := log.FromContext(ctx).WithValues("clusterID", clusterID)
+// CheckClusterHealth checks the health of a cluster based on heartbeats
+// Returns true if the cluster is healthy, false otherwise
+func (m *Manager) CheckClusterHealth(ctx context.Context, clusterName string) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("clusterName", clusterName)
 	logger.V(1).Info("Checking cluster health")
 
-	// TODO: Implement checking cluster health
-	// 1. Query DynamoDB for HEARTBEAT records for the specified clusterID
-	// 2. Check if any heartbeats are newer than maxAge
-	// 3. Return true if healthy heartbeats exist, false otherwise
-	// 4. Handle any errors that occur during the query operation
+	// TODO: Implement actual health check
+	// 1. Get all heartbeats for the specified cluster
+	// 2. Check if the heartbeats are recent
+	// 3. Return true if there are recent heartbeats, false otherwise
 
-	return false, nil
+	// Placeholder implementation
+	return true, nil
 }
 
-// IsOperatorActive checks if a specific operator is active based on heartbeats
-// Used to determine if a specific operator instance is still running
-func (m *Manager) IsOperatorActive(ctx context.Context, operatorID string, maxAge time.Duration) (bool, error) {
-	logger := log.FromContext(ctx).WithValues("operatorID", operatorID)
+// IsOperatorActive checks if an operator instance is active based on heartbeats
+// Returns true if the operator is active, false otherwise
+func (m *Manager) IsOperatorActive(ctx context.Context, clusterName, operatorID string) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("clusterName", clusterName, "operatorID", operatorID)
 	logger.V(1).Info("Checking if operator is active")
 
-	// TODO: Implement checking if operator is active
-	// 1. Query DynamoDB for the HEARTBEAT record for the specified operatorID
-	// 2. Check if the heartbeat is newer than maxAge
-	// 3. Return true if a recent heartbeat exists, false otherwise
-	// 4. Handle any errors that occur during the query operation
+	// TODO: Implement actual check
+	// 1. Get the heartbeat for the specified operator
+	// 2. Check if the heartbeat is recent
+	// 3. Return true if there is a recent heartbeat, false otherwise
 
-	return false, nil
+	// Placeholder implementation
+	return true, nil
 }
 
-// GetActiveOperators gets a list of all active operators
-// Used to determine which operators are actively running in the system
-func (m *Manager) GetActiveOperators(ctx context.Context, maxAge time.Duration) ([]string, error) {
+// GetActiveOperators retrieves all active operator instances
+// Used for coordination and leader election
+func (m *Manager) GetActiveOperators(ctx context.Context) (map[string][]string, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Getting active operators")
 
-	// TODO: Implement getting active operators
-	// 1. Query DynamoDB for all HEARTBEAT records
-	// 2. Filter operators whose heartbeats are newer than maxAge
-	// 3. Return a list of operatorIDs for active operators
-	// 4. Handle any errors that occur during the query operation
+	// TODO: Implement actual DynamoDB query
+	// 1. Get all heartbeats
+	// 2. Group them by cluster
+	// 3. Return a map of cluster to operator IDs
 
-	return nil, nil
+	// Placeholder implementation
+	return map[string][]string{
+		m.clusterName: {m.operatorID},
+	}, nil
 }
 
-// CleanupExpiredLocks removes any expired locks
-// Used periodically to clean up locks that were not properly released
-func (m *Manager) CleanupExpiredLocks(ctx context.Context) (int, error) {
+// CleanupExpiredLocks cleans up expired locks from DynamoDB
+// Called periodically to prevent stale locks from blocking operations
+func (m *Manager) CleanupExpiredLocks(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Cleaning up expired locks")
 
-	// TODO: Implement cleaning up expired locks
-	// 1. Scan DynamoDB for all LOCK records
-	// 2. Filter locks that have expired based on their TTL
-	// 3. Delete each expired lock
-	// 4. Return the count of locks that were cleaned up
-	// 5. Handle any errors that occur during the scan or delete operations
+	// TODO: Implement actual DynamoDB cleanup
+	// 1. Query for all locks
+	// 2. Delete locks that have expired
+	// 3. Return an error if the cleanup fails
 
-	return 0, nil
+	return nil
 }
 
-// GetGroupsOwnedByCluster gets all FailoverGroups owned by a specific cluster
-// Used to determine which FailoverGroups should be managed by a specific cluster
-func (m *Manager) GetGroupsOwnedByCluster(ctx context.Context, clusterID string) ([]string, error) {
-	logger := log.FromContext(ctx).WithValues("clusterID", clusterID)
-	logger.V(1).Info("Getting FailoverGroups owned by cluster")
+// GetGroupsOwnedByCluster retrieves all FailoverGroups owned by a cluster
+// Used to determine which groups to failover when a cluster becomes unhealthy
+func (m *Manager) GetGroupsOwnedByCluster(ctx context.Context, clusterName string) ([]string, error) {
+	logger := log.FromContext(ctx).WithValues("clusterName", clusterName)
+	logger.V(1).Info("Getting groups owned by cluster")
 
-	// TODO: Implement getting FailoverGroups owned by cluster
-	// 1. Query DynamoDB for all OWNERSHIP records where the owner is the specified clusterID
-	// 2. Extract the failoverGroupName from each record
-	// 3. Return a list of failoverGroupNames
-	// 4. Handle any errors that occur during the query operation
+	// TODO: Implement actual DynamoDB query
+	// 1. Query for all ownership records where the current owner is the specified cluster
+	// 2. Extract the group IDs from the records
+	// 3. Return the list of group IDs
 
-	return nil, nil
+	// Placeholder implementation
+	return []string{}, nil
 }
 
-// TakeoverInactiveGroups takes over ownership of FailoverGroups owned by inactive clusters
-// Used during automatic failover when a cluster becomes unresponsive
-func (m *Manager) TakeoverInactiveGroups(ctx context.Context, inactiveClusterID string, maxAge time.Duration) ([]string, error) {
-	logger := log.FromContext(ctx).WithValues("inactiveClusterID", inactiveClusterID)
-	logger.Info("Taking over inactive FailoverGroups")
+// TakeoverInactiveGroups attempts to take over FailoverGroups owned by inactive clusters
+// This is the main function used for automatic failover
+func (m *Manager) TakeoverInactiveGroups(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithValues("clusterName", m.clusterName)
+	logger.Info("Attempting to take over inactive groups")
 
-	// TODO: Implement taking over inactive FailoverGroups
-	// 1. Get all FailoverGroups owned by the inactive cluster
-	// 2. For each FailoverGroup:
-	//    a. Check if the owning cluster is truly inactive (no heartbeats within maxAge)
-	//    b. Try to acquire a lock for the FailoverGroup
-	//    c. Update the ownership record to the current cluster
-	//    d. Record a failover event
-	//    e. Release the lock
-	// 3. Return a list of FailoverGroups that were taken over
-	// 4. Handle any errors that occur during the process
+	// TODO: Implement takeover logic
+	// 1. Get all FailoverGroups
+	// 2. For each group, check if the current owner is healthy
+	// 3. If not, attempt to acquire a lock and failover
+	// 4. Release the lock after the failover is complete
+	// 5. Return an error if any failover fails
 
-	return nil, nil
+	return nil
 }
 
 // Key Workflow Scenarios

@@ -5,18 +5,84 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func setupTestManager() *Manager {
+// FluxReconcileAnnotation is the annotation used by Flux to control reconciliation
+const FluxReconcileAnnotation = "kustomize.toolkit.fluxcd.io/reconcile"
+
+// DisabledValue is the value for the Flux reconcile annotation to disable reconciliation
+const DisabledValue = "disabled"
+
+// setupTestManager creates a test manager with a fake client and test StatefulSet
+func setupTestManager() (*Manager, *appsv1.StatefulSet) {
+	// Create a scheme
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+
 	// Create a fake client
-	client := fake.NewClientBuilder().Build()
-	return NewManager(client)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	// Create a test StatefulSet
+	replicas := int32(3)
+	statefulset := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-statefulset",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"test-key": "test-value",
+			},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "test",
+				},
+			},
+			Template: metav1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "test",
+					},
+				},
+				Spec: metav1.PodSpec{
+					Containers: []metav1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:latest",
+						},
+					},
+				},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			Replicas:        3,
+			ReadyReplicas:   3,
+			CurrentReplicas: 3,
+		},
+	}
+
+	// Create the StatefulSet in the fake client
+	_ = client.Create(context.Background(), statefulset)
+
+	return NewManager(client), statefulset
 }
 
+// TestNewManager tests the creation of a new StatefulSet manager
 func TestNewManager(t *testing.T) {
 	// Create a fake client
-	client := fake.NewClientBuilder().Build()
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	// Create the manager
 	manager := NewManager(client)
@@ -26,175 +92,232 @@ func TestNewManager(t *testing.T) {
 	assert.Equal(t, client, manager.client)
 }
 
+// TestScaleStatefulSet tests scaling a StatefulSet to a specific number of replicas
 func TestScaleStatefulSet(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.ScaleStatefulSet(ctx, "test-statefulset", "test-namespace", 3)
-
-	// Assert
+	// Call the function to scale the StatefulSet to 0 replicas
+	err := manager.ScaleStatefulSet(ctx, statefulset.Name, statefulset.Namespace, 0)
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the statefulset was actually scaled
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the replicas were set to 0
+	assert.Equal(t, int32(0), *updatedStatefulSet.Spec.Replicas)
 }
 
+// TestScaleDown tests scaling down a StatefulSet to 0 replicas
 func TestScaleDown(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.ScaleDown(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
+	// Call the function to scale down the StatefulSet
+	err := manager.ScaleDown(ctx, statefulset.Name, statefulset.Namespace)
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the statefulset was scaled down to 0
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the replicas were set to 0
+	assert.Equal(t, int32(0), *updatedStatefulSet.Spec.Replicas)
 }
 
+// TestScaleUp tests scaling up a StatefulSet to a specific number of replicas
 func TestScaleUp(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.ScaleUp(ctx, "test-statefulset", "test-namespace", 3)
-
-	// Assert
+	// First scale down to 0
+	replicas := int32(0)
+	statefulset.Spec.Replicas = &replicas
+	err := manager.client.Update(ctx, statefulset)
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the statefulset was scaled up to 3
+	// Call the function to scale up the StatefulSet to 5 replicas
+	err = manager.ScaleUp(ctx, statefulset.Name, statefulset.Namespace, 5)
+	assert.NoError(t, err)
+
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the replicas were set to 5
+	assert.Equal(t, int32(5), *updatedStatefulSet.Spec.Replicas)
 }
 
+// TestGetCurrentReplicas tests getting the current replica count for a StatefulSet
 func TestGetCurrentReplicas(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	replicas, err := manager.GetCurrentReplicas(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
-	assert.NoError(t, err)
-	assert.Equal(t, int32(0), replicas) // This will change once the real implementation is in place
-
-	// TODO: Add test setup to create a statefulset with known replica count
-}
-
-func TestWaitForReplicasReady(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
-	ctx := context.Background()
-
-	// Call the function
-	err := manager.WaitForReplicasReady(ctx, "test-statefulset", "test-namespace", 5)
-
-	// Assert
+	// Call the function to get current replicas
+	replicas, err := manager.GetCurrentReplicas(ctx, statefulset.Name, statefulset.Namespace)
 	assert.NoError(t, err)
 
-	// TODO: Add test setup to create a statefulset that becomes ready
+	// Assert that the correct replica count was returned
+	assert.Equal(t, int32(3), replicas)
 }
 
+// TestIsReady tests checking if a StatefulSet is ready
 func TestIsReady(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	ready, err := manager.IsReady(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
+	// Call the function to check if the StatefulSet is ready
+	ready, err := manager.IsReady(ctx, statefulset.Name, statefulset.Namespace)
 	assert.NoError(t, err)
-	assert.True(t, ready) // This will change once the real implementation is in place
 
-	// TODO: Add test setup to create statefulsets in different states
+	// Assert that the StatefulSet is ready
+	assert.True(t, ready)
 }
 
+// TestIsScaledDown tests checking if a StatefulSet is scaled down
 func TestIsScaledDown(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	scaledDown, err := manager.IsScaledDown(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
+	// Initially, the StatefulSet is not scaled down
+	scaledDown, err := manager.IsScaledDown(ctx, statefulset.Name, statefulset.Namespace)
 	assert.NoError(t, err)
-	assert.True(t, scaledDown) // This will change once the real implementation is in place
+	assert.False(t, scaledDown)
 
-	// TODO: Add test setup to create statefulsets in different states
-}
-
-func TestAddFluxAnnotation(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
-	ctx := context.Background()
-
-	// Call the function
-	err := manager.AddFluxAnnotation(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
+	// Scale down the StatefulSet
+	replicas := int32(0)
+	statefulset.Spec.Replicas = &replicas
+	err = manager.client.Update(ctx, statefulset)
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the annotation was added
-}
-
-func TestRemoveFluxAnnotation(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
-	ctx := context.Background()
-
-	// Call the function
-	err := manager.RemoveFluxAnnotation(ctx, "test-statefulset", "test-namespace")
-
-	// Assert
+	// Now the StatefulSet should be scaled down
+	scaledDown, err = manager.IsScaledDown(ctx, statefulset.Name, statefulset.Namespace)
 	assert.NoError(t, err)
-
-	// TODO: Add assertions to verify the annotation was removed
+	assert.True(t, scaledDown)
 }
 
+// TestAddAnnotation tests adding an annotation to a StatefulSet
 func TestAddAnnotation(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.AddAnnotation(ctx, "test-statefulset", "test-namespace", "test-key", "test-value")
-
-	// Assert
+	// Call the function to add an annotation
+	err := manager.AddAnnotation(ctx, statefulset.Name, statefulset.Namespace, "test-annotation-key", "test-annotation-value")
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the annotation was added
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the annotation was added
+	assert.Equal(t, "test-annotation-value", updatedStatefulSet.Annotations["test-annotation-key"])
 }
 
+// TestRemoveAnnotation tests removing an annotation from a StatefulSet
 func TestRemoveAnnotation(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.RemoveAnnotation(ctx, "test-statefulset", "test-namespace", "test-key")
-
-	// Assert
+	// First add an annotation
+	statefulset.Annotations["test-remove-key"] = "test-remove-value"
+	err := manager.client.Update(ctx, statefulset)
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the annotation was removed
+	// Call the function to remove the annotation
+	err = manager.RemoveAnnotation(ctx, statefulset.Name, statefulset.Namespace, "test-remove-key")
+	assert.NoError(t, err)
+
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the annotation was removed
+	_, exists := updatedStatefulSet.Annotations["test-remove-key"]
+	assert.False(t, exists)
 }
 
+// TestGetAnnotation tests getting an annotation from a StatefulSet
 func TestGetAnnotation(t *testing.T) {
-	// Setup
-	manager := setupTestManager()
+	manager, statefulset := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	value, exists, err := manager.GetAnnotation(ctx, "test-statefulset", "test-namespace", "test-key")
-
-	// Assert
+	// Call the function to get an existing annotation
+	value, exists, err := manager.GetAnnotation(ctx, statefulset.Name, statefulset.Namespace, "test-key")
 	assert.NoError(t, err)
-	assert.False(t, exists) // This will change once the real implementation is in place
-	assert.Equal(t, "", value)
+	assert.True(t, exists)
+	assert.Equal(t, "test-value", value)
 
-	// TODO: Add test setup to create statefulsets with annotations
+	// Call the function to get a non-existent annotation
+	value, exists, err = manager.GetAnnotation(ctx, statefulset.Name, statefulset.Namespace, "non-existent-key")
+	assert.NoError(t, err)
+	assert.False(t, exists)
+	assert.Equal(t, "", value)
+}
+
+// TestAddFluxAnnotation tests adding the Flux reconcile annotation to a StatefulSet
+func TestAddFluxAnnotation(t *testing.T) {
+	manager, statefulset := setupTestManager()
+	ctx := context.Background()
+
+	// Call the function to add the Flux annotation
+	err := manager.AddFluxAnnotation(ctx, statefulset.Name, statefulset.Namespace)
+	assert.NoError(t, err)
+
+	// Get the updated StatefulSet
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the Flux annotation was added
+	assert.Equal(t, DisabledValue, updatedStatefulSet.Annotations[FluxReconcileAnnotation])
+}
+
+// TestRemoveFluxAnnotation tests removing the Flux reconcile annotation from a StatefulSet
+func TestRemoveFluxAnnotation(t *testing.T) {
+	manager, statefulset := setupTestManager()
+	ctx := context.Background()
+
+	// First add the Flux annotation
+	if statefulset.Annotations == nil {
+		statefulset.Annotations = make(map[string]string)
+	}
+	statefulset.Annotations[FluxReconcileAnnotation] = DisabledValue
+	err := manager.client.Update(ctx, statefulset)
+	assert.NoError(t, err)
+
+	// Verify the annotation was added
+	updatedStatefulSet := &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+	assert.Equal(t, DisabledValue, updatedStatefulSet.Annotations[FluxReconcileAnnotation])
+
+	// Call the function to remove the Flux annotation
+	err = manager.RemoveFluxAnnotation(ctx, statefulset.Name, statefulset.Namespace)
+	assert.NoError(t, err)
+
+	// Get the updated StatefulSet again
+	updatedStatefulSet = &appsv1.StatefulSet{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: statefulset.Name, Namespace: statefulset.Namespace}, updatedStatefulSet)
+	assert.NoError(t, err)
+
+	// Assert that the Flux annotation was removed
+	_, exists := updatedStatefulSet.Annotations[FluxReconcileAnnotation]
+	assert.False(t, exists)
+}
+
+// TestWaitForReplicasReady tests waiting for all replicas of a StatefulSet to be ready
+func TestWaitForReplicasReady(t *testing.T) {
+	manager, statefulset := setupTestManager()
+	ctx := context.Background()
+
+	// Call the function to wait for replicas to be ready
+	// Since our mock StatefulSet is already ready, this should return immediately
+	err := manager.WaitForReplicasReady(ctx, statefulset.Name, statefulset.Namespace, 1)
+	assert.NoError(t, err)
 }

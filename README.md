@@ -1,6 +1,131 @@
 # Failover Operator
 
-A Kubernetes operator for managing site failover with volume replication and workload management.
+The Failover Operator is a Kubernetes operator that manages the failover process between multiple clusters. It coordinates the failover of various components, including:
+
+- Volume Replications
+- StatefulSets
+- CronJobs
+- Ingresses
+- DynamoDB (for coordination)
+
+## Project Structure
+
+The project is organized as follows:
+
+```
+internal/
+  controller/
+    volumereplications/  # Manages volume replication
+      manager.go         # Implementation
+      manager_test.go    # Tests
+    statefulsets/        # Manages StatefulSets
+      manager.go         # Implementation
+      manager_test.go    # Tests
+    cronjobs/            # Manages CronJobs
+      manager.go         # Implementation
+      manager_test.go    # Tests
+    ingresses/           # Manages Ingresses
+      manager.go         # Implementation
+      manager_test.go    # Tests
+    dynamodb/            # Manages DynamoDB coordination
+      manager.go         # Implementation
+      manager_test.go    # Tests
+```
+
+## Component Managers
+
+Each component manager is responsible for managing a specific type of resource during failover:
+
+### VolumeReplications Manager
+
+The VolumeReplications manager handles the replication state of volumes. During failover:
+- The PRIMARY cluster's volumes are set to "primary" (read-write)
+- The STANDBY cluster's volumes are set to "secondary" (read-only)
+
+### StatefulSets Manager
+
+The StatefulSets manager handles scaling StatefulSets. During failover:
+- The PRIMARY cluster scales up StatefulSets to the desired replica count
+- The STANDBY cluster scales down StatefulSets to 0 replicas
+
+### CronJobs Manager
+
+The CronJobs manager handles suspending and resuming CronJobs. During failover:
+- The PRIMARY cluster resumes CronJobs to allow them to run
+- The STANDBY cluster suspends CronJobs to prevent them from running
+
+### Ingresses Manager
+
+The Ingresses manager handles updating Ingress resources. During failover:
+- The PRIMARY cluster enables DNS controller annotations
+- The STANDBY cluster disables DNS controller annotations
+
+### DynamoDB Manager
+
+The DynamoDB manager handles coordination between clusters. It:
+- Tracks which cluster is PRIMARY for each FailoverGroup
+- Provides distributed locking to prevent concurrent failovers
+- Records failover history for auditing
+- Tracks operator heartbeats to detect when a cluster is unhealthy
+
+## Implementation Guide
+
+This codebase currently contains stubs for all the required functionality. To implement the actual functionality:
+
+1. Start with the DynamoDB manager to implement coordination features:
+   - Implement the AWS SDK client integration
+   - Implement the record operations (GetOwnership, UpdateOwnership, etc.)
+   - Implement the locking operations (AcquireLock, ReleaseLock)
+   - Implement the heartbeat operations (UpdateHeartbeat, GetHeartbeats)
+
+2. Implement the individual component managers:
+   - VolumeReplications: Implement the CR interactions using the unstructured client
+   - StatefulSets: Implement the scaling operations
+   - CronJobs: Implement the suspend/resume operations
+   - Ingresses: Implement the annotation and DNS operations
+
+3. Update the tests to use actual mock expectations instead of placeholder assertions
+
+4. Implement the controller that uses these managers to coordinate failover
+
+## Running the Tests
+
+The tests are currently placeholders and will pass even without implementation. Once you implement the actual functionality, you'll need to update the tests to properly verify the behavior.
+
+```bash
+go test ./internal/controller/...
+```
+
+## Linter Errors
+
+There may be linter errors in the test files due to missing imports and unimplemented functions. These will be resolved once the actual implementations are completed.
+
+## Failover Process
+
+The failover process will work as follows:
+
+1. An operator instance detects that a PRIMARY cluster is unhealthy (no heartbeats)
+2. The operator acquires a lock for the FailoverGroup
+3. The operator updates the ownership record to designate a new PRIMARY cluster
+4. The operator in the new PRIMARY cluster:
+   - Sets its VolumeReplications to "primary"
+   - Scales up its StatefulSets
+   - Resumes its CronJobs
+   - Enables DNS controller annotations on its Ingresses
+5. The operator in the old PRIMARY cluster (when it recovers):
+   - Sets its VolumeReplications to "secondary"
+   - Scales down its StatefulSets
+   - Suspends its CronJobs
+   - Disables DNS controller annotations on its Ingresses
+6. The lock is released
+7. The failover event is recorded in history
+
+## Next Steps
+
+1. Implement the AWS SDK client integration for DynamoDB
+2. Complete the implementation of each manager
+3. Develop the controller that uses these managers
+4. Test the failover process end-to-end
 
 ## Overview
 

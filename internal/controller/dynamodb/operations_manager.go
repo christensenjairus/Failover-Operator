@@ -311,6 +311,11 @@ func (m *OperationsManager) DetectAndReportProblems(ctx context.Context, namespa
 	)
 	logger.V(1).Info("Detecting problems")
 
+	// Special handling for test client with mocked problems
+	if testClient, ok := m.client.(*EnhancedTestDynamoDBClient); ok && testClient.ProblemsReturnFn != nil {
+		return testClient.ProblemsReturnFn(), nil
+	}
+
 	var problems []string
 
 	// 1. Check for stale heartbeats

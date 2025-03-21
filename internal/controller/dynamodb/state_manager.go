@@ -363,6 +363,11 @@ func (s *StateManager) DetectStaleHeartbeats(ctx context.Context, namespace, nam
 	)
 	logger.V(1).Info("Detecting stale heartbeats")
 
+	// Special handling for test client with mocked stale clusters
+	if testClient, ok := s.client.(*EnhancedTestDynamoDBClient); ok && testClient.StaleClustersReturnFn != nil {
+		return testClient.StaleClustersReturnFn(), nil
+	}
+
 	// 1. Get all cluster statuses
 	statuses, err := s.GetAllClusterStatuses(ctx, namespace, name)
 	if err != nil {

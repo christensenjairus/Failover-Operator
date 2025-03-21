@@ -23,9 +23,13 @@ import (
 	dynamo "github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
 )
 
-// TestDynamoDBClient is a mock implementation of the DynamoDB client interface for tests
+// TestDynamoDBClient extends the enhanced mock from the dynamodb package
+// for use in controller tests
 type TestDynamoDBClient struct {
 	dynamo.DynamoDBClient
+
+	// Custom fields for controller tests
+	GetGroupConfigFunc func(ctx context.Context, namespace, name string) (*dynamo.GroupConfigRecord, error)
 }
 
 func (m *TestDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {

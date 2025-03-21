@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestDynamoDBClient is a mock implementation of DynamoDBClient for testing
-type TestDynamoDBClient struct {
+// MockDynamoDBClient is a mock implementation of DynamoDBClient for testing
+type MockDynamoDBClient struct {
 	GetItemFunc            func(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItemFunc            func(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItemFunc         func(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
@@ -19,49 +19,49 @@ type TestDynamoDBClient struct {
 	TransactWriteItemsFunc func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 }
 
-func (m *TestDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+func (m *MockDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	if m.GetItemFunc != nil {
 		return m.GetItemFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.GetItemOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+func (m *MockDynamoDBClient) PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	if m.PutItemFunc != nil {
 		return m.PutItemFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+func (m *MockDynamoDBClient) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	if m.UpdateItemFunc != nil {
 		return m.UpdateItemFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.UpdateItemOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+func (m *MockDynamoDBClient) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
 	if m.DeleteItemFunc != nil {
 		return m.DeleteItemFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+func (m *MockDynamoDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if m.QueryFunc != nil {
 		return m.QueryFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.QueryOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+func (m *MockDynamoDBClient) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
 	if m.ScanFunc != nil {
 		return m.ScanFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.ScanOutput{}, nil
 }
 
-func (m *TestDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+func (m *MockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
 	if m.TransactWriteItemsFunc != nil {
 		return m.TransactWriteItemsFunc(ctx, params, optFns...)
 	}
@@ -82,7 +82,7 @@ func (m *MockStateManager) GetGroupConfig(ctx context.Context, namespace, name s
 }
 
 func TestNewDynamoDBService(t *testing.T) {
-	client := &TestDynamoDBClient{}
+	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	assert.NotNil(t, service)
@@ -91,7 +91,7 @@ func TestNewDynamoDBService(t *testing.T) {
 }
 
 func TestStateManager_GetGroupState(t *testing.T) {
-	client := &TestDynamoDBClient{}
+	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	state, err := service.State.GetGroupState(context.Background(), "test-namespace", "test-group")
@@ -104,7 +104,7 @@ func TestStateManager_GetGroupState(t *testing.T) {
 func TestOperationsManager_ExecuteFailover(t *testing.T) {
 	// This simpler test just verifies that non-matching source/target clusters
 	// are rejected correctly
-	client := &TestDynamoDBClient{}
+	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// When source and target are the same, should return error
@@ -149,7 +149,7 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 		},
 	}
 
-	client := &TestDynamoDBClient{}
+	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// Test marshaling by calling UpdateClusterStatus
@@ -166,7 +166,7 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 }
 
 func TestGlobalSecondaryIndex(t *testing.T) {
-	client := &TestDynamoDBClient{}
+	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// Get a config record to check GSI fields

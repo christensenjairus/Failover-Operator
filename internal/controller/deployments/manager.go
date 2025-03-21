@@ -2,6 +2,7 @@ package deployments
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -260,4 +261,94 @@ func (m *Manager) GetAnnotation(ctx context.Context, name, namespace, annotation
 	// Get the annotation value
 	value, exists := deployment.Annotations[annotationKey]
 	return value, exists, nil
+}
+
+// ProcessDeployments processes a list of Deployments
+// Scales them up or down based on the active parameter
+func (m *Manager) ProcessDeployments(ctx context.Context, namespace string, names []string, active bool, targetReplicas int32) {
+	logger := log.FromContext(ctx).WithValues("namespace", namespace)
+	logger.Info("Processing Deployments", "count", len(names), "active", active, "targetReplicas", targetReplicas)
+
+	for _, name := range names {
+		if active {
+			if err := m.ScaleUp(ctx, name, namespace, targetReplicas); err != nil {
+				logger.Error(err, "Failed to scale up Deployment", "deployment", name)
+			}
+		} else {
+			if err := m.ScaleDown(ctx, name, namespace); err != nil {
+				logger.Error(err, "Failed to scale down Deployment", "deployment", name)
+			}
+		}
+	}
+}
+
+// WaitForAllDeploymentsState waits for all Deployments to reach a desired state
+// If expectScaledDown is true, waits for all to be scaled down; otherwise waits for all to be ready
+func (m *Manager) WaitForAllDeploymentsState(ctx context.Context, namespace string, names []string, expectScaledDown bool, timeout time.Duration) error {
+	logger := log.FromContext(ctx).WithValues("namespace", namespace)
+	state := "ready"
+	if expectScaledDown {
+		state = "scaled down"
+	}
+	logger.Info("Waiting for all Deployments to be "+state, "count", len(names), "timeout", timeout)
+
+	errChan := make(chan error, len(names))
+	doneChan := make(chan bool, len(names))
+
+	// Process each Deployment concurrently
+	for _, name := range names {
+		go func(name string) {
+			err := wait.PollImmediate(2*time.Second, timeout, func() (bool, error) {
+				var isInDesiredState bool
+				var err error
+
+				if expectScaledDown {
+					isInDesiredState, err = m.IsScaledDown(ctx, name, namespace)
+				} else {
+					isInDesiredState, err = m.IsReady(ctx, name, namespace)
+				}
+
+				if err != nil {
+					logger.Error(err, "Failed to check Deployment state", "deployment", name)
+					return false, nil // Continue polling
+				}
+
+				if isInDesiredState {
+					logger.V(1).Info("Deployment reached desired state", "deployment", name, "state", state)
+					return true, nil
+				}
+
+				logger.V(1).Info("Deployment not yet in desired state", "deployment", name, "state", state)
+				return false, nil
+			})
+
+			if err != nil {
+				errChan <- fmt.Errorf("timeout waiting for Deployment %s to be %s", name, state)
+			} else {
+				doneChan <- true
+			}
+		}(name)
+	}
+
+	// Wait for all goroutines to complete
+	var errs []error
+	for i := 0; i < len(names); i++ {
+		select {
+		case err := <-errChan:
+			errs = append(errs, err)
+		case <-doneChan:
+			// Deployment reached desired state
+		}
+	}
+
+	if len(errs) > 0 {
+		errMsg := fmt.Sprintf("%d Deployments failed to reach %s state:", len(errs), state)
+		for _, err := range errs {
+			errMsg += "\n- " + err.Error()
+		}
+		return fmt.Errorf(errMsg)
+	}
+
+	logger.Info("All Deployments successfully " + state)
+	return nil
 }

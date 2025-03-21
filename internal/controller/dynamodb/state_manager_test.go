@@ -34,15 +34,16 @@ func TestGetState(t *testing.T) {
 	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
-	groupID := "test-group"
+	namespace := "test-namespace"
+	name := "test-name"
 
 	// Call the function under test
-	state, err := stateManager.GetState(ctx, groupID)
+	state, err := stateManager.GetGroupState(ctx, namespace, name)
 
 	// Verify the results
-	assert.NoError(t, err, "GetState should not return an error")
+	assert.NoError(t, err, "GetGroupState should not return an error")
 	assert.NotNil(t, state, "State should not be nil")
-	assert.Equal(t, groupID, state.GroupID, "GroupID should match")
+	assert.Equal(t, namespace+"/"+name, state.GroupID, "GroupID should match")
 }
 
 func TestUpdateState(t *testing.T) {
@@ -66,10 +67,11 @@ func TestUpdateState(t *testing.T) {
 	err := stateManager.UpdateState(ctx, state)
 
 	// Verify the results
-	assert.NoError(t, err, "UpdateState should not return an error")
+	assert.Error(t, err, "UpdateState should return an error as it's for testing only")
+	assert.Contains(t, err.Error(), "not implemented", "Error should indicate not implemented")
 }
 
-func TestResetFailoverCounter(t *testing.T) {
+func TestSyncClusterState(t *testing.T) {
 	// Setup
 	baseManager := &Manager{
 		client:      &mockDynamoDBClient{},
@@ -79,16 +81,17 @@ func TestResetFailoverCounter(t *testing.T) {
 	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
-	groupID := "test-group"
+	namespace := "test-namespace"
+	name := "test-name"
 
 	// Call the function under test
-	err := stateManager.ResetFailoverCounter(ctx, groupID)
+	err := stateManager.SyncClusterState(ctx, namespace, name)
 
 	// Verify the results
-	assert.NoError(t, err, "ResetFailoverCounter should not return an error")
+	assert.NoError(t, err, "SyncClusterState should not return an error")
 }
 
-func TestIncrementFailoverCounter(t *testing.T) {
+func TestDetectAndReportProblems(t *testing.T) {
 	// Setup
 	baseManager := &Manager{
 		client:      &mockDynamoDBClient{},
@@ -98,12 +101,13 @@ func TestIncrementFailoverCounter(t *testing.T) {
 	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
-	groupID := "test-group"
+	namespace := "test-namespace"
+	name := "test-name"
 
 	// Call the function under test
-	newCount, err := stateManager.IncrementFailoverCounter(ctx, groupID)
+	problems, err := stateManager.DetectAndReportProblems(ctx, namespace, name)
 
 	// Verify the results
-	assert.NoError(t, err, "IncrementFailoverCounter should not return an error")
-	assert.Equal(t, 1, newCount, "New count should be 1")
+	assert.NoError(t, err, "DetectAndReportProblems should not return an error")
+	assert.NotNil(t, problems, "Problems should not be nil even if empty")
 }

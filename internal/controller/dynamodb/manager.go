@@ -48,23 +48,33 @@ func NewManager(client DynamoDBClient, tableName, clusterName, operatorID string
 	}
 }
 
-// getItemKey creates a composite key for DynamoDB items
-func (m *Manager) getItemKey(itemType string, id string) string {
-	return fmt.Sprintf("%s#%s#%s", m.clusterName, itemType, id)
+// getGroupPK creates a primary key for a FailoverGroup
+func (m *Manager) getGroupPK(namespace, name string) string {
+	return fmt.Sprintf("GROUP#%s#%s#%s", m.operatorID, namespace, name)
+}
+
+// getClusterSK creates a sort key for a cluster status record
+func (m *Manager) getClusterSK(clusterName string) string {
+	return fmt.Sprintf("CLUSTER#%s", clusterName)
+}
+
+// getHistorySK creates a sort key for a history record
+func (m *Manager) getHistorySK(timestamp time.Time) string {
+	return fmt.Sprintf("HISTORY#%s", timestamp.Format(time.RFC3339))
 }
 
 // Key Workflow Scenarios
 
 // 1. Normal Operation Workflow:
-// - Each cluster periodically calls UpdateHeartbeat to report its health
-// - Each cluster periodically calls SyncFailoverGroupStatus to update its view of the global state
-// - If a cluster's state changes, it calls UpdateFailoverGroupStatus to report the change
+// - Each cluster periodically calls UpdateClusterStatus to report its health
+// - Each cluster periodically calls GetCurrentGroupConfig to update its view of the global state
+// - If a cluster's state changes, it calls UpdateClusterStatus to report the change
 
 // 2. Planned Failover Workflow:
 // - Cluster initiating failover calls AcquireLock to obtain exclusive access
 // - Initiator verifies preconditions (replication status, component health, etc.)
 // - If preconditions met, calls ExecuteFailover to change ownership
-// - All clusters detect the change during their next SyncFailoverGroupStatus
+// - All clusters detect the change during their next GetCurrentGroupConfig
 // - PRIMARY cluster transitions to STANDBY, STANDBY cluster transitions to PRIMARY
 // - Lock is automatically released as part of ExecuteFailover transaction
 

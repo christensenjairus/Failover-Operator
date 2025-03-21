@@ -8,20 +8,17 @@ import (
 type RecordType string
 
 const (
-	// RecordTypeOwnership represents a record that tracks which cluster owns a FailoverGroup
-	RecordTypeOwnership RecordType = "OWNERSHIP"
+	// RecordTypeGroupConfig represents a record that stores ownership and configuration for a FailoverGroup
+	RecordTypeGroupConfig RecordType = "CONFIG"
 
-	// RecordTypeHeartbeat represents a record that tracks heartbeats from operator instances
-	RecordTypeHeartbeat RecordType = "HEARTBEAT"
+	// RecordTypeClusterStatus represents a record that tracks status and heartbeats from clusters
+	RecordTypeClusterStatus RecordType = "CLUSTER"
 
 	// RecordTypeLock represents a record used for distributed locking during failover operations
 	RecordTypeLock RecordType = "LOCK"
 
-	// RecordTypeConfig represents a record that stores configuration for a FailoverGroup
-	RecordTypeConfig RecordType = "CONFIG"
-
-	// RecordTypeFailoverHistory represents a record that stores the history of failover events
-	RecordTypeFailoverHistory RecordType = "FAILOVER_HISTORY"
+	// RecordTypeHistory represents a record that stores the history of failover events
+	RecordTypeHistory RecordType = "HISTORY"
 )
 
 // TransactionType defines the types of transactions that can be executed
@@ -64,38 +61,43 @@ const (
 	StateFailback = "FAILBACK" // Transitioning from STANDBY to PRIMARY
 )
 
-// OwnershipData represents the data structure for tracking ownership of a FailoverGroup
-type OwnershipData struct {
-	// GroupID is the unique identifier for the FailoverGroup
-	GroupID string
-
-	// CurrentOwner is the name of the cluster that currently owns the FailoverGroup
-	CurrentOwner string
-
-	// PreviousOwner is the name of the cluster that previously owned the FailoverGroup
-	PreviousOwner string
-
-	// LastUpdated is the timestamp when the record was last updated
-	LastUpdated time.Time
+// GroupConfigRecord represents configuration and ownership settings for a FailoverGroup
+// Combines the previous OwnershipRecord and ConfigRecord
+type GroupConfigRecord struct {
+	PK                string             `json:"pk"`                         // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK                string             `json:"sk"`                         // Sort Key: "CONFIG"
+	OperatorID        string             `json:"operatorID"`                 // ID of the operator instance
+	GroupNamespace    string             `json:"groupNamespace"`             // Kubernetes namespace of the FailoverGroup
+	GroupName         string             `json:"groupName"`                  // Name of the FailoverGroup
+	OwnerCluster      string             `json:"ownerCluster"`               // Name of the cluster that currently owns this group
+	PreviousOwner     string             `json:"previousOwner"`              // Name of the cluster that previously owned this group
+	Version           int                `json:"version"`                    // Used for optimistic concurrency control
+	Timeouts          TimeoutSettings    `json:"timeouts"`                   // Timeout settings for automatic failovers
+	HeartbeatInterval string             `json:"heartbeatInterval"`          // How often heartbeats should be updated
+	LastUpdated       time.Time          `json:"lastUpdated"`                // When the config was last updated
+	LastFailover      *FailoverReference `json:"lastFailover,omitempty"`     // Reference to the last failover operation
+	Suspended         bool               `json:"suspended"`                  // Whether automatic failovers are suspended
+	SuspensionReason  string             `json:"suspensionReason,omitempty"` // Why automatic failovers are suspended
 }
 
-// HeartbeatData represents the data structure for operator heartbeats
-type HeartbeatData struct {
-	// ClusterName is the name of the cluster sending the heartbeat
-	ClusterName string
-
-	// OperatorID is the unique identifier for the operator instance
-	OperatorID string
-
-	// LastUpdated is the timestamp when the record was last updated
-	LastUpdated time.Time
+// ClusterStatusRecord represents the status and heartbeat of a cluster for a FailoverGroup
+type ClusterStatusRecord struct {
+	PK             string                     `json:"pk"`             // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK             string                     `json:"sk"`             // Sort Key: "CLUSTER#{clusterName}"
+	OperatorID     string                     `json:"operatorID"`     // ID of the operator instance
+	GroupNamespace string                     `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
+	GroupName      string                     `json:"groupName"`      // Name of the FailoverGroup
+	ClusterName    string                     `json:"clusterName"`    // Name of the cluster this status is for
+	Health         string                     `json:"health"`         // Overall health: OK, DEGRADED, ERROR
+	State          string                     `json:"state"`          // State: PRIMARY, STANDBY, FAILOVER, FAILBACK
+	LastHeartbeat  time.Time                  `json:"lastHeartbeat"`  // When the heartbeat was last updated
+	Components     map[string]ComponentStatus `json:"components"`     // Status of individual components
 }
 
 // LockRecord represents a distributed lock for a FailoverGroup
-// Used to ensure only one cluster can perform operations on a FailoverGroup at a time
 type LockRecord struct {
-	GroupKey       string    `json:"groupKey"`       // Composite key: {operatorID}:{namespace}:{name}
-	RecordType     string    `json:"recordType"`     // Always "LOCK"
+	PK             string    `json:"pk"`             // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK             string    `json:"sk"`             // Sort Key: "LOCK"
 	OperatorID     string    `json:"operatorID"`     // ID of the operator instance
 	GroupNamespace string    `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
 	GroupName      string    `json:"groupName"`      // Name of the FailoverGroup
@@ -106,25 +108,10 @@ type LockRecord struct {
 	LeaseToken     string    `json:"leaseToken"`     // Unique token to validate lock ownership
 }
 
-// ConfigRecord represents configuration settings for a FailoverGroup
-// Stores timeout settings, heartbeat intervals, and other configuration options
-type ConfigRecord struct {
-	GroupKey          string          `json:"groupKey"`          // Composite key: {operatorID}:{namespace}:{name}
-	RecordType        string          `json:"recordType"`        // Always "CONFIG"
-	OperatorID        string          `json:"operatorID"`        // ID of the operator instance
-	GroupNamespace    string          `json:"groupNamespace"`    // Kubernetes namespace of the FailoverGroup
-	GroupName         string          `json:"groupName"`         // Name of the FailoverGroup
-	Version           int             `json:"version"`           // Used for optimistic concurrency control
-	Timeouts          TimeoutSettings `json:"timeouts"`          // Timeout settings for automatic failovers
-	HeartbeatInterval string          `json:"heartbeatInterval"` // How often heartbeats should be updated
-	LastUpdated       time.Time       `json:"lastUpdated"`       // When the config was last updated
-}
-
-// FailoverHistoryRecord represents a record of a failover operation
-// Tracks the details of each failover for auditing and troubleshooting
-type FailoverHistoryRecord struct {
-	GroupKey       string           `json:"groupKey"`          // Composite key: {operatorID}:{namespace}:{name}
-	RecordType     string           `json:"recordType"`        // "FAILOVER_HISTORY:{timestamp}"
+// HistoryRecord represents a record of a failover operation
+type HistoryRecord struct {
+	PK             string           `json:"pk"`                // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK             string           `json:"sk"`                // Sort Key: "HISTORY#{timestamp}"
 	OperatorID     string           `json:"operatorID"`        // ID of the operator instance
 	GroupNamespace string           `json:"groupNamespace"`    // Kubernetes namespace of the FailoverGroup
 	GroupName      string           `json:"groupName"`         // Name of the FailoverGroup
@@ -139,14 +126,12 @@ type FailoverHistoryRecord struct {
 }
 
 // ComponentStatus represents the health status of a component
-// Used in HeartbeatRecord to track individual component health
 type ComponentStatus struct {
-	Name   string `json:"name"`   // Name of the component (database, cache, web, etc.)
-	Health string `json:"health"` // Health status: OK, DEGRADED, ERROR
+	Health  string `json:"health"`  // Health status: OK, DEGRADED, ERROR
+	Message string `json:"message"` // Optional message with details about the health status
 }
 
 // FailoverReference is a reference to a Failover resource
-// Used in OwnershipRecord to reference the last failover operation
 type FailoverReference struct {
 	Name      string    `json:"name"`      // Name of the Failover resource
 	Namespace string    `json:"namespace"` // Namespace of the Failover resource
@@ -154,14 +139,12 @@ type FailoverReference struct {
 }
 
 // FailoverMetrics contains performance metrics for failover operations
-// Used for monitoring and optimization
 type FailoverMetrics struct {
 	TotalDowntimeSeconds     int64 `json:"totalDowntimeSeconds"`     // Total application downtime
 	TotalFailoverTimeSeconds int64 `json:"totalFailoverTimeSeconds"` // Total operation time
 }
 
 // TimeoutSettings defines various timeout settings for a FailoverGroup
-// Used to control automatic failover behavior
 type TimeoutSettings struct {
 	TransitoryState  string `json:"transitoryState"`  // Max time in FAILOVER/FAILBACK states
 	UnhealthyPrimary string `json:"unhealthyPrimary"` // Time PRIMARY can be unhealthy

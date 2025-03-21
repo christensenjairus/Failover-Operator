@@ -33,7 +33,6 @@ import (
 	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/helmreleases"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/ingresses"
-	"github.com/christensenjairus/Failover-Operator/internal/controller/jobs"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/kustomizations"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/statefulsets"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/virtualservices"
@@ -52,7 +51,6 @@ type FailoverReconciler struct {
 	DeploymentsManager        *deployments.Manager
 	StatefulSetsManager       *statefulsets.Manager
 	CronJobsManager           *cronjobs.Manager
-	JobsManager               *jobs.Manager
 	KustomizationsManager     *kustomizations.Manager
 	HelmReleasesManager       *helmreleases.Manager
 	VirtualServicesManager    *virtualservices.Manager
@@ -126,7 +124,6 @@ func (r *FailoverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.DeploymentsManager = deployments.NewManager(r.Client)
 	r.StatefulSetsManager = statefulsets.NewManager(r.Client)
 	r.CronJobsManager = cronjobs.NewManager(r.Client)
-	r.JobsManager = jobs.NewManager(r.Client)
 	r.KustomizationsManager = kustomizations.NewManager(r.Client)
 	r.HelmReleasesManager = helmreleases.NewManager(r.Client)
 	r.VirtualServicesManager = virtualservices.NewManager(r.Client)

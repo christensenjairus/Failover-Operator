@@ -860,16 +860,17 @@ func (m *OperationsManager) RemoveClusterStatus(ctx context.Context, namespace, 
 	)
 	logger.Info("Removing cluster status from DynamoDB")
 
-	// Calculate the key for the status item
-	key := map[string]types.AttributeValue{
-		"PK": &types.AttributeValueMemberS{Value: fmt.Sprintf("FG#%s#%s", namespace, name)},
-		"SK": &types.AttributeValueMemberS{Value: fmt.Sprintf("STATUS#%s", clusterName)},
-	}
+	// Calculate the key for the status item using the same methods as other operations
+	pk := m.getGroupPK(namespace, name)
+	sk := m.getClusterSK(clusterName)
 
 	// Delete the item
 	_, err := m.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(m.tableName),
-		Key:       key,
+		TableName: &m.tableName,
+		Key: map[string]types.AttributeValue{
+			"PK": &types.AttributeValueMemberS{Value: pk},
+			"SK": &types.AttributeValueMemberS{Value: sk},
+		},
 	})
 
 	if err != nil {

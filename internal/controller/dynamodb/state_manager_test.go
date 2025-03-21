@@ -355,3 +355,177 @@ func TestDetectStaleHeartbeats(t *testing.T) {
 	assert.NotNil(t, staleClusters, "StaleClusters should not be nil even if empty")
 	assert.Contains(t, staleClusters, "stale-cluster-1", "Should include the mocked stale cluster")
 }
+
+// TestDeleteGroupConfig verifies the DeleteGroupConfig functionality
+func TestDeleteGroupConfig(t *testing.T) {
+	// Create a mock client
+	mockClient := &MockDynamoDBClient{
+		DeleteItemFunc: func(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+			// Verify the input parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, params.Key["PK"].(*types.AttributeValueMemberS).Value, "default")
+			assert.Contains(t, params.Key["PK"].(*types.AttributeValueMemberS).Value, "test-group")
+			assert.Equal(t, "CONFIG", params.Key["SK"].(*types.AttributeValueMemberS).Value)
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}
+
+	// Create a base manager with the mock client
+	manager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+
+	// Set up test data
+	namespace := "default"
+	name := "test-group"
+
+	// Call the function
+	ctx := context.Background()
+	err := manager.DeleteGroupConfig(ctx, namespace, name)
+
+	// Verify results
+	assert.NoError(t, err)
+}
+
+// TestDeleteAllHistoryRecords verifies the DeleteAllHistoryRecords functionality
+func TestDeleteAllHistoryRecords(t *testing.T) {
+	// Create a mock client with expected calls
+	mockClient := &MockDynamoDBClient{
+		QueryFunc: func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+			// Verify query parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, *params.KeyConditionExpression, "begins_with(SK, :sk_prefix)")
+
+			// Return mock history records
+			return &dynamodb.QueryOutput{
+				Items: []map[string]types.AttributeValue{
+					{
+						"PK": &types.AttributeValueMemberS{Value: "GROUP#test-operator#default#test-group"},
+						"SK": &types.AttributeValueMemberS{Value: "HISTORY#20230101120000"},
+					},
+					{
+						"PK": &types.AttributeValueMemberS{Value: "GROUP#test-operator#default#test-group"},
+						"SK": &types.AttributeValueMemberS{Value: "HISTORY#20230101120001"},
+					},
+				},
+			}, nil
+		},
+		DeleteItemFunc: func(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+			// Verify delete parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, params.Key["PK"].(*types.AttributeValueMemberS).Value, "GROUP#test-operator#default#test-group")
+			assert.Contains(t, params.Key["SK"].(*types.AttributeValueMemberS).Value, "HISTORY#")
+
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}
+
+	// Create a base manager with the mock client
+	manager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+
+	// Set up test data
+	namespace := "default"
+	name := "test-group"
+
+	// Call the function
+	ctx := context.Background()
+	err := manager.DeleteAllHistoryRecords(ctx, namespace, name)
+
+	// Verify results
+	assert.NoError(t, err)
+}
+
+// TestDeleteAllClusterStatuses verifies the DeleteAllClusterStatuses functionality
+func TestDeleteAllClusterStatuses(t *testing.T) {
+	// Create a mock client with expected calls
+	mockClient := &MockDynamoDBClient{
+		QueryFunc: func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+			// Verify query parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, *params.KeyConditionExpression, "begins_with(SK, :sk_prefix)")
+
+			// Return mock cluster status records
+			return &dynamodb.QueryOutput{
+				Items: []map[string]types.AttributeValue{
+					{
+						"PK": &types.AttributeValueMemberS{Value: "GROUP#test-operator#default#test-group"},
+						"SK": &types.AttributeValueMemberS{Value: "CLUSTER#cluster1"},
+					},
+					{
+						"PK": &types.AttributeValueMemberS{Value: "GROUP#test-operator#default#test-group"},
+						"SK": &types.AttributeValueMemberS{Value: "CLUSTER#cluster2"},
+					},
+				},
+			}, nil
+		},
+		DeleteItemFunc: func(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+			// Verify delete parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, params.Key["PK"].(*types.AttributeValueMemberS).Value, "GROUP#test-operator#default#test-group")
+			assert.Contains(t, params.Key["SK"].(*types.AttributeValueMemberS).Value, "CLUSTER#")
+
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}
+
+	// Create a base manager with the mock client
+	manager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+
+	// Set up test data
+	namespace := "default"
+	name := "test-group"
+
+	// Call the function
+	ctx := context.Background()
+	err := manager.DeleteAllClusterStatuses(ctx, namespace, name)
+
+	// Verify results
+	assert.NoError(t, err)
+}
+
+// TestDeleteLock verifies the DeleteLock functionality
+func TestDeleteLock(t *testing.T) {
+	// Create a mock client with expected calls
+	mockClient := &MockDynamoDBClient{
+		DeleteItemFunc: func(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+			// Verify the input parameters
+			assert.Equal(t, "test-table", *params.TableName)
+			assert.Contains(t, params.Key["PK"].(*types.AttributeValueMemberS).Value, "GROUP#test-operator#default#test-group")
+			assert.Equal(t, "LOCK", params.Key["SK"].(*types.AttributeValueMemberS).Value)
+
+			return &dynamodb.DeleteItemOutput{}, nil
+		},
+	}
+
+	// Create a base manager with the mock client
+	manager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+
+	// Set up test data
+	namespace := "default"
+	name := "test-group"
+
+	// Call the function
+	ctx := context.Background()
+	err := manager.DeleteLock(ctx, namespace, name)
+
+	// Verify results
+	assert.NoError(t, err)
+}

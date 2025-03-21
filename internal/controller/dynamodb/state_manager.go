@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -364,6 +365,226 @@ func (m *BaseManager) UpdateGroupConfig(ctx context.Context, config *GroupConfig
 	return nil
 }
 
+// DeleteGroupConfig removes the configuration for a FailoverGroup from DynamoDB
+// This is used during final cleanup when a FailoverGroup is deleted from all clusters
+func (m *BaseManager) DeleteGroupConfig(ctx context.Context, namespace, name string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Deleting group configuration")
+
+	pk := m.getGroupPK(namespace, name)
+	sk := "CONFIG"
+
+	// Create the DeleteItem input
+	input := &dynamodb.DeleteItemInput{
+		TableName: &m.tableName,
+		Key: map[string]types.AttributeValue{
+			"PK": &types.AttributeValueMemberS{Value: pk},
+			"SK": &types.AttributeValueMemberS{Value: sk},
+		},
+	}
+
+	// Execute the DeleteItem operation
+	_, err := m.client.DeleteItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to delete group config from DynamoDB: %w", err)
+	}
+
+	logger.Info("Successfully deleted group configuration",
+		"namespace", namespace,
+		"name", name)
+	return nil
+}
+
+// DeleteAllHistoryRecords removes all history records for a FailoverGroup from DynamoDB
+// This is used during final cleanup when a FailoverGroup is deleted from all clusters
+func (m *BaseManager) DeleteAllHistoryRecords(ctx context.Context, namespace, name string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Deleting all history records")
+
+	pk := m.getGroupPK(namespace, name)
+
+	// First, query to get all history records
+	input := &dynamodb.QueryInput{
+		TableName:              &m.tableName,
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk_prefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk":        &types.AttributeValueMemberS{Value: pk},
+			":sk_prefix": &types.AttributeValueMemberS{Value: "HISTORY#"},
+		},
+	}
+
+	// Execute the query
+	result, err := m.client.Query(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to query history records: %w", err)
+	}
+
+	// If there are no records, we're done
+	if len(result.Items) == 0 {
+		logger.Info("No history records found")
+		return nil
+	}
+
+	logger.Info("Deleting history records", "count", len(result.Items))
+
+	// Delete each history record
+	var deleteErr error
+	for _, item := range result.Items {
+		// Get the SK value
+		skValue := ""
+		if sk, ok := item["SK"]; ok {
+			if sv, ok := sk.(*types.AttributeValueMemberS); ok {
+				skValue = sv.Value
+			}
+		}
+
+		if skValue == "" {
+			logger.Error(nil, "History record has no SK value, skipping")
+			continue
+		}
+
+		// Delete the record
+		deleteInput := &dynamodb.DeleteItemInput{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: skValue},
+			},
+		}
+
+		if _, err := m.client.DeleteItem(ctx, deleteInput); err != nil {
+			logger.Error(err, "Failed to delete history record", "SK", skValue)
+			deleteErr = err
+		}
+	}
+
+	if deleteErr != nil {
+		return fmt.Errorf("failed to delete some history records: %w", deleteErr)
+	}
+
+	logger.Info("Successfully deleted all history records",
+		"namespace", namespace,
+		"name", name,
+		"count", len(result.Items))
+	return nil
+}
+
+// DeleteAllClusterStatuses removes all cluster status records for a FailoverGroup from DynamoDB
+// This is used during final cleanup when a FailoverGroup is deleted from all clusters
+func (m *BaseManager) DeleteAllClusterStatuses(ctx context.Context, namespace, name string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Deleting all cluster status records")
+
+	pk := m.getGroupPK(namespace, name)
+
+	// First, query to get all cluster status records
+	input := &dynamodb.QueryInput{
+		TableName:              &m.tableName,
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk_prefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk":        &types.AttributeValueMemberS{Value: pk},
+			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
+		},
+	}
+
+	// Execute the query
+	result, err := m.client.Query(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to query cluster status records: %w", err)
+	}
+
+	// If there are no records, we're done
+	if len(result.Items) == 0 {
+		logger.Info("No cluster status records found")
+		return nil
+	}
+
+	logger.Info("Deleting cluster status records", "count", len(result.Items))
+
+	// Delete each cluster status record
+	var deleteErr error
+	for _, item := range result.Items {
+		// Get the SK value
+		skValue := ""
+		if sk, ok := item["SK"]; ok {
+			if sv, ok := sk.(*types.AttributeValueMemberS); ok {
+				skValue = sv.Value
+			}
+		}
+
+		if skValue == "" {
+			logger.Error(nil, "Cluster status record has no SK value, skipping")
+			continue
+		}
+
+		// Delete the record
+		deleteInput := &dynamodb.DeleteItemInput{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: skValue},
+			},
+		}
+
+		if _, err := m.client.DeleteItem(ctx, deleteInput); err != nil {
+			logger.Error(err, "Failed to delete cluster status record", "SK", skValue)
+			deleteErr = err
+		}
+	}
+
+	if deleteErr != nil {
+		return fmt.Errorf("failed to delete some cluster status records: %w", deleteErr)
+	}
+
+	logger.Info("Successfully deleted all cluster status records",
+		"namespace", namespace,
+		"name", name,
+		"count", len(result.Items))
+	return nil
+}
+
+// DeleteLock removes the lock record for a FailoverGroup from DynamoDB
+// This is used during final cleanup when a FailoverGroup is deleted
+func (m *BaseManager) DeleteLock(ctx context.Context, namespace, name string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Deleting lock record")
+
+	pk := m.getGroupPK(namespace, name)
+	sk := "LOCK"
+
+	// Create the DeleteItem input
+	input := &dynamodb.DeleteItemInput{
+		TableName: &m.tableName,
+		Key: map[string]types.AttributeValue{
+			"PK": &types.AttributeValueMemberS{Value: pk},
+			"SK": &types.AttributeValueMemberS{Value: sk},
+		},
+	}
+
+	// Execute the DeleteItem operation
+	_, err := m.client.DeleteItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to delete lock record from DynamoDB: %w", err)
+	}
+
+	logger.Info("Successfully deleted lock record",
+		"namespace", namespace,
+		"name", name)
+	return nil
+}
+
 // GetClusterStatus retrieves the status of a cluster for a FailoverGroup
 func (m *BaseManager) GetClusterStatus(ctx context.Context, namespace, name, clusterName string) (*ClusterStatusRecord, error) {
 	logger := log.FromContext(ctx).WithValues(
@@ -575,10 +796,14 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 	)
 	logger.V(1).Info("Getting all cluster statuses")
 
+	// Create a map to store all the statuses
+	statuses := make(map[string]*ClusterStatusRecord)
+
+	// PART 1: Query using the primary key (PK/SK) for records created by this operator
 	pk := m.getGroupPK(namespace, name)
 
 	// Create the query input to find all records with matching PK and SK starting with CLUSTER#
-	input := &dynamodb.QueryInput{
+	primaryInput := &dynamodb.QueryInput{
 		TableName:              &m.tableName,
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk_prefix)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
@@ -588,97 +813,214 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 		ConsistentRead: aws.Bool(true), // Ensure we get the latest data
 	}
 
-	// Execute the query
-	result, err := m.client.Query(ctx, input)
+	// Execute the primary query
+	primaryResult, err := m.client.Query(ctx, primaryInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query cluster statuses: %w", err)
-	}
+		logger.Error(err, "Failed to query cluster statuses by primary key")
+		// Continue to the GSI query even if this fails
+	} else {
+		logger.Info("Found cluster records using primary key", "count", len(primaryResult.Items))
 
-	// Check if any items were found
-	if len(result.Items) == 0 {
-		logger.Info("No cluster records found in DynamoDB")
-		return make(map[string]*ClusterStatusRecord), nil
-	}
-
-	logger.Info("Found cluster records in DynamoDB", "count", len(result.Items))
-
-	// Process the results
-	statuses := make(map[string]*ClusterStatusRecord)
-	for _, item := range result.Items {
-		// Extract the cluster name from the SK
-		var clusterName string
-		if v, ok := item["clusterName"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				clusterName = sv.Value
+		// Process the primary query results
+		for _, item := range primaryResult.Items {
+			// Extract the cluster name from the item
+			var clusterName string
+			if v, ok := item["clusterName"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					clusterName = sv.Value
+				}
 			}
-		}
 
-		if clusterName == "" {
-			// Skip records without a cluster name
-			logger.Info("Skipping record without cluster name")
-			continue
-		}
+			if clusterName == "" {
+				// Skip records without a cluster name
+				logger.Info("Skipping record without cluster name")
+				continue
+			}
 
-		logger.Info("Processing cluster record", "clusterName", clusterName)
+			logger.V(1).Info("Processing cluster record", "clusterName", clusterName)
 
-		// Create a new status record
-		status := &ClusterStatusRecord{
-			PK:             pk,
-			SK:             m.getClusterSK(clusterName),
-			OperatorID:     m.operatorID,
-			GroupNamespace: namespace,
-			GroupName:      name,
-			ClusterName:    clusterName,
-			Health:         HealthOK,     // Default value
-			State:          StateStandby, // Default value
-			LastHeartbeat:  time.Now(),   // Default value
-		}
+			// Create a new status record
+			status := &ClusterStatusRecord{
+				PK:             pk,
+				SK:             m.getClusterSK(clusterName),
+				OperatorID:     m.operatorID,
+				GroupNamespace: namespace,
+				GroupName:      name,
+				ClusterName:    clusterName,
+				Health:         HealthOK,     // Default value
+				State:          StateStandby, // Default value
+				LastHeartbeat:  time.Now(),   // Default value
+			}
 
-		// Extract string fields
-		if v, ok := item["GSI1PK"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				status.GSI1PK = sv.Value
+			// Extract string fields
+			if v, ok := item["GSI1PK"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.GSI1PK = sv.Value
+				}
 			}
-		}
-		if v, ok := item["GSI1SK"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				status.GSI1SK = sv.Value
+			if v, ok := item["GSI1SK"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.GSI1SK = sv.Value
+				}
 			}
-		}
-		if v, ok := item["health"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				status.Health = sv.Value
+			if v, ok := item["health"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.Health = sv.Value
+				}
 			}
-		}
-		if v, ok := item["state"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				status.State = sv.Value
+			if v, ok := item["state"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.State = sv.Value
+				}
 			}
-		}
-		if v, ok := item["components"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				status.Components = sv.Value
+			if v, ok := item["components"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.Components = sv.Value
+				}
 			}
-		}
+			if v, ok := item["operatorID"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.OperatorID = sv.Value
+				}
+			}
 
-		// Extract time fields
-		if v, ok := item["lastHeartbeat"]; ok {
-			if sv, ok := v.(*types.AttributeValueMemberS); ok {
-				if sv.Value != "" {
-					if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
-						status.LastHeartbeat = t
-					} else {
-						logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
-							"clusterName", clusterName,
-							"timestamp", sv.Value)
-						// Keep default time.Now() value
+			// Extract time fields
+			if v, ok := item["lastHeartbeat"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					if sv.Value != "" {
+						if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+							status.LastHeartbeat = t
+						} else {
+							logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
+								"clusterName", clusterName,
+								"timestamp", sv.Value)
+							// Keep default time.Now() value
+						}
 					}
 				}
 			}
-		}
 
-		// Add the status to the map
-		statuses[clusterName] = status
+			// Add the status to the map
+			statuses[status.ClusterName] = status
+		}
+	}
+
+	// PART 2: Query using the GSI (GSI1) to find all records for this group across all operators
+	// This is crucial for finding clusters registered by other operators
+	gsiInput := &dynamodb.QueryInput{
+		TableName:              &m.tableName,
+		IndexName:              aws.String("GSI1"),
+		KeyConditionExpression: aws.String("GSI1SK = :gsi_sk"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":gsi_sk": &types.AttributeValueMemberS{Value: m.getGroupGSI1SK(namespace, name)},
+		},
+	}
+
+	// Execute the GSI query
+	gsiResult, err := m.client.Query(ctx, gsiInput)
+	if err != nil {
+		logger.Error(err, "Failed to query cluster statuses by GSI")
+		// Continue with what we have from the primary query
+	} else {
+		logger.Info("Found cluster records using GSI", "count", len(gsiResult.Items))
+
+		// Process the GSI query results
+		for _, item := range gsiResult.Items {
+			// Extract the SK to check if this is a cluster status record
+			if sk, ok := item["SK"]; ok {
+				if skValue, ok := sk.(*types.AttributeValueMemberS); ok {
+					if !strings.HasPrefix(skValue.Value, "CLUSTER#") {
+						// Skip non-cluster records
+						continue
+					}
+				}
+			} else {
+				// Skip records without an SK
+				continue
+			}
+
+			// Extract the cluster name from the item
+			var clusterName string
+			if v, ok := item["clusterName"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					clusterName = sv.Value
+				}
+			}
+
+			if clusterName == "" {
+				// Skip records without a cluster name
+				logger.Info("Skipping record without cluster name")
+				continue
+			}
+
+			logger.V(1).Info("Processing cluster record from GSI", "clusterName", clusterName)
+
+			// Create a new status record
+			status := &ClusterStatusRecord{
+				PK:             pk,
+				SK:             m.getClusterSK(clusterName),
+				OperatorID:     m.operatorID,
+				GroupNamespace: namespace,
+				GroupName:      name,
+				ClusterName:    clusterName,
+				Health:         HealthOK,     // Default value
+				State:          StateStandby, // Default value
+				LastHeartbeat:  time.Now(),   // Default value
+			}
+
+			// Extract string fields
+			if v, ok := item["GSI1PK"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.GSI1PK = sv.Value
+				}
+			}
+			if v, ok := item["GSI1SK"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.GSI1SK = sv.Value
+				}
+			}
+			if v, ok := item["health"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.Health = sv.Value
+				}
+			}
+			if v, ok := item["state"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.State = sv.Value
+				}
+			}
+			if v, ok := item["components"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.Components = sv.Value
+				}
+			}
+			if v, ok := item["operatorID"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					status.OperatorID = sv.Value
+				}
+			}
+
+			// Extract time fields
+			if v, ok := item["lastHeartbeat"]; ok {
+				if sv, ok := v.(*types.AttributeValueMemberS); ok {
+					if sv.Value != "" {
+						if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+							status.LastHeartbeat = t
+						} else {
+							logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
+								"clusterName", clusterName,
+								"timestamp", sv.Value)
+							// Keep default time.Now() value
+						}
+					}
+				}
+			}
+
+			// Add the status to the map, but don't overwrite existing entries from the primary query
+			if _, exists := statuses[clusterName]; !exists {
+				statuses[status.ClusterName] = status
+			}
+		}
 	}
 
 	// Log the clusters found

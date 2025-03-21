@@ -125,6 +125,18 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Continue anyway
 	}
 
+	// Clean up stale cluster statuses
+	if err := r.Manager.CleanupStaleClusterStatuses(ctx, failoverGroup); err != nil {
+		log.Error(err, "Failed to clean up stale cluster statuses")
+		// Continue anyway
+	}
+
+	// Check and handle any ongoing failover operation stages
+	handled, result, err := r.checkAndHandleFailoverStages(ctx, failoverGroup)
+	if handled {
+		return result, err
+	}
+
 	// Requeue after the heartbeat interval to ensure regular updates
 	// For now, use a fixed interval
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -185,11 +197,15 @@ func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
 // handleDeletion implements finalizer logic for FailoverGroup to ensure proper cleanup
 // When a FailoverGroup is deleted, this method:
 // 1. Checks if this cluster is the primary and transfers ownership to another healthy cluster if possible
-// 2. Updates this cluster's status to INACTIVE
-// 3. Releases any locks held by this cluster
-// 4. Removes this cluster's status from DynamoDB
-// 5. Removes any volume state information if this was the primary cluster
-// 6. Removes the finalizer to allow Kubernetes to delete the object
+// 2. Releases any locks held by this cluster
+// 3. Cleans up resources in DynamoDB for this group, including:
+//   - Configuration records
+//   - History records
+//   - Cluster status records
+//   - Lock records
+//   - Volume state information
+//
+// 4. Removes the finalizer to allow Kubernetes to delete the object
 //
 // This ensures that DynamoDB resources are properly cleaned up when a FailoverGroup is deleted.
 // The finalizer prevents Kubernetes from removing the FailoverGroup until all this cleanup is complete.
@@ -211,17 +227,72 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, fg *crdv1a
 	namespace := fg.Namespace
 	name := fg.Name
 
-	// Check if this cluster is the primary cluster
+	// Get all cluster statuses to see if there are any other clusters
 	statuses, err := dynamoDB.GetAllClusterStatuses(ctx, namespace, name)
 	if err != nil {
 		logger.Error(err, "Failed to get cluster statuses")
 		// Continue with deletion even if we can't get statuses
-	} else {
-		currentClusterStatus, exists := statuses[clusterName]
-		if exists && currentClusterStatus.State == "PRIMARY" {
-			logger.Info("This cluster is the primary - will attempt to transfer ownership")
+	}
 
-			// Find another cluster to transfer ownership to
+	// Determine if this is the last cluster with a status
+	isLastCluster := statuses == nil || len(statuses) <= 1
+	logger.Info("Checking if this is the last cluster", "isLastCluster", isLastCluster, "statusCount", len(statuses))
+
+	// Attempt to get the group configuration record
+	groupConfig, err := dynamoDB.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		logger.Error(err, "Failed to get group configuration")
+		// Continue with deletion even if we can't get the config
+	}
+
+	// Determine if this cluster is the primary/owner
+	isPrimary := false
+	if groupConfig != nil && groupConfig.OwnerCluster == clusterName {
+		isPrimary = true
+		logger.Info("This cluster is the primary owner in configuration")
+	}
+
+	// Handle cleanup based on role and whether this is the last cluster
+	if isPrimary {
+		if isLastCluster {
+			// This is the primary and the only cluster, clean up everything
+			logger.Info("This is the primary and only remaining cluster, cleaning up all DynamoDB records")
+
+			// Delete the GroupConfigRecord
+			err = baseManager.DeleteGroupConfig(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete group configuration")
+			} else {
+				logger.Info("Successfully deleted group configuration")
+			}
+
+			// Delete all history records
+			err = baseManager.DeleteAllHistoryRecords(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete history records")
+			} else {
+				logger.Info("Successfully deleted all history records")
+			}
+
+			// Delete lock record
+			err = baseManager.DeleteLock(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete lock record")
+			} else {
+				logger.Info("Successfully deleted lock record")
+			}
+
+			// Delete all cluster statuses
+			err = baseManager.DeleteAllClusterStatuses(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete all cluster statuses")
+			} else {
+				logger.Info("Successfully deleted all cluster statuses")
+			}
+		} else {
+			// Multiple clusters exist, try to transfer ownership to another healthy cluster
+			logger.Info("Multiple clusters exist, attempting to transfer ownership")
+			transferredOwnership := false
 			for otherCluster, status := range statuses {
 				if otherCluster != clusterName && status.Health == "OK" {
 					logger.Info("Transferring ownership to another cluster", "targetCluster", otherCluster)
@@ -230,26 +301,70 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, fg *crdv1a
 						logger.Error(err, "Failed to transfer ownership", "targetCluster", otherCluster)
 					} else {
 						logger.Info("Successfully transferred ownership", "targetCluster", otherCluster)
+						transferredOwnership = true
+						break
 					}
-					break
 				}
 			}
+
+			// If ownership transfer failed for all clusters, remove the group config
+			if !transferredOwnership {
+				logger.Info("Could not transfer ownership, cleaning up group configuration")
+				// Delete the GroupConfigRecord
+				err = baseManager.DeleteGroupConfig(ctx, namespace, name)
+				if err != nil {
+					logger.Error(err, "Failed to delete group configuration")
+				} else {
+					logger.Info("Successfully deleted group configuration")
+				}
+			}
+
+			// Remove this cluster's status
+			logger.Info("Removing this cluster's status from DynamoDB")
+			err = operationsManager.RemoveClusterStatus(ctx, namespace, name, clusterName)
+			if err != nil {
+				logger.Error(err, "Failed to remove cluster status")
+			} else {
+				logger.Info("Successfully removed cluster status")
+			}
 		}
-	}
+	} else {
+		// Not the primary cluster
+		if isLastCluster {
+			// This is the last cluster but not primary, clean up everything
+			logger.Info("This is the last remaining cluster but not the primary, cleaning up all DynamoDB records")
 
-	// Update this cluster's status to INACTIVE
-	logger.Info("Setting cluster status to INACTIVE")
+			// Delete the GroupConfigRecord
+			err = baseManager.DeleteGroupConfig(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete group configuration")
+			}
 
-	// Create an empty StatusData since we're just updating status
-	emptyStatusData := &dynamodb.StatusData{
-		Workloads:        []dynamodb.ResourceStatus{},
-		NetworkResources: []dynamodb.ResourceStatus{},
-		FluxResources:    []dynamodb.ResourceStatus{},
-	}
+			// Delete all history records
+			err = baseManager.DeleteAllHistoryRecords(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete history records")
+			}
 
-	err = dynamoDB.UpdateClusterStatus(ctx, namespace, name, "INACTIVE", "INACTIVE", emptyStatusData)
-	if err != nil {
-		logger.Error(err, "Failed to update cluster status")
+			// Delete lock record
+			err = baseManager.DeleteLock(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete lock record")
+			}
+
+			// Delete all cluster statuses
+			err = baseManager.DeleteAllClusterStatuses(ctx, namespace, name)
+			if err != nil {
+				logger.Error(err, "Failed to delete all cluster statuses")
+			}
+		} else {
+			// Just remove this cluster's status
+			logger.Info("Removing this cluster's status from DynamoDB")
+			err = operationsManager.RemoveClusterStatus(ctx, namespace, name, clusterName)
+			if err != nil {
+				logger.Error(err, "Failed to remove cluster status")
+			}
+		}
 	}
 
 	// Release any locks held by this cluster
@@ -262,13 +377,6 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, fg *crdv1a
 		if err != nil {
 			logger.Error(err, "Failed to release lock")
 		}
-	}
-
-	// Remove cluster status from DynamoDB
-	logger.Info("Removing cluster status from DynamoDB")
-	err = operationsManager.RemoveClusterStatus(ctx, namespace, name, clusterName)
-	if err != nil {
-		logger.Error(err, "Failed to remove cluster status")
 	}
 
 	// Remove volume state if this was the primary cluster

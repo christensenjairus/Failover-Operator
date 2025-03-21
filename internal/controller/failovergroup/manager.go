@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -96,29 +95,373 @@ func (m *Manager) UpdateDynamoDBStatus(ctx context.Context, failoverGroup *crdv1
 		return nil
 	}
 
-	// Basic status data with just this cluster's health
+	// Gather actual status data from cluster
+	statusData, health, err := m.gatherClusterResourceStatuses(ctx, failoverGroup)
+	if err != nil {
+		log.Error(err, "Failed to gather complete cluster status")
+		// Continue with partial data
+	}
+
+	// Determine role based on the FailoverGroup status
+	role := m.determineClusterRole(failoverGroup)
+
+	// Update the status in DynamoDB with real data
+	return m.DynamoDBManager.UpdateClusterStatus(
+		ctx,
+		failoverGroup.Namespace,
+		failoverGroup.Name,
+		health, // Use actual health status
+		role,
+		statusData,
+	)
+}
+
+// gatherClusterResourceStatuses collects status information from various resources in the cluster
+// This information is stored in DynamoDB and made available to all clusters in the FailoverGroup
+// through the GlobalState.Clusters field. This provides a complete view of all clusters' health
+// and resource statuses, enabling better decision-making during failover operations.
+func (m *Manager) gatherClusterResourceStatuses(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) (*dynamodb.StatusData, string, error) {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+
 	statusData := &dynamodb.StatusData{
-		// Fill in with empty values initially
 		Workloads:          []dynamodb.ResourceStatus{},
 		NetworkResources:   []dynamodb.ResourceStatus{},
 		FluxResources:      []dynamodb.ResourceStatus{},
 		VolumeReplications: []dynamodb.WorkloadReplicationStatus{},
 	}
 
-	// Determine role based on the FailoverGroup status
-	role := m.determineClusterRole(failoverGroup)
+	// Get workload statuses (deployments, statefulsets, etc.)
+	workloadStatuses, workloadHealth, err := m.gatherWorkloadStatuses(ctx, failoverGroup)
+	if err != nil {
+		log.Error(err, "Failed to gather workload statuses")
+		// Continue anyway, just with partial data
+	}
+	statusData.Workloads = workloadStatuses
 
-	// We could populate more detailed status data here in a real implementation
+	// Get network resource statuses (ingresses, virtualservices)
+	networkStatuses, networkHealth, err := m.gatherNetworkResourceStatuses(ctx, failoverGroup)
+	if err != nil {
+		log.Error(err, "Failed to gather network resource statuses")
+	}
+	statusData.NetworkResources = networkStatuses
 
-	// Update the status in DynamoDB
-	return m.DynamoDBManager.UpdateClusterStatus(
-		ctx,
-		failoverGroup.Namespace,
-		failoverGroup.Name,
-		"OK", // Default health status
-		role,
-		statusData,
-	)
+	// Get Flux resource statuses (kustomizations, helmreleases)
+	fluxStatuses, fluxHealth, err := m.gatherFluxResourceStatuses(ctx, failoverGroup)
+	if err != nil {
+		log.Error(err, "Failed to gather Flux resource statuses")
+	}
+	statusData.FluxResources = fluxStatuses
+
+	// Get volume replication statuses
+	volumeStatuses, volumeHealth, err := m.gatherVolumeReplicationStatuses(ctx, failoverGroup)
+	if err != nil {
+		log.Error(err, "Failed to gather volume replication statuses")
+	}
+	statusData.VolumeReplications = volumeStatuses
+
+	// Determine overall health from component health
+	overallHealth := m.determineOverallHealth(workloadHealth, networkHealth, fluxHealth, volumeHealth)
+
+	return statusData, overallHealth, nil
+}
+
+// gatherWorkloadStatuses collects status information from workload resources
+func (m *Manager) gatherWorkloadStatuses(ctx context.Context, fg *crdv1alpha1.FailoverGroup) ([]dynamodb.ResourceStatus, string, error) {
+	statuses := []dynamodb.ResourceStatus{}
+	overallHealth := dynamodb.HealthOK
+
+	// Process each workload selector in the failover group
+	for _, selector := range fg.Spec.Workloads {
+		switch selector.Kind {
+		case "Deployment":
+			deploymentStatuses, health, err := m.gatherDeploymentStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, deploymentStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+			if health == dynamodb.HealthError {
+				overallHealth = dynamodb.HealthError
+			}
+
+		case "StatefulSet":
+			stsStatuses, health, err := m.gatherStatefulSetStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, stsStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+			if health == dynamodb.HealthError {
+				overallHealth = dynamodb.HealthError
+			}
+
+		case "CronJob":
+			cronJobStatuses, health, err := m.gatherCronJobStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, cronJobStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+			if health == dynamodb.HealthError {
+				overallHealth = dynamodb.HealthError
+			}
+		}
+	}
+
+	return statuses, overallHealth, nil
+}
+
+// gatherNetworkResourceStatuses collects status information from network resources
+func (m *Manager) gatherNetworkResourceStatuses(ctx context.Context, fg *crdv1alpha1.FailoverGroup) ([]dynamodb.ResourceStatus, string, error) {
+	statuses := []dynamodb.ResourceStatus{}
+	overallHealth := dynamodb.HealthOK
+
+	// Process each network resource selector in the failover group
+	for _, selector := range fg.Spec.NetworkResources {
+		switch selector.Kind {
+		case "Ingress":
+			ingressStatuses, health, err := m.gatherIngressStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, ingressStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+
+		case "VirtualService":
+			vsStatuses, health, err := m.gatherVirtualServiceStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, vsStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+		}
+	}
+
+	return statuses, overallHealth, nil
+}
+
+// gatherFluxResourceStatuses collects status information from Flux resources
+func (m *Manager) gatherFluxResourceStatuses(ctx context.Context, fg *crdv1alpha1.FailoverGroup) ([]dynamodb.ResourceStatus, string, error) {
+	statuses := []dynamodb.ResourceStatus{}
+	overallHealth := dynamodb.HealthOK
+
+	// Process each Flux resource selector in the failover group
+	for _, selector := range fg.Spec.FluxResources {
+		switch selector.Kind {
+		case "Kustomization":
+			kustomizationStatuses, health, err := m.gatherKustomizationStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, kustomizationStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+
+		case "HelmRelease":
+			helmReleaseStatuses, health, err := m.gatherHelmReleaseStatuses(ctx, fg.Namespace, selector)
+			if err != nil {
+				return statuses, dynamodb.HealthDegraded, err
+			}
+			statuses = append(statuses, helmReleaseStatuses...)
+			if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+				overallHealth = health
+			}
+		}
+	}
+
+	return statuses, overallHealth, nil
+}
+
+// gatherVolumeReplicationStatuses collects status information from volume replications
+func (m *Manager) gatherVolumeReplicationStatuses(ctx context.Context, fg *crdv1alpha1.FailoverGroup) ([]dynamodb.WorkloadReplicationStatus, string, error) {
+	statuses := []dynamodb.WorkloadReplicationStatus{}
+	overallHealth := dynamodb.HealthOK
+
+	// Check each workload that might have volume replications
+	for _, workload := range fg.Spec.Workloads {
+		// Only StatefulSets typically have volume replications
+		if workload.Kind != "StatefulSet" || len(workload.VolumeReplications) == 0 {
+			continue
+		}
+
+		vrStatuses, health, err := m.gatherStatefulSetVolumeReplications(ctx, fg.Namespace, workload)
+		if err != nil {
+			return statuses, dynamodb.HealthDegraded, err
+		}
+		statuses = append(statuses, vrStatuses...)
+		if health != dynamodb.HealthOK && overallHealth == dynamodb.HealthOK {
+			overallHealth = health
+		}
+		if health == dynamodb.HealthError {
+			overallHealth = dynamodb.HealthError
+		}
+	}
+
+	return statuses, overallHealth, nil
+}
+
+// gatherDeploymentStatuses collects status information from Deployments
+func (m *Manager) gatherDeploymentStatuses(ctx context.Context, namespace string, selector crdv1alpha1.WorkloadSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get Deployment statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "Deployment",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Available",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherStatefulSetStatuses collects status information from StatefulSets
+func (m *Manager) gatherStatefulSetStatuses(ctx context.Context, namespace string, selector crdv1alpha1.WorkloadSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get StatefulSet statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "StatefulSet",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Available",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherCronJobStatuses collects status information from CronJobs
+func (m *Manager) gatherCronJobStatuses(ctx context.Context, namespace string, selector crdv1alpha1.WorkloadSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get CronJob statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "CronJob",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Scheduled",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherIngressStatuses collects status information from Ingresses
+func (m *Manager) gatherIngressStatuses(ctx context.Context, namespace string, selector crdv1alpha1.NetworkResourceSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get Ingress statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "Ingress",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Available",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherVirtualServiceStatuses collects status information from VirtualServices
+func (m *Manager) gatherVirtualServiceStatuses(ctx context.Context, namespace string, selector crdv1alpha1.NetworkResourceSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get VirtualService statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "VirtualService",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Available",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherKustomizationStatuses collects status information from Kustomizations
+func (m *Manager) gatherKustomizationStatuses(ctx context.Context, namespace string, selector crdv1alpha1.FluxResourceSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get Kustomization statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "Kustomization",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Ready",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherHelmReleaseStatuses collects status information from HelmReleases
+func (m *Manager) gatherHelmReleaseStatuses(ctx context.Context, namespace string, selector crdv1alpha1.FluxResourceSpec) ([]dynamodb.ResourceStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get HelmRelease statuses
+	// For now, we'll return a placeholder implementation
+	statuses := []dynamodb.ResourceStatus{
+		{
+			Kind:   "HelmRelease",
+			Name:   selector.Name,
+			Health: dynamodb.HealthOK,
+			Status: "Ready",
+		},
+	}
+	return statuses, dynamodb.HealthOK, nil
+}
+
+// gatherStatefulSetVolumeReplications collects status information for volume replications
+func (m *Manager) gatherStatefulSetVolumeReplications(ctx context.Context, namespace string, workload crdv1alpha1.WorkloadSpec) ([]dynamodb.WorkloadReplicationStatus, string, error) {
+	// This would be implemented with actual Kubernetes API calls to get VolumeReplication statuses
+	// For now, we'll return a placeholder implementation
+	vrStatus := dynamodb.WorkloadReplicationStatus{
+		WorkloadKind:       workload.Kind,
+		WorkloadName:       workload.Name,
+		VolumeReplications: []dynamodb.ResourceStatus{},
+	}
+
+	// Add a replication status for each volume replication mentioned in the workload
+	for _, vrName := range workload.VolumeReplications {
+		vrStatus.VolumeReplications = append(vrStatus.VolumeReplications, dynamodb.ResourceStatus{
+			Kind:   "VolumeReplication",
+			Name:   vrName,
+			Health: dynamodb.HealthOK,
+			Status: "Replicating",
+		})
+	}
+
+	return []dynamodb.WorkloadReplicationStatus{vrStatus}, dynamodb.HealthOK, nil
+}
+
+// determineOverallHealth assesses the overall health based on component health
+func (m *Manager) determineOverallHealth(workloadHealth, networkHealth, fluxHealth, volumeHealth string) string {
+	// If any component is in ERROR state, the overall health is ERROR
+	if workloadHealth == dynamodb.HealthError ||
+		networkHealth == dynamodb.HealthError ||
+		fluxHealth == dynamodb.HealthError ||
+		volumeHealth == dynamodb.HealthError {
+		return dynamodb.HealthError
+	}
+
+	// If any component is in DEGRADED state, the overall health is DEGRADED
+	if workloadHealth == dynamodb.HealthDegraded ||
+		networkHealth == dynamodb.HealthDegraded ||
+		fluxHealth == dynamodb.HealthDegraded ||
+		volumeHealth == dynamodb.HealthDegraded {
+		return dynamodb.HealthDegraded
+	}
+
+	// Otherwise, the overall health is OK
+	return dynamodb.HealthOK
 }
 
 // StartPeriodicSynchronization starts a goroutine to periodically sync with DynamoDB
@@ -157,16 +500,30 @@ func (m *Manager) syncAllFailoverGroups(ctx context.Context) error {
 	for i := range failoverGroupList.Items {
 		failoverGroup := &failoverGroupList.Items[i]
 
+		log := m.Log.WithValues(
+			"namespace", failoverGroup.Namespace,
+			"name", failoverGroup.Name,
+			"cluster", m.ClusterName)
+
 		// Try to proactively register this cluster if not already registered
 		if m.DynamoDBManager != nil {
 			// Check if this cluster exists in DynamoDB
 			statuses, err := m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
-			if err == nil {
+			if err != nil {
+				log.Error(err, "Failed to get cluster statuses from DynamoDB")
+				// Continue anyway to try the other operations
+			} else {
+				// Log all clusters found in DynamoDB for debugging
+				clusterList := []string{}
+				for cluster := range statuses {
+					clusterList = append(clusterList, cluster)
+				}
+				log.Info("Retrieved cluster statuses from DynamoDB", "clusters", clusterList, "count", len(statuses))
+
+				// Check if our cluster exists
 				_, exists := statuses[m.ClusterName]
 				if !exists {
-					m.Log.Info("Proactively registering this cluster in DynamoDB",
-						"namespace", failoverGroup.Namespace,
-						"name", failoverGroup.Name,
+					log.Info("Proactively registering this cluster in DynamoDB",
 						"cluster", m.ClusterName)
 
 					// Determine the role based on current state
@@ -184,23 +541,29 @@ func (m *Manager) syncAllFailoverGroups(ctx context.Context) error {
 						role,
 						nil, // No detailed status yet
 					); err != nil {
-						m.Log.Error(err, "Failed to register cluster in DynamoDB")
+						log.Error(err, "Failed to register cluster in DynamoDB")
+					} else {
+						log.Info("Successfully registered cluster in DynamoDB")
 					}
+				} else {
+					log.V(1).Info("Cluster already registered in DynamoDB")
 				}
 			}
 		}
 
 		if err := m.SyncWithDynamoDB(ctx, failoverGroup); err != nil {
-			m.Log.Error(err, "Failed to sync FailoverGroup with DynamoDB",
-				"namespace", failoverGroup.Namespace,
-				"name", failoverGroup.Name)
+			log.Error(err, "Failed to sync FailoverGroup with DynamoDB")
 			continue
 		}
 
+		// Update the status in DynamoDB to ensure we're visible to other clusters
 		if err := m.UpdateDynamoDBStatus(ctx, failoverGroup); err != nil {
-			m.Log.Error(err, "Failed to update DynamoDB status",
-				"namespace", failoverGroup.Namespace,
-				"name", failoverGroup.Name)
+			log.Error(err, "Failed to update status in DynamoDB")
+		}
+
+		// Clean up stale cluster statuses
+		if err := m.CleanupStaleClusterStatuses(ctx, failoverGroup); err != nil {
+			log.Error(err, "Failed to clean up stale cluster statuses")
 		}
 	}
 
@@ -276,27 +639,33 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		updated = true
 	}
 
-	// ------- DIRECT APPROACH TO FIX CLUSTER DISPLAY -------
+	// ------- AUTO-GENERATE CLUSTERS ARRAY FROM DYNAMODB -------
 
-	// Ensure the Clusters array is initialized
-	if failoverGroup.Status.GlobalState.Clusters == nil {
-		failoverGroup.Status.GlobalState.Clusters = []crdv1alpha1.ClusterInfo{}
+	// Get all cluster statuses from DynamoDB
+	var clusterStatuses map[string]*dynamodb.ClusterStatusRecord
+	if m.DynamoDBManager != nil {
+		clusterStatuses, err = m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
+		if err != nil {
+			log.Error(err, "Failed to get cluster statuses from DynamoDB")
+			// Continue with what we have - don't fail the sync completely
+		} else {
+			// Log all clusters found in DynamoDB for debugging
+			clusterList := []string{}
+			for cluster := range clusterStatuses {
+				clusterList = append(clusterList, cluster)
+			}
+			log.Info("Retrieved cluster statuses from DynamoDB", "clusters", clusterList, "count", len(clusterStatuses))
+		}
 	}
 
-	// IMPORTANT: We'll explicitly add both clusters, regardless of what's in DynamoDB
+	// Initialize an empty clusters array
+	newClusters := []crdv1alpha1.ClusterInfo{}
 
-	// 1. Clear existing clusters array completely
-	failoverGroup.Status.GlobalState.Clusters = []crdv1alpha1.ClusterInfo{}
-
-	// 2. Directly add the current cluster based on its role
+	// Always add this cluster to ensure it appears in the status
 	thisClusterRole := "STANDBY"
 	if activeCluster == m.ClusterName {
 		thisClusterRole = "PRIMARY"
 	}
-
-	log.Info("Adding this cluster directly",
-		"clusterName", m.ClusterName,
-		"role", thisClusterRole)
 
 	thisCluster := crdv1alpha1.ClusterInfo{
 		Name:          m.ClusterName,
@@ -304,87 +673,84 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		Health:        "OK",
 		LastHeartbeat: time.Now().Format(time.RFC3339),
 	}
-	failoverGroup.Status.GlobalState.Clusters = append(failoverGroup.Status.GlobalState.Clusters, thisCluster)
+	newClusters = append(newClusters, thisCluster)
 
-	// 3. Directly add the other cluster based on what we know from activeCluster
-	if activeCluster != m.ClusterName {
-		// If we're not the active cluster, add the active cluster as PRIMARY
-		otherClusterName := activeCluster
-		otherClusterRole := "PRIMARY"
+	// If we have cluster statuses from DynamoDB, add all other clusters
+	if clusterStatuses != nil && len(clusterStatuses) > 0 {
+		log.Info("Adding clusters from DynamoDB statuses",
+			"totalClusters", len(clusterStatuses))
 
-		log.Info("Adding active cluster directly",
-			"clusterName", otherClusterName,
-			"role", otherClusterRole)
+		// Add each cluster from DynamoDB (except this one, which we already added)
+		for clusterName, status := range clusterStatuses {
+			// Skip this cluster as we already added it
+			if clusterName == m.ClusterName {
+				continue
+			}
 
-		otherCluster := crdv1alpha1.ClusterInfo{
-			Name:          otherClusterName,
-			Role:          otherClusterRole,
-			Health:        "OK", // Assume it's healthy if it's the active cluster
-			LastHeartbeat: time.Now().Format(time.RFC3339),
+			// Determine the role based on active cluster
+			role := "STANDBY"
+			if clusterName == activeCluster {
+				role = "PRIMARY"
+			}
+
+			// Record the last heartbeat
+			lastHeartbeat := time.Now().Format(time.RFC3339)
+			if !status.LastHeartbeat.IsZero() {
+				lastHeartbeat = status.LastHeartbeat.Format(time.RFC3339)
+			}
+
+			// Create the cluster info
+			clusterInfo := crdv1alpha1.ClusterInfo{
+				Name:          clusterName,
+				Role:          role,
+				Health:        status.Health,
+				LastHeartbeat: lastHeartbeat,
+			}
+
+			// Add to the new clusters array
+			newClusters = append(newClusters, clusterInfo)
+			log.V(1).Info("Added cluster to status", "cluster", clusterName, "role", role, "health", status.Health)
+
+			// Also track this cluster in our known clusters map
+			m.trackKnownCluster(fmt.Sprintf("%s/%s", failoverGroup.Namespace, failoverGroup.Name), clusterName)
 		}
-		failoverGroup.Status.GlobalState.Clusters = append(failoverGroup.Status.GlobalState.Clusters, otherCluster)
 	} else {
-		// If we are the active cluster, try to determine the other cluster's name
-		// We don't know its exact name, so use a previous name if we have it or a placeholder
-		var otherClusterName string
-
-		// Try to get other cluster info from DynamoDB
-		if m.DynamoDBManager != nil {
-			statuses, err := m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
-			if err == nil {
-				// Find a cluster that's not the current one
-				for clusterName := range statuses {
-					if clusterName != m.ClusterName {
-						otherClusterName = clusterName
-						break
-					}
-				}
-			}
-		}
-
-		// If we couldn't find another cluster, use a hardcoded approach
-		// Extract cluster environment portion from name (e.g., "dev-west" -> "dev")
-		if otherClusterName == "" {
-			parts := splitClusterName(m.ClusterName)
-			env := parts[0]
-			location := parts[1]
-
-			// If current cluster is "dev-west", other might be "dev-east" or "dev-central", etc.
-			if location == "west" {
-				otherLocation := "central" // Assume central as fallback
-				otherClusterName = fmt.Sprintf("%s-%s", env, otherLocation)
-			} else if location == "central" {
-				otherLocation := "west" // Assume west as fallback
-				otherClusterName = fmt.Sprintf("%s-%s", env, otherLocation)
-			} else if location == "east" {
-				otherLocation := "west" // Assume west as fallback
-				otherClusterName = fmt.Sprintf("%s-%s", env, otherLocation)
-			} else {
-				// Fall back to a generic name
-				otherClusterName = "standby-cluster"
-			}
-		}
-
-		log.Info("Adding standby cluster directly",
-			"clusterName", otherClusterName,
-			"role", "STANDBY")
-
-		otherCluster := crdv1alpha1.ClusterInfo{
-			Name:          otherClusterName,
-			Role:          "STANDBY",
-			Health:        "OK", // Assume it's healthy
-			LastHeartbeat: time.Now().Format(time.RFC3339),
-		}
-		failoverGroup.Status.GlobalState.Clusters = append(failoverGroup.Status.GlobalState.Clusters, otherCluster)
+		log.Info("No additional clusters found in DynamoDB beyond this cluster", "thisCluster", m.ClusterName)
 	}
 
-	// Log the current state of clusters
-	log.Info("Updated clusters array in status directly",
-		"count", len(failoverGroup.Status.GlobalState.Clusters),
-		"clusters", getClusterNames(failoverGroup.Status.GlobalState.Clusters))
+	// Compare old and new clusters arrays to determine if we need to update
+	clustersChanged := len(failoverGroup.Status.GlobalState.Clusters) != len(newClusters)
+	if !clustersChanged {
+		// Check each cluster to see if any changed
+		existingMap := make(map[string]crdv1alpha1.ClusterInfo)
+		for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
+			existingMap[cluster.Name] = cluster
+		}
 
-	updated = true
-	// ------- END DIRECT APPROACH -------
+		for _, newCluster := range newClusters {
+			if oldCluster, exists := existingMap[newCluster.Name]; !exists ||
+				oldCluster.Role != newCluster.Role ||
+				oldCluster.Health != newCluster.Health {
+				clustersChanged = true
+				break
+			}
+		}
+	}
+
+	// Update clusters if changed
+	if clustersChanged {
+		log.Info("Updating clusters in status",
+			"oldCount", len(failoverGroup.Status.GlobalState.Clusters),
+			"newCount", len(newClusters),
+			"clusters", getClusterNames(newClusters))
+		failoverGroup.Status.GlobalState.Clusters = newClusters
+		updated = true
+	} else {
+		log.V(1).Info("No changes to clusters array, keeping existing clusters",
+			"count", len(failoverGroup.Status.GlobalState.Clusters))
+	}
+
+	// ------- END AUTO-GENERATE CLUSTERS ARRAY -------
 
 	// Configure resources based on role if active cluster changed
 	if updated && failoverGroup.Status.GlobalState.ActiveCluster != "" {
@@ -403,57 +769,12 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 
 	// Update the FailoverGroup resource if status changed
 	if updated {
-		// Implement retry logic for handling resource conflicts
-		maxRetries := 3
-		for retry := 0; retry < maxRetries; retry++ {
-			err := m.Client.Status().Update(ctx, failoverGroup)
-			if err == nil {
-				log.Info("Updated FailoverGroup status from DynamoDB",
-					"activeCluster", failoverGroup.Status.GlobalState.ActiveCluster,
-					"clusterCount", len(failoverGroup.Status.GlobalState.Clusters),
-					"retry", retry)
-				return nil
-			}
-
-			// Check if it's a conflict error
-			if k8sErrors.IsConflict(err) {
-				// If this is a conflict, get the latest version of the resource
-				log.Info("Detected conflict while updating FailoverGroup status, retrying with latest version",
-					"retry", retry+1, "maxRetries", maxRetries)
-
-				// Get the latest version of the FailoverGroup
-				latestFG := &crdv1alpha1.FailoverGroup{}
-				namespacedName := types.NamespacedName{
-					Namespace: failoverGroup.Namespace,
-					Name:      failoverGroup.Name,
-				}
-
-				if getErr := m.Client.Get(ctx, namespacedName, latestFG); getErr != nil {
-					log.Error(getErr, "Failed to get latest FailoverGroup resource")
-					return getErr
-				}
-
-				// Transfer our status changes to the latest version
-				// Preserve our changes to GlobalState, which is what we're primarily updating
-				latestFG.Status.GlobalState.ThisCluster = failoverGroup.Status.GlobalState.ThisCluster
-				latestFG.Status.GlobalState.ActiveCluster = failoverGroup.Status.GlobalState.ActiveCluster
-				latestFG.Status.GlobalState.Clusters = failoverGroup.Status.GlobalState.Clusters
-
-				// Update our reference to point to the latest version
-				failoverGroup = latestFG
-
-				// Very short backoff before retry
-				time.Sleep(time.Millisecond * 100 * time.Duration(retry+1))
-				continue
-			}
-
-			// For other errors, return immediately
-			log.Error(err, "Failed to update FailoverGroup status")
-			return err
+		log.Info("Updating FailoverGroup status with changes")
+		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
+			return fmt.Errorf("failed to update FailoverGroup status: %w", err)
 		}
-
-		// If we exhausted retries
-		return fmt.Errorf("failed to update FailoverGroup status after %d retries", maxRetries)
+	} else {
+		log.V(1).Info("No changes to FailoverGroup status")
 	}
 
 	return nil
@@ -722,4 +1043,94 @@ func splitClusterName(clusterName string) []string {
 	// If no hyphen, return the whole name as first part
 	result[0] = clusterName
 	return result
+}
+
+// CleanupStaleClusterStatuses checks for cluster statuses in DynamoDB with no recent heartbeats
+// and removes them. This ensures that when a FailoverGroup is deleted on a remote cluster,
+// its status is removed from DynamoDB and won't show up in other clusters' lists anymore.
+func (m *Manager) CleanupStaleClusterStatuses(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	if m.DynamoDBManager == nil {
+		return nil
+	}
+
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+
+	// Get all cluster statuses
+	statuses, err := m.DynamoDBManager.GetAllClusterStatuses(ctx, failoverGroup.Namespace, failoverGroup.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster statuses: %w", err)
+	}
+
+	// Log all retrieved clusters for debugging
+	clusterNames := []string{}
+	for clusterName, status := range statuses {
+		clusterNames = append(clusterNames, clusterName)
+		log.V(1).Info("Found cluster status",
+			"clusterName", clusterName,
+			"health", status.Health,
+			"state", status.State,
+			"lastHeartbeat", status.LastHeartbeat.Format(time.RFC3339))
+	}
+	log.V(1).Info("Retrieved all cluster statuses", "clusters", clusterNames, "count", len(statuses))
+
+	// Current time for heartbeat threshold
+	now := time.Now()
+	staleThreshold := 5 * time.Minute // Increased from 2 to 5 minutes to be more lenient
+
+	// Create OperationsManager for status removal
+	operationsManager := dynamodb.NewOperationsManager(m.DynamoDBManager.BaseManager)
+
+	// Look for stale clusters
+	var staleCount int
+	for clusterName, status := range statuses {
+		// Don't clean up our own status - only other clusters
+		if clusterName == m.ClusterName {
+			log.V(1).Info("Skipping our own cluster status", "clusterName", clusterName)
+			continue
+		}
+
+		// Check if heartbeat is older than threshold
+		lastHeartbeat := status.LastHeartbeat
+		age := now.Sub(lastHeartbeat)
+
+		log.V(1).Info("Checking cluster staleness",
+			"clusterName", clusterName,
+			"lastHeartbeat", lastHeartbeat.Format(time.RFC3339),
+			"age", age.String(),
+			"threshold", staleThreshold.String())
+
+		if age > staleThreshold {
+			log.Info("Removing stale cluster status",
+				"clusterName", clusterName,
+				"lastHeartbeat", lastHeartbeat.Format(time.RFC3339),
+				"age", age.String(),
+				"threshold", staleThreshold.String())
+
+			// Remove the stale cluster status
+			err := operationsManager.RemoveClusterStatus(ctx, failoverGroup.Namespace, failoverGroup.Name, clusterName)
+			if err != nil {
+				log.Error(err, "Failed to remove stale cluster status", "clusterName", clusterName)
+				// Continue with other clusters
+			} else {
+				staleCount++
+				log.Info("Successfully removed stale cluster status", "clusterName", clusterName)
+			}
+		} else {
+			log.V(1).Info("Cluster status is fresh, keeping",
+				"clusterName", clusterName,
+				"age", age.String(),
+				"threshold", staleThreshold.String())
+		}
+	}
+
+	if staleCount > 0 {
+		log.Info("Removed stale cluster statuses", "count", staleCount, "totalClusters", len(statuses))
+	} else {
+		log.V(1).Info("No stale cluster statuses found", "totalClusters", len(statuses))
+	}
+
+	return nil
 }

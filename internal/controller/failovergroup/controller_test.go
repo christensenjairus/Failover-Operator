@@ -135,6 +135,12 @@ func TestFailoverGroupSetupWithManager(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestHandleDeletion_LastCluster is a placeholder for testing the deletion handler
+func TestHandleDeletion_LastCluster(t *testing.T) {
+	// TODO: Implement proper test for deletion handling
+	t.Skip("Test implementation pending - need to resolve type compatibility issues with mocks")
+}
+
 // Helper function to check if a finalizer is present
 func containsFinalizer(obj metav1.Object, finalizer string) bool {
 	for _, fin := range obj.GetFinalizers() {

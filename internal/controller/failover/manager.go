@@ -93,20 +93,30 @@ func (m *Manager) ProcessFailover(ctx context.Context, failover *crdv1alpha1.Fai
 
 	startTime := time.Now()
 
+	// Initialize the status.FailoverGroups array if it doesn't exist or is empty
+	if failover.Status.FailoverGroups == nil || len(failover.Status.FailoverGroups) == 0 {
+		// Create FailoverGroupReference objects for each group in the spec
+		failover.Status.FailoverGroups = make([]crdv1alpha1.FailoverGroupReference, len(failover.Spec.FailoverGroups))
+		for i, group := range failover.Spec.FailoverGroups {
+			failover.Status.FailoverGroups[i] = crdv1alpha1.FailoverGroupReference{
+				Name:      group.Name,
+				Namespace: group.Namespace,
+				Status:    "PENDING",
+			}
+		}
+
+		// Update the status with the initialized array
+		if err := m.Client.Status().Update(ctx, failover); err != nil {
+			log.Error(err, "Failed to initialize failover group status array")
+			return fmt.Errorf("failed to initialize failover group status: %w", err)
+		}
+	}
+
 	// Process each failover group
 	var processingErrors []error
 	for i, group := range failover.Spec.FailoverGroups {
 		log := log.WithValues("failoverGroup", group.Name, "namespace", group.Namespace)
 		log.Info("Processing failover group")
-
-		// Update group status to in progress
-		failover.Status.FailoverGroups[i].Status = "IN_PROGRESS"
-		failover.Status.FailoverGroups[i].StartTime = time.Now().Format(time.RFC3339)
-		if err := m.Client.Status().Update(ctx, failover); err != nil {
-			log.Error(err, "Failed to update failover group status")
-			processingErrors = append(processingErrors, err)
-			continue
-		}
 
 		// Get the failover group
 		failoverGroup := &crdv1alpha1.FailoverGroup{}
@@ -157,6 +167,56 @@ func (m *Manager) ProcessFailover(ctx context.Context, failover *crdv1alpha1.Fai
 	return m.updateFailoverStatus(ctx, failover, finalStatus, processingErrors)
 }
 
+// verifyFailoverPossible verifies that the failover can be executed to the target cluster
+func (m *Manager) verifyFailoverPossible(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup, targetCluster string) error {
+	log := m.Log.WithValues("failoverGroup", failoverGroup.Name, "namespace", failoverGroup.Namespace, "targetCluster", targetCluster)
+
+	// Check if the group is suspended
+	if failoverGroup.Spec.Suspended {
+		return fmt.Errorf("failover group is suspended: %s", failoverGroup.Spec.SuspensionReason)
+	}
+
+	// Verify the target cluster exists in the global state
+	var targetClusterFound bool
+	for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
+		if cluster.Name == targetCluster {
+			targetClusterFound = true
+
+			// Check if target cluster is healthy enough for failover
+			if cluster.Health == "ERROR" {
+				return fmt.Errorf("target cluster is in ERROR health state")
+			}
+			break
+		}
+	}
+
+	if !targetClusterFound {
+		return fmt.Errorf("target cluster '%s' not found in failover group", targetCluster)
+	}
+
+	// Check if target is the same as current active cluster (no-op failover)
+	if failoverGroup.Status.GlobalState.ActiveCluster == targetCluster {
+		return fmt.Errorf("target cluster '%s' is already the active cluster", targetCluster)
+	}
+
+	// If DynamoDB is configured, do additional checks
+	if m.DynamoDBManager != nil {
+		// Check if a lock already exists
+		locked, lockedBy, err := m.DynamoDBManager.IsLocked(ctx, failoverGroup.Namespace, failoverGroup.Name)
+		if err != nil {
+			log.Error(err, "Failed to check lock status")
+			return fmt.Errorf("failed to check lock status: %w", err)
+		}
+
+		if locked {
+			return fmt.Errorf("failover group is locked by '%s'", lockedBy)
+		}
+	}
+
+	log.Info("Failover prerequisites verified successfully")
+	return nil
+}
+
 // processFailoverGroup handles the failover logic for a single FailoverGroup
 func (m *Manager) processFailoverGroup(ctx context.Context,
 	failover *crdv1alpha1.Failover,
@@ -165,22 +225,44 @@ func (m *Manager) processFailoverGroup(ctx context.Context,
 
 	log := m.Log.WithValues("failoverGroup", failoverGroup.Name, "namespace", failoverGroup.Namespace)
 
-	// 1. Verify prerequisites and acquire lock
-	if err := m.verifyAndAcquireLock(ctx, failoverGroup, failover.Spec.TargetCluster); err != nil {
+	// 1. Verify prerequisites before starting the failover
+	log.Info("Verifying failover prerequisites",
+		"targetCluster", failover.Spec.TargetCluster)
+
+	// Verify that the failover is possible
+	if err := m.verifyFailoverPossible(ctx, failoverGroup, failover.Spec.TargetCluster); err != nil {
 		failover.Status.FailoverGroups[groupIndex].Status = "FAILED"
-		failover.Status.FailoverGroups[groupIndex].Message = fmt.Sprintf("Failed to verify prerequisites or acquire lock: %v", err)
+		failover.Status.FailoverGroups[groupIndex].Message = fmt.Sprintf("Failover prerequisites not met: %v", err)
 		if err := m.Client.Status().Update(ctx, failover); err != nil {
 			log.Error(err, "Failed to update failover status")
 		}
 		return err
 	}
 
-	// 2. Execute the failover workflow
+	// Update status to IN_PROGRESS now that we've passed validation
+	failover.Status.FailoverGroups[groupIndex].Status = "IN_PROGRESS"
+	failover.Status.FailoverGroups[groupIndex].StartTime = time.Now().Format(time.RFC3339)
+	if err := m.Client.Status().Update(ctx, failover); err != nil {
+		log.Error(err, "Failed to update failover group status to IN_PROGRESS")
+		return err
+	}
+
+	// 2. Acquire lock for the failover operation
+	if err := m.verifyAndAcquireLock(ctx, failoverGroup, failover.Spec.TargetCluster); err != nil {
+		failover.Status.FailoverGroups[groupIndex].Status = "FAILED"
+		failover.Status.FailoverGroups[groupIndex].Message = fmt.Sprintf("Failed to acquire lock: %v", err)
+		if err := m.Client.Status().Update(ctx, failover); err != nil {
+			log.Error(err, "Failed to update failover status")
+		}
+		return err
+	}
+
+	// 3. Execute the failover workflow
 	startTime := time.Now()
 	err := m.executeFailoverWorkflow(ctx, failoverGroup, failover)
 	endTime := time.Now()
 
-	// 3. Update metrics and status
+	// 4. Update metrics and status
 	downtime := int64(endTime.Sub(startTime).Seconds())
 	if failover.Status.Metrics.TotalDowntimeSeconds < downtime {
 		failover.Status.Metrics.TotalDowntimeSeconds = downtime
@@ -194,7 +276,7 @@ func (m *Manager) processFailoverGroup(ctx context.Context,
 		failover.Status.FailoverGroups[groupIndex].CompletionTime = endTime.Format(time.RFC3339)
 	}
 
-	// 4. Release the lock
+	// 5. Release the lock
 	if releaseLockErr := m.releaseLock(ctx, failoverGroup); releaseLockErr != nil {
 		log.Error(releaseLockErr, "Failed to release failover group lock")
 		// Don't return this error as it shouldn't override the main failover result
@@ -715,6 +797,19 @@ func (m *Manager) updateFailoverStatus(ctx context.Context,
 	errors []error) error {
 
 	failover.Status.Status = status
+
+	// Initialize FailoverGroups status array if it doesn't exist yet
+	if failover.Status.FailoverGroups == nil || len(failover.Status.FailoverGroups) == 0 {
+		// Create FailoverGroupReference objects for each group in the spec
+		failover.Status.FailoverGroups = make([]crdv1alpha1.FailoverGroupReference, len(failover.Spec.FailoverGroups))
+		for i, group := range failover.Spec.FailoverGroups {
+			failover.Status.FailoverGroups[i] = crdv1alpha1.FailoverGroupReference{
+				Name:      group.Name,
+				Namespace: group.Namespace,
+				Status:    "PENDING",
+			}
+		}
+	}
 
 	// If errors occurred, add them to the conditions
 	if len(errors) > 0 {

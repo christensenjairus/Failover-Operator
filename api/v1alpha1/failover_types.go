@@ -32,7 +32,7 @@ type FailoverGroupReference struct {
 	Namespace string `json:"namespace,omitempty"`
 
 	// Status of the failover operation for this group
-	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS
+	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS;PENDING
 	// +optional
 	Status string `json:"status,omitempty"`
 

@@ -2,9 +2,11 @@ package dynamodb
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -103,38 +105,122 @@ func TestStateManager_GetGroupState(t *testing.T) {
 }
 
 func TestOperationsManager_ExecuteFailover(t *testing.T) {
-	// This simpler test just verifies that non-matching source/target clusters
-	// are rejected correctly
-	client := &MockDynamoDBClient{}
-	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
+	// Create a mock client with the necessary mock functions
+	mockClient := &MockDynamoDBClient{
+		// Mock for checking lock status and group config and cluster status
+		GetItemFunc: func(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+			// Extract the PK and SK to determine what's being requested
+			pk := ""
+			sk := ""
+			if val, ok := params.Key["PK"]; ok {
+				if s, ok := val.(*types.AttributeValueMemberS); ok {
+					pk = s.Value
+				}
+			}
+			if val, ok := params.Key["SK"]; ok {
+				if s, ok := val.(*types.AttributeValueMemberS); ok {
+					sk = s.Value
+				}
+			}
 
-	// When source and target are the same, should return error
-	err := service.ExecuteFailover(
-		context.Background(),
-		"test-namespace",
-		"test-group",
-		"test-failover",
-		"test-cluster", // Same as the cluster in the service (source)
-		"Test failover",
-		false,
-	)
+			// If requesting the config record
+			if sk == "CONFIG" {
+				// Return a group config with "test-cluster" as owner
+				return &dynamodb.GetItemOutput{
+					Item: map[string]types.AttributeValue{
+						"ownerCluster": &types.AttributeValueMemberS{Value: "test-cluster"},
+						"suspended":    &types.AttributeValueMemberBOOL{Value: false},
+					},
+				}, nil
+			}
 
-	// Should get an error about source and target being the same
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "source and target clusters are the same")
+			// If requesting a cluster status record
+			if strings.HasPrefix(sk, "CLUSTER#") {
+				clusterName := strings.TrimPrefix(sk, "CLUSTER#")
+				return &dynamodb.GetItemOutput{
+					Item: map[string]types.AttributeValue{
+						"PK":          &types.AttributeValueMemberS{Value: pk},
+						"SK":          &types.AttributeValueMemberS{Value: sk},
+						"clusterName": &types.AttributeValueMemberS{Value: clusterName},
+						"health":      &types.AttributeValueMemberS{Value: string(HealthOK)},
+						"state":       &types.AttributeValueMemberS{Value: string(StateStandby)},
+					},
+				}, nil
+			}
 
-	// With a different target, it should proceed (mock just returns success)
-	err = service.ExecuteFailover(
-		context.Background(),
-		"test-namespace",
-		"test-group",
-		"test-failover",
-		"different-target-cluster",
-		"Test failover",
-		false,
-	)
+			// For lock checks and other GetItem operations, just return empty
+			return &dynamodb.GetItemOutput{}, nil
+		},
+		// Mock for transactions
+		TransactWriteItemsFunc: func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+			// Just return a successful response
+			return &dynamodb.TransactWriteItemsOutput{}, nil
+		},
+		// Mock for update operations like history records
+		UpdateItemFunc: func(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+		// Mock for put operations
+		PutItemFunc: func(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+			return &dynamodb.PutItemOutput{}, nil
+		},
+	}
 
-	assert.NoError(t, err)
+	service := NewDynamoDBService(mockClient, "test-table", "test-cluster", "test-operator")
+
+	// Set up test cases
+	testCases := []struct {
+		name          string
+		targetCluster string
+		forceFastMode bool
+		expectError   bool
+		errorText     string
+	}{
+		{
+			name:          "Same source and target clusters",
+			targetCluster: "test-cluster", // Same as the cluster in the service
+			forceFastMode: false,
+			expectError:   true,
+			errorText:     "source and target clusters are the same",
+		},
+		{
+			name:          "Different target - health check respected",
+			targetCluster: "different-target-cluster",
+			forceFastMode: false,
+			expectError:   false,
+			errorText:     "",
+		},
+		{
+			name:          "Different target - health check skipped",
+			targetCluster: "different-target-cluster",
+			forceFastMode: true,
+			expectError:   false,
+			errorText:     "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := service.ExecuteFailover(
+				context.Background(),
+				"test-namespace",
+				"test-group",
+				"test-failover",
+				tc.targetCluster,
+				tc.name, // Using name as reason
+				tc.forceFastMode,
+			)
+
+			if tc.expectError {
+				assert.Error(t, err)
+				if tc.errorText != "" {
+					assert.Contains(t, err.Error(), tc.errorText)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestClusterStatusRecord_JsonComponents(t *testing.T) {
@@ -199,8 +285,46 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 }
 
 func TestGlobalSecondaryIndex(t *testing.T) {
-	client := &MockDynamoDBClient{}
-	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
+	mockClient := &MockDynamoDBClient{
+		// Mock the GetItem operation for both config and status
+		GetItemFunc: func(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+			// Extract the SK to determine what's being requested
+			sk := ""
+			if val, ok := params.Key["SK"]; ok {
+				if s, ok := val.(*types.AttributeValueMemberS); ok {
+					sk = s.Value
+				}
+			}
+
+			// If requesting the config record
+			if sk == "CONFIG" {
+				return &dynamodb.GetItemOutput{
+					Item: map[string]types.AttributeValue{
+						"ownerCluster": &types.AttributeValueMemberS{Value: "test-cluster"},
+						"GSI1PK":       &types.AttributeValueMemberS{Value: "OPERATOR#test-operator"},
+						"GSI1SK":       &types.AttributeValueMemberS{Value: "GROUP#test-group"},
+					},
+				}, nil
+			}
+
+			// If requesting a cluster status record
+			if strings.HasPrefix(sk, "CLUSTER#") {
+				return &dynamodb.GetItemOutput{
+					Item: map[string]types.AttributeValue{
+						"clusterName": &types.AttributeValueMemberS{Value: "test-cluster"},
+						"health":      &types.AttributeValueMemberS{Value: string(HealthOK)},
+						"state":       &types.AttributeValueMemberS{Value: string(StateStandby)},
+						"GSI1PK":      &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
+						"GSI1SK":      &types.AttributeValueMemberS{Value: "GROUP#test-namespace#test-group"},
+					},
+				}, nil
+			}
+
+			return &dynamodb.GetItemOutput{}, nil
+		},
+	}
+
+	service := NewDynamoDBService(mockClient, "test-table", "test-cluster", "test-operator")
 
 	// Get a config record to check GSI fields
 	config, err := service.GetGroupConfig(context.Background(), "test-namespace", "test-group")

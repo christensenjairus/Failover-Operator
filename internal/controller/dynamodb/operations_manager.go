@@ -35,7 +35,7 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 		"targetCluster", targetCluster,
 		"forceFastMode", forceFastMode,
 	)
-	logger.V(1).Info("Executing failover")
+	logger.Info("Executing failover to target cluster", "targetCluster", targetCluster)
 
 	startTime := time.Now()
 
@@ -60,6 +60,8 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
+
+	// Use defer to ensure lock is released even on error
 	defer func() {
 		// Always try to release the lock, even if the failover fails
 		if releaseErr := m.ReleaseLock(ctx, namespace, name, leaseToken); releaseErr != nil {
@@ -67,26 +69,173 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 		}
 	}()
 
-	// 4. Update source cluster's state to FAILOVER
-	if err := m.updateClusterStateForFailover(ctx, namespace, name, sourceCluster, StateFailover); err != nil {
-		logger.Error(err, "Failed to update source cluster state")
+	// 4. Use a transaction to update all relevant records atomically
+	err = m.executeFailoverTransaction(ctx, namespace, name, sourceCluster, targetCluster, reason, failoverName, startTime)
+	if err != nil {
+		return fmt.Errorf("failover transaction failed: %w", err)
 	}
 
-	// 5. Update target cluster's state to FAILBACK
-	if err := m.updateClusterStateForFailover(ctx, namespace, name, targetCluster, StateFailback); err != nil {
-		logger.Error(err, "Failed to update target cluster state")
-	}
-
-	// 6. Transfer ownership from source to target
-	if err := m.transferOwnership(ctx, namespace, name, targetCluster); err != nil {
-		return fmt.Errorf("failed to transfer ownership: %w", err)
-	}
-
-	// 7. Record the failover event in history
+	// 5. Record the successful failover
 	endTime := time.Now()
-	if err := m.recordFailoverEvent(ctx, namespace, name, failoverName, sourceCluster, targetCluster, reason, startTime, endTime, "SUCCESS", int64(endTime.Sub(startTime).Seconds()), int64(endTime.Sub(startTime).Seconds())); err != nil {
-		logger.Error(err, "Failed to record failover event in history")
+	duration := int64(endTime.Sub(startTime).Seconds())
+
+	// Approximate the "downtime" - in reality this depends on how quickly services switch over
+	// We'll estimate it as half the operation time for now, but this can be refined
+	downtime := duration / 2
+
+	if err := m.recordFailoverEvent(ctx, namespace, name, failoverName, sourceCluster, targetCluster, reason, startTime, endTime, "SUCCESS", downtime, duration); err != nil {
+		logger.Error(err, "Failed to record failover event in history", "error", err)
 		// Continue despite this error, as the failover itself was successful
+	}
+
+	logger.Info("Failover executed successfully",
+		"sourceCluster", sourceCluster,
+		"targetCluster", targetCluster,
+		"duration", fmt.Sprintf("%ds", duration))
+
+	return nil
+}
+
+// executeFailoverTransaction performs the actual failover as a single atomic transaction
+func (m *OperationsManager) executeFailoverTransaction(ctx context.Context, namespace, name, sourceCluster, targetCluster, reason, failoverName string, startTime time.Time) error {
+	logger := log.FromContext(ctx)
+
+	// Get DynamoDB primary keys
+	pk := m.getGroupPK(namespace, name)
+	configSK := "CONFIG"
+	sourceSK := m.getClusterSK(sourceCluster)
+	targetSK := m.getClusterSK(targetCluster)
+
+	// Get current values to ensure conditional updates work correctly
+	config, err := m.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get current config for transaction: %w", err)
+	}
+
+	// Create transaction items
+	var transactItems []types.TransactWriteItem
+
+	// 1. Update group config to change ownership with condition check
+	// Condition: current owner must be sourceCluster and version must match
+	updateConfigExpr := "SET ownerCluster = :targetCluster, previousOwner = :sourceCluster, version = :newVersion, lastUpdated = :timestamp"
+	configCondition := "ownerCluster = :sourceCluster AND version = :currentVersion"
+
+	if config.LastFailover == nil {
+		updateConfigExpr += ", lastFailover = :failoverRef"
+	} else {
+		updateConfigExpr += ", lastFailover.#ts = :failoverTimestamp, lastFailover.#nm = :failoverName, lastFailover.#ns = :namespace"
+	}
+
+	failoverRefJSON, _ := json.Marshal(FailoverReference{
+		Name:      failoverName,
+		Namespace: namespace,
+		Timestamp: startTime,
+	})
+
+	configItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: configSK},
+			},
+			UpdateExpression:    aws.String(updateConfigExpr),
+			ConditionExpression: aws.String(configCondition),
+			ExpressionAttributeNames: map[string]string{
+				"#ts": "timestamp",
+				"#nm": "name",
+				"#ns": "namespace",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":targetCluster":     &types.AttributeValueMemberS{Value: targetCluster},
+				":sourceCluster":     &types.AttributeValueMemberS{Value: sourceCluster},
+				":currentVersion":    &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", config.Version)},
+				":newVersion":        &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", config.Version+1)},
+				":timestamp":         &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+				":failoverRef":       &types.AttributeValueMemberS{Value: string(failoverRefJSON)},
+				":failoverTimestamp": &types.AttributeValueMemberS{Value: startTime.Format(time.RFC3339)},
+				":failoverName":      &types.AttributeValueMemberS{Value: failoverName},
+				":namespace":         &types.AttributeValueMemberS{Value: namespace},
+			},
+		},
+	}
+	transactItems = append(transactItems, configItem)
+
+	// 2. Update source cluster status to FAILOVER
+	sourceItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: sourceSK},
+			},
+			UpdateExpression: aws.String("SET #state = :failoverState, lastHeartbeat = :timestamp"),
+			ExpressionAttributeNames: map[string]string{
+				"#state": "state",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":failoverState": &types.AttributeValueMemberS{Value: StateFailover},
+				":timestamp":     &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+			},
+		},
+	}
+	transactItems = append(transactItems, sourceItem)
+
+	// 3. Update target cluster status to PRIMARY (or FAILBACK if coming back to original)
+	targetItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: targetSK},
+			},
+			UpdateExpression: aws.String("SET #state = :primaryState, lastHeartbeat = :timestamp"),
+			ExpressionAttributeNames: map[string]string{
+				"#state": "state",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":primaryState": &types.AttributeValueMemberS{Value: StatePrimary},
+				":timestamp":    &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+			},
+		},
+	}
+	transactItems = append(transactItems, targetItem)
+
+	// Execute the transaction
+	_, err = m.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: transactItems,
+	})
+
+	if err != nil {
+		// Handle different types of transaction errors
+		var txnCanceledException *types.TransactionCanceledException
+		if errors.As(err, &txnCanceledException) {
+			// Check specific reasons for transaction failure
+			reasons := txnCanceledException.CancellationReasons
+
+			// Log detailed error information for each item
+			for i, reason := range reasons {
+				if reason.Code != nil {
+					itemDesc := "unknown"
+					if i == 0 {
+						itemDesc = "group config"
+					} else if i == 1 {
+						itemDesc = "source cluster"
+					} else if i == 2 {
+						itemDesc = "target cluster"
+					}
+
+					logger.Error(nil, "Transaction item failed",
+						"item", itemDesc,
+						"code", *reason.Code,
+						"message", aws.ToString(reason.Message))
+				}
+			}
+
+			return fmt.Errorf("failover transaction cancelled: %w", err)
+		}
+
+		return fmt.Errorf("failed to execute failover transaction: %w", err)
 	}
 
 	return nil
@@ -98,7 +247,9 @@ func (m *OperationsManager) ExecuteFailback(ctx context.Context, namespace, name
 		"namespace", namespace,
 		"name", name,
 	)
-	logger.V(1).Info("Executing failback")
+	logger.Info("Executing failback operation")
+
+	startTime := time.Now()
 
 	// 1. Get the current configuration to determine the current and previous owners
 	config, err := m.GetGroupConfig(ctx, namespace, name)
@@ -107,11 +258,203 @@ func (m *OperationsManager) ExecuteFailback(ctx context.Context, namespace, name
 	}
 
 	if config.PreviousOwner == "" {
-		return fmt.Errorf("no previous owner to failback to")
+		return fmt.Errorf("cannot failback: no previous owner recorded")
 	}
 
-	// 2. Execute a failover to the previous owner
-	return m.ExecuteFailover(ctx, namespace, name, fmt.Sprintf("failback-%s", time.Now().Format("20060102-150405")), config.PreviousOwner, reason, false)
+	sourceCluster := config.OwnerCluster  // Current owner
+	targetCluster := config.PreviousOwner // The cluster we're failing back to
+	failoverName := fmt.Sprintf("failback-%s", time.Now().Format("20060102-150405"))
+
+	// 2. Validate prerequisites
+	if err := m.ValidateFailoverPreconditions(ctx, namespace, name, targetCluster, false); err != nil {
+		return fmt.Errorf("failback preconditions not met: %w", err)
+	}
+
+	// 3. Acquire a lock to prevent concurrent operations
+	leaseToken, err := m.AcquireLock(ctx, namespace, name, fmt.Sprintf("Failback to %s", targetCluster))
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock for failback: %w", err)
+	}
+
+	// Use defer to ensure lock is released even on error
+	defer func() {
+		// Always try to release the lock, even if the failover fails
+		if releaseErr := m.ReleaseLock(ctx, namespace, name, leaseToken); releaseErr != nil {
+			logger.Error(releaseErr, "Failed to release lock after failback")
+		}
+	}()
+
+	// 4. Execute the failback transaction (similar to failover but with special handling)
+	err = m.executeFailbackTransaction(ctx, namespace, name, sourceCluster, targetCluster, reason, failoverName, startTime)
+	if err != nil {
+		return fmt.Errorf("failback transaction failed: %w", err)
+	}
+
+	// 5. Record the successful failback
+	endTime := time.Now()
+	duration := int64(endTime.Sub(startTime).Seconds())
+
+	// Approximate the "downtime" - for failback we might expect it to be shorter
+	// but still depends on how quickly services switch
+	downtime := duration / 3 // Estimate less downtime for failback than failover
+
+	if err := m.recordFailoverEvent(ctx, namespace, name, failoverName, sourceCluster, targetCluster, reason, startTime, endTime, "SUCCESS", downtime, duration); err != nil {
+		logger.Error(err, "Failed to record failback event in history", "error", err)
+		// Continue despite this error, as the failback itself was successful
+	}
+
+	logger.Info("Failback executed successfully",
+		"sourceCluster", sourceCluster,
+		"targetCluster", targetCluster,
+		"duration", fmt.Sprintf("%ds", duration))
+
+	return nil
+}
+
+// executeFailbackTransaction performs the actual failback as a single atomic transaction
+func (m *OperationsManager) executeFailbackTransaction(ctx context.Context, namespace, name, sourceCluster, targetCluster, reason, failbackName string, startTime time.Time) error {
+	logger := log.FromContext(ctx)
+
+	// Get DynamoDB primary keys
+	pk := m.getGroupPK(namespace, name)
+	configSK := "CONFIG"
+	sourceSK := m.getClusterSK(sourceCluster)
+	targetSK := m.getClusterSK(targetCluster)
+
+	// Get current values to ensure conditional updates work correctly
+	config, err := m.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get current config for transaction: %w", err)
+	}
+
+	// Create transaction items
+	var transactItems []types.TransactWriteItem
+
+	// 1. Update group config to change ownership with condition check
+	// For failback: set PreviousOwner to empty since we're returning to the original state
+	updateConfigExpr := "SET ownerCluster = :targetCluster, previousOwner = :emptyValue, version = :newVersion, lastUpdated = :timestamp"
+	configCondition := "ownerCluster = :sourceCluster AND version = :currentVersion"
+
+	if config.LastFailover == nil {
+		updateConfigExpr += ", lastFailover = :failoverRef"
+	} else {
+		updateConfigExpr += ", lastFailover.#ts = :failoverTimestamp, lastFailover.#nm = :failoverName, lastFailover.#ns = :namespace"
+	}
+
+	failoverRefJSON, _ := json.Marshal(FailoverReference{
+		Name:      failbackName,
+		Namespace: namespace,
+		Timestamp: startTime,
+	})
+
+	configItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: configSK},
+			},
+			UpdateExpression:    aws.String(updateConfigExpr),
+			ConditionExpression: aws.String(configCondition),
+			ExpressionAttributeNames: map[string]string{
+				"#ts": "timestamp",
+				"#nm": "name",
+				"#ns": "namespace",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":targetCluster":     &types.AttributeValueMemberS{Value: targetCluster},
+				":sourceCluster":     &types.AttributeValueMemberS{Value: sourceCluster},
+				":emptyValue":        &types.AttributeValueMemberS{Value: ""},
+				":currentVersion":    &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", config.Version)},
+				":newVersion":        &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", config.Version+1)},
+				":timestamp":         &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+				":failoverRef":       &types.AttributeValueMemberS{Value: string(failoverRefJSON)},
+				":failoverTimestamp": &types.AttributeValueMemberS{Value: startTime.Format(time.RFC3339)},
+				":failoverName":      &types.AttributeValueMemberS{Value: failbackName},
+				":namespace":         &types.AttributeValueMemberS{Value: namespace},
+			},
+		},
+	}
+	transactItems = append(transactItems, configItem)
+
+	// 2. Update source cluster (current owner) status to FAILBACK state
+	sourceItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: sourceSK},
+			},
+			UpdateExpression: aws.String("SET #state = :failbackState, lastHeartbeat = :timestamp"),
+			ExpressionAttributeNames: map[string]string{
+				"#state": "state",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":failbackState": &types.AttributeValueMemberS{Value: StateFailback},
+				":timestamp":     &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+			},
+		},
+	}
+	transactItems = append(transactItems, sourceItem)
+
+	// 3. Update target cluster (previous owner) to PRIMARY
+	targetItem := types.TransactWriteItem{
+		Update: &types.Update{
+			TableName: &m.tableName,
+			Key: map[string]types.AttributeValue{
+				"PK": &types.AttributeValueMemberS{Value: pk},
+				"SK": &types.AttributeValueMemberS{Value: targetSK},
+			},
+			UpdateExpression: aws.String("SET #state = :primaryState, lastHeartbeat = :timestamp"),
+			ExpressionAttributeNames: map[string]string{
+				"#state": "state",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":primaryState": &types.AttributeValueMemberS{Value: StatePrimary},
+				":timestamp":    &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+			},
+		},
+	}
+	transactItems = append(transactItems, targetItem)
+
+	// Execute the transaction
+	_, err = m.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: transactItems,
+	})
+
+	if err != nil {
+		// Handle different types of transaction errors
+		var txnCanceledException *types.TransactionCanceledException
+		if errors.As(err, &txnCanceledException) {
+			// Check specific reasons for transaction failure
+			reasons := txnCanceledException.CancellationReasons
+
+			// Log detailed error information for each item
+			for i, reason := range reasons {
+				if reason.Code != nil {
+					itemDesc := "unknown"
+					if i == 0 {
+						itemDesc = "group config"
+					} else if i == 1 {
+						itemDesc = "source cluster"
+					} else if i == 2 {
+						itemDesc = "target cluster"
+					}
+
+					logger.Error(nil, "Transaction item failed",
+						"item", itemDesc,
+						"code", *reason.Code,
+						"message", aws.ToString(reason.Message))
+				}
+			}
+
+			return fmt.Errorf("failback transaction cancelled: %w", err)
+		}
+
+		return fmt.Errorf("failed to execute failback transaction: %w", err)
+	}
+
+	return nil
 }
 
 // ValidateFailoverPreconditions validates that preconditions for a failover are met

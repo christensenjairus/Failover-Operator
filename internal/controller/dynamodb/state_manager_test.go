@@ -2,9 +2,13 @@ package dynamodb
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -107,12 +111,35 @@ func TestUpdateGroupConfig(t *testing.T) {
 
 func TestGetClusterStatus(t *testing.T) {
 	// Setup
-	baseManager := &BaseManager{
-		client:      &EnhancedTestDynamoDBClient{},
-		tableName:   "test-table",
-		clusterName: "test-cluster",
-		operatorID:  "test-operator",
+	mockClient := &MockDynamoDBClient{
+		GetItemFunc: func(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+			// Verify the input parameters
+			pk, ok := params.Key["PK"]
+			assert.True(t, ok, "PK key should be present")
+
+			sk, ok := params.Key["SK"]
+			assert.True(t, ok, "SK key should be present")
+
+			// Return a mock cluster status
+			return &dynamodb.GetItemOutput{
+				Item: map[string]types.AttributeValue{
+					"PK":             &types.AttributeValueMemberS{Value: pk.(*types.AttributeValueMemberS).Value},
+					"SK":             &types.AttributeValueMemberS{Value: sk.(*types.AttributeValueMemberS).Value},
+					"operatorID":     &types.AttributeValueMemberS{Value: "test-operator"},
+					"groupNamespace": &types.AttributeValueMemberS{Value: "test-namespace"},
+					"groupName":      &types.AttributeValueMemberS{Value: "test-name"},
+					"clusterName":    &types.AttributeValueMemberS{Value: "test-cluster"},
+					"health":         &types.AttributeValueMemberS{Value: string(HealthOK)},
+					"state":          &types.AttributeValueMemberS{Value: string(StateStandby)},
+					"lastHeartbeat":  &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+					"GSI1PK":         &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
+					"GSI1SK":         &types.AttributeValueMemberS{Value: "GROUP#test-namespace#test-name"},
+				},
+			}, nil
+		},
 	}
+
+	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -194,12 +221,26 @@ func TestUpdateClusterStatusLegacy(t *testing.T) {
 
 func TestGetAllClusterStatuses(t *testing.T) {
 	// Setup
-	baseManager := &BaseManager{
-		client:      &EnhancedTestDynamoDBClient{},
-		tableName:   "test-table",
-		clusterName: "test-cluster",
-		operatorID:  "test-operator",
+	mockClient := &MockDynamoDBClient{
+		// Mock query operation to return cluster statuses
+		QueryFunc: func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+			// Return cluster statuses
+			return &dynamodb.QueryOutput{
+				Items: []map[string]types.AttributeValue{
+					{
+						"PK":          &types.AttributeValueMemberS{Value: "GROUP#test-operator#test-namespace#test-name"},
+						"SK":          &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
+						"operatorID":  &types.AttributeValueMemberS{Value: "test-operator"},
+						"clusterName": &types.AttributeValueMemberS{Value: "test-cluster"},
+						"health":      &types.AttributeValueMemberS{Value: string(HealthOK)},
+						"state":       &types.AttributeValueMemberS{Value: string(StatePrimary)},
+					},
+				},
+			}, nil
+		},
 	}
+
+	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -217,12 +258,40 @@ func TestGetAllClusterStatuses(t *testing.T) {
 
 func TestGetFailoverHistory(t *testing.T) {
 	// Setup
-	baseManager := &BaseManager{
-		client:      &EnhancedTestDynamoDBClient{},
-		tableName:   "test-table",
-		clusterName: "test-cluster",
-		operatorID:  "test-operator",
+	mockClient := &MockDynamoDBClient{
+		// Mock query operation to return history records
+		QueryFunc: func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+			// Check if this is a query for history records
+			keyCondition := aws.ToString(params.KeyConditionExpression)
+			if strings.Contains(keyCondition, "begins_with") {
+				// Return a history entry
+				return &dynamodb.QueryOutput{
+					Items: []map[string]types.AttributeValue{
+						{
+							"PK":             &types.AttributeValueMemberS{Value: "GROUP#test-operator#test-namespace#test-name"},
+							"SK":             &types.AttributeValueMemberS{Value: "HISTORY#20230101120000"},
+							"operatorID":     &types.AttributeValueMemberS{Value: "test-operator"},
+							"groupNamespace": &types.AttributeValueMemberS{Value: "test-namespace"},
+							"groupName":      &types.AttributeValueMemberS{Value: "test-name"},
+							"failoverName":   &types.AttributeValueMemberS{Value: "Failover-1"},
+							"sourceCluster":  &types.AttributeValueMemberS{Value: "source-cluster"},
+							"targetCluster":  &types.AttributeValueMemberS{Value: "target-cluster"},
+							"reason":         &types.AttributeValueMemberS{Value: "Test failover"},
+							"startTime":      &types.AttributeValueMemberS{Value: "2023-01-01T12:00:00Z"},
+							"endTime":        &types.AttributeValueMemberS{Value: "2023-01-01T12:01:00Z"},
+							"status":         &types.AttributeValueMemberS{Value: "SUCCESS"},
+							"downtime":       &types.AttributeValueMemberN{Value: "30"},
+							"duration":       &types.AttributeValueMemberN{Value: "60"},
+						},
+					},
+				}, nil
+			}
+			// Return empty result for other queries
+			return &dynamodb.QueryOutput{}, nil
+		},
 	}
+
+	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -235,7 +304,8 @@ func TestGetFailoverHistory(t *testing.T) {
 	// Verify the results
 	assert.NoError(t, err, "GetFailoverHistory should not return an error")
 	assert.NotNil(t, history, "History should not be nil")
-	assert.Len(t, history, 1, "History should have exactly one element with limit=1")
+	assert.Len(t, history, limit, "History should have exactly one element with limit=1")
+	assert.Equal(t, "Failover-1", history[0].FailoverName, "FailoverName should match the expected value")
 }
 
 func TestSyncClusterState(t *testing.T) {

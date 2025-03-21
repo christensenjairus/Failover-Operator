@@ -2,6 +2,7 @@ package cronjobs
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -11,78 +12,111 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// FluxReconcileAnnotation is the annotation used by Flux to control reconciliation
-const FluxReconcileAnnotation = "kustomize.toolkit.fluxcd.io/reconcile"
+// Constants for annotations
+const (
+	// FluxReconcileAnnotation is the annotation used to disable Flux reconciliation
+	FluxReconcileAnnotation = "reconcile.fluxcd.io/requestedAt"
 
-// DisabledValue is the value for the Flux reconcile annotation to disable reconciliation
-const DisabledValue = "disabled"
+	// DisabledValue is used to disable Flux reconciliation
+	DisabledValue = "disabled"
+)
 
 // Manager handles operations related to CronJob resources
-// This manager provides methods to control CronJob suspension states during failover operations
+// This manager provides methods to suspend, resume, and check the status of CronJobs
 type Manager struct {
+	// Kubernetes client for API interactions
 	client client.Client
 }
 
 // NewManager creates a new CronJob manager
-// The client is used to interact with the Kubernetes API
+// The client is used to interact with the Kubernetes API server
 func NewManager(client client.Client) *Manager {
 	return &Manager{
 		client: client,
 	}
 }
 
-// ScaleCronJob suspends or unsuspends a cronjob
-// This is the core scaling method for CronJobs - unlike Deployments/StatefulSets,
-// CronJobs are "scaled" by changing their suspended flag rather than a replica count
-func (m *Manager) ScaleCronJob(ctx context.Context, name, namespace string, suspended bool) error {
+// ScaleCronJob sets the suspended state of a CronJob
+// If suspend is true, the CronJob will be suspended and won't create new jobs
+// If suspend is false, the CronJob will be resumed and will create jobs according to its schedule
+func (m *Manager) ScaleCronJob(ctx context.Context, name, namespace string, suspend bool) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Scaling cronjob", "suspended", suspended)
+	logger.Info("Scaling CronJob", "suspend", suspend)
 
-	// Get the cronjob
+	// Get the CronJob
 	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to get CronJob")
 		return err
 	}
 
-	// Check if already in desired state
-	if cronjob.Spec.Suspend != nil && *cronjob.Spec.Suspend == suspended {
-		logger.Info("CronJob already in desired state", "suspended", suspended)
-		return nil
-	}
-
-	// Update the suspended flag
-	cronjob.Spec.Suspend = &suspended
-
-	// Update the cronjob
-	if err := m.client.Update(ctx, cronjob); err != nil {
-		logger.Error(err, "Failed to update cronjob")
+	// Update the suspend field
+	cronjob.Spec.Suspend = &suspend
+	err = m.client.Update(ctx, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to update CronJob")
 		return err
 	}
 
-	logger.Info("Successfully scaled cronjob", "suspended", suspended)
+	logger.Info("Successfully scaled CronJob", "suspend", suspend)
 	return nil
 }
 
-// Suspend suspends a cronjob
-// Used during failover to STANDBY state to prevent jobs from running
+// Suspend suspends a CronJob so it doesn't create new jobs
+// This is typically used during failover to pause scheduled jobs in the secondary cluster
 func (m *Manager) Suspend(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.Info("Suspending CronJob")
 	return m.ScaleCronJob(ctx, name, namespace, true)
 }
 
-// Resume resumes a suspended cronjob
-// Used during failover to PRIMARY state to allow jobs to run
+// Resume resumes a previously suspended CronJob, allowing it to create new jobs
+// This is typically used during failover to activate scheduled jobs in the primary cluster
 func (m *Manager) Resume(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.Info("Resuming CronJob")
 	return m.ScaleCronJob(ctx, name, namespace, false)
 }
 
-// WaitForSuspended waits until a cronjob is suspended
-// This is useful during failover to ensure the cronjob is fully suspended before proceeding
-func (m *Manager) WaitForSuspended(ctx context.Context, name, namespace string, timeout int) error {
-	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Waiting for cronjob to be suspended", "timeout", timeout)
+// IsReady checks if a CronJob is not suspended
+// Returns true if the CronJob is not suspended (ready to schedule jobs)
+func (m *Manager) IsReady(ctx context.Context, name, namespace string) (bool, error) {
+	suspended, err := m.IsSuspended(ctx, name, namespace)
+	if err != nil {
+		return false, err
+	}
+	return !suspended, nil
+}
 
-	return wait.PollImmediate(time.Second, time.Duration(timeout)*time.Second, func() (bool, error) {
+// IsSuspended checks if a CronJob is suspended
+// Returns true if the CronJob is suspended (not scheduling jobs)
+func (m *Manager) IsSuspended(ctx context.Context, name, namespace string) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.V(1).Info("Checking if CronJob is suspended")
+
+	// Get the CronJob
+	cronjob := &batchv1.CronJob{}
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to get CronJob")
+		return false, err
+	}
+
+	// Check if suspended
+	if cronjob.Spec.Suspend != nil && *cronjob.Spec.Suspend {
+		return true, nil
+	}
+	return false, nil
+}
+
+// WaitForSuspended waits until a CronJob is suspended or timeout is reached
+// Returns error if the CronJob does not become suspended within the timeout period
+func (m *Manager) WaitForSuspended(ctx context.Context, name, namespace string, timeoutSeconds int) error {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.Info("Waiting for CronJob to be suspended", "timeout", timeoutSeconds)
+
+	return wait.PollImmediate(time.Second, time.Duration(timeoutSeconds)*time.Second, func() (bool, error) {
 		suspended, err := m.IsSuspended(ctx, name, namespace)
 		if err != nil {
 			return false, err
@@ -91,13 +125,13 @@ func (m *Manager) WaitForSuspended(ctx context.Context, name, namespace string, 
 	})
 }
 
-// WaitForResumed waits until a cronjob is resumed
-// This is useful during failover to ensure the cronjob is fully resumed before proceeding
-func (m *Manager) WaitForResumed(ctx context.Context, name, namespace string, timeout int) error {
+// WaitForResumed waits until a CronJob is resumed or timeout is reached
+// Returns error if the CronJob does not become resumed within the timeout period
+func (m *Manager) WaitForResumed(ctx context.Context, name, namespace string, timeoutSeconds int) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Waiting for cronjob to be resumed", "timeout", timeout)
+	logger.Info("Waiting for CronJob to be resumed", "timeout", timeoutSeconds)
 
-	return wait.PollImmediate(time.Second, time.Duration(timeout)*time.Second, func() (bool, error) {
+	return wait.PollImmediate(time.Second, time.Duration(timeoutSeconds)*time.Second, func() (bool, error) {
 		ready, err := m.IsReady(ctx, name, namespace)
 		if err != nil {
 			return false, err
@@ -106,144 +140,150 @@ func (m *Manager) WaitForResumed(ctx context.Context, name, namespace string, ti
 	})
 }
 
-// IsReady checks if a cronjob is ready (not suspended)
-// This is used to determine if a cronjob is in the appropriate state for PRIMARY role
-func (m *Manager) IsReady(ctx context.Context, name, namespace string) (bool, error) {
+// AddAnnotation adds an annotation to a CronJob
+// Useful for adding metadata or configuration to the CronJob
+func (m *Manager) AddAnnotation(ctx context.Context, name, namespace, key, value string) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.V(1).Info("Checking if cronjob is ready")
+	logger.Info("Adding annotation", "key", key, "value", value)
 
+	// Get the CronJob
 	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
-		return false, err
-	}
-
-	// A cronjob is ready when it is not suspended
-	return cronjob.Spec.Suspend == nil || !*cronjob.Spec.Suspend, nil
-}
-
-// IsSuspended checks if a cronjob is suspended
-// This is used to determine if a cronjob is in the appropriate state for STANDBY role
-func (m *Manager) IsSuspended(ctx context.Context, name, namespace string) (bool, error) {
-	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.V(1).Info("Checking if cronjob is suspended")
-
-	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
-		return false, err
-	}
-
-	// A cronjob is suspended when the suspend flag is true
-	return cronjob.Spec.Suspend != nil && *cronjob.Spec.Suspend, nil
-}
-
-// AddFluxAnnotation adds the flux reconcile annotation to disable automatic reconciliation
-// This is used to prevent Flux from overriding our manual scaling during failover
-func (m *Manager) AddFluxAnnotation(ctx context.Context, name, namespace string) error {
-	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Adding Flux annotation to cronjob")
-
-	return m.AddAnnotation(ctx, name, namespace, FluxReconcileAnnotation, DisabledValue)
-}
-
-// RemoveFluxAnnotation removes the flux reconcile annotation to enable automatic reconciliation
-// This is used to allow Flux to resume normal reconciliation after failover is complete
-func (m *Manager) RemoveFluxAnnotation(ctx context.Context, name, namespace string) error {
-	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Removing Flux annotation from cronjob")
-
-	return m.RemoveAnnotation(ctx, name, namespace, FluxReconcileAnnotation)
-}
-
-// AddAnnotation adds a specific annotation to a cronjob
-// This is a general-purpose method for adding any annotation to a cronjob
-func (m *Manager) AddAnnotation(ctx context.Context, name, namespace, annotationKey, annotationValue string) error {
-	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Adding annotation to cronjob", "key", annotationKey, "value", annotationValue)
-
-	// Get the cronjob
-	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to get CronJob")
 		return err
-	}
-
-	// Initialize annotations map if it doesn't exist
-	if cronjob.Annotations == nil {
-		cronjob.Annotations = make(map[string]string)
-	}
-
-	// Check if the annotation already exists with the same value
-	if value, exists := cronjob.Annotations[annotationKey]; exists && value == annotationValue {
-		logger.Info("Annotation already exists with the same value", "key", annotationKey, "value", annotationValue)
-		return nil
 	}
 
 	// Add the annotation
-	cronjob.Annotations[annotationKey] = annotationValue
+	if cronjob.Annotations == nil {
+		cronjob.Annotations = make(map[string]string)
+	}
+	cronjob.Annotations[key] = value
 
-	// Update the cronjob
-	if err := m.client.Update(ctx, cronjob); err != nil {
-		logger.Error(err, "Failed to update cronjob with annotation")
+	// Update the CronJob
+	err = m.client.Update(ctx, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to update CronJob with annotation")
 		return err
 	}
 
-	logger.Info("Successfully added annotation to cronjob", "key", annotationKey, "value", annotationValue)
 	return nil
 }
 
-// RemoveAnnotation removes a specific annotation from a cronjob
-// This is a general-purpose method for removing any annotation from a cronjob
-func (m *Manager) RemoveAnnotation(ctx context.Context, name, namespace, annotationKey string) error {
+// RemoveAnnotation removes an annotation from a CronJob
+// Useful for cleaning up or changing the behavior of the CronJob
+func (m *Manager) RemoveAnnotation(ctx context.Context, name, namespace, key string) error {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.Info("Removing annotation from cronjob", "key", annotationKey)
+	logger.Info("Removing annotation", "key", key)
 
-	// Get the cronjob
+	// Get the CronJob
 	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to get CronJob")
 		return err
 	}
 
-	// Check if the annotation exists
-	if cronjob.Annotations == nil || cronjob.Annotations[annotationKey] == "" {
-		logger.Info("Annotation doesn't exist, nothing to remove", "key", annotationKey)
-		return nil
+	// Remove the annotation if it exists
+	if cronjob.Annotations != nil {
+		if _, exists := cronjob.Annotations[key]; exists {
+			delete(cronjob.Annotations, key)
+
+			// Update the CronJob
+			err = m.client.Update(ctx, cronjob)
+			if err != nil {
+				logger.Error(err, "Failed to update CronJob after removing annotation")
+				return err
+			}
+		}
 	}
 
-	// Remove the annotation
-	delete(cronjob.Annotations, annotationKey)
-
-	// Update the cronjob
-	if err := m.client.Update(ctx, cronjob); err != nil {
-		logger.Error(err, "Failed to update cronjob after removing annotation")
-		return err
-	}
-
-	logger.Info("Successfully removed annotation from cronjob", "key", annotationKey)
 	return nil
 }
 
-// GetAnnotation gets the value of a specific annotation from a cronjob
-// This is a general-purpose method for retrieving any annotation from a cronjob
-func (m *Manager) GetAnnotation(ctx context.Context, name, namespace, annotationKey string) (string, bool, error) {
+// GetAnnotation gets the value of an annotation from a CronJob
+// Returns the value and a boolean indicating if the annotation exists
+func (m *Manager) GetAnnotation(ctx context.Context, name, namespace, key string) (string, bool, error) {
 	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
-	logger.V(1).Info("Getting annotation from cronjob", "key", annotationKey)
+	logger.V(1).Info("Getting annotation", "key", key)
 
-	// Get the cronjob
+	// Get the CronJob
 	cronjob := &batchv1.CronJob{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob); err != nil {
-		logger.Error(err, "Failed to get cronjob")
+	err := m.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cronjob)
+	if err != nil {
+		logger.Error(err, "Failed to get CronJob")
 		return "", false, err
 	}
 
-	// Check if annotations map exists
-	if cronjob.Annotations == nil {
-		return "", false, nil
+	// Get the annotation if it exists
+	if cronjob.Annotations != nil {
+		if value, exists := cronjob.Annotations[key]; exists {
+			return value, true, nil
+		}
 	}
 
-	// Get the annotation value
-	value, exists := cronjob.Annotations[annotationKey]
-	return value, exists, nil
+	return "", false, nil
+}
+
+// AddFluxAnnotation adds the Flux reconcile annotation with a disabled value
+// This prevents Flux from reconciling the resource during failover operations
+func (m *Manager) AddFluxAnnotation(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.Info("Adding Flux disable annotation")
+	return m.AddAnnotation(ctx, name, namespace, FluxReconcileAnnotation, DisabledValue)
+}
+
+// RemoveFluxAnnotation removes the Flux reconcile annotation
+// This allows Flux to resume reconciling the resource
+func (m *Manager) RemoveFluxAnnotation(ctx context.Context, name, namespace string) error {
+	logger := log.FromContext(ctx).WithValues("cronjob", name, "namespace", namespace)
+	logger.Info("Removing Flux disable annotation")
+	return m.RemoveAnnotation(ctx, name, namespace, FluxReconcileAnnotation)
+}
+
+// ProcessCronJobs processes a list of CronJobs, either suspending or resuming them
+// If active is true, the CronJobs will be resumed
+// If active is false, the CronJobs will be suspended
+func (m *Manager) ProcessCronJobs(ctx context.Context, namespace string, names []string, active bool) {
+	logger := log.FromContext(ctx).WithValues("namespace", namespace)
+	logger.Info("Processing CronJobs", "count", len(names), "active", active)
+
+	for _, name := range names {
+		if active {
+			if err := m.Resume(ctx, name, namespace); err != nil {
+				logger.Error(err, "Failed to resume CronJob", "cronjob", name)
+			}
+		} else {
+			if err := m.Suspend(ctx, name, namespace); err != nil {
+				logger.Error(err, "Failed to suspend CronJob", "cronjob", name)
+			}
+		}
+	}
+}
+
+// WaitForAllCronJobsState waits for all CronJobs to reach the desired state
+// If suspended is true, waits for all to be suspended
+// If suspended is false, waits for all to be resumed
+func (m *Manager) WaitForAllCronJobsState(ctx context.Context, namespace string, names []string, suspended bool, timeoutSeconds int) error {
+	logger := log.FromContext(ctx).WithValues("namespace", namespace)
+	stateStr := "resumed"
+	if suspended {
+		stateStr = "suspended"
+	}
+	logger.Info(fmt.Sprintf("Waiting for all CronJobs to be %s", stateStr), "count", len(names), "timeout", timeoutSeconds)
+
+	for _, name := range names {
+		var err error
+		if suspended {
+			err = m.WaitForSuspended(ctx, name, namespace, timeoutSeconds)
+		} else {
+			err = m.WaitForResumed(ctx, name, namespace, timeoutSeconds)
+		}
+		if err != nil {
+			logger.Error(err, fmt.Sprintf("Failed waiting for CronJob to be %s", stateStr), "cronjob", name)
+			return err
+		}
+	}
+
+	return nil
 }

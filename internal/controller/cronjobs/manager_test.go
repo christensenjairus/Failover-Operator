@@ -13,35 +13,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func setupTestManager() (*Manager, runtime.Object) {
+// setupTestManager creates a test manager with a fake client and test CronJob
+func setupTestManager() (*Manager, *batchv1.CronJob) {
 	// Create a scheme
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = batchv1.AddToScheme(scheme)
 
-	// Create a CronJob fixture
+	// Create a test CronJob
+	suspend := false
 	cronjob := &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cronjob",
-			Namespace: "test-namespace",
+			Namespace: "default",
 		},
 		Spec: batchv1.CronJobSpec{
 			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
 		},
 	}
 
 	// Create a fake client with the CronJob
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithRuntimeObjects(cronjob).
+		WithObjects(cronjob).
 		Build()
 
 	return NewManager(client), cronjob
 }
 
+// TestNewManager tests the creation of a new CronJob manager
 func TestNewManager(t *testing.T) {
 	// Create a fake client
-	client := fake.NewClientBuilder().Build()
+	scheme := runtime.NewScheme()
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	// Create the manager
 	manager := NewManager(client)
@@ -51,267 +56,264 @@ func TestNewManager(t *testing.T) {
 	assert.Equal(t, client, manager.client)
 }
 
+// TestScaleCronJob tests scaling (suspending/unsuspending) a CronJob
 func TestScaleCronJob(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
+	// Verify initial state
+	assert.False(t, *cronjob.Spec.Suspend)
+
 	// Call the function to suspend the cronjob
-	err := manager.ScaleCronJob(ctx, "test-cronjob", "test-namespace", true)
-
-	// Assert no error
+	err := manager.ScaleCronJob(ctx, cronjob.Name, cronjob.Namespace, true)
 	assert.NoError(t, err)
 
-	// Get the updated cronjob
+	// Get the updated CronJob
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
 	assert.NoError(t, err)
 
-	// Assert the cronjob is now suspended
-	assert.NotNil(t, updatedCronJob.Spec.Suspend)
+	// Assert the CronJob is suspended
 	assert.True(t, *updatedCronJob.Spec.Suspend)
+
+	// Call the function to unsuspend the cronjob
+	err = manager.ScaleCronJob(ctx, cronjob.Name, cronjob.Namespace, false)
+	assert.NoError(t, err)
+
+	// Get the updated CronJob again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+
+	// Assert the CronJob is unsuspended
+	assert.False(t, *updatedCronJob.Spec.Suspend)
 }
 
+// TestSuspend tests suspending a CronJob
 func TestSuspend(t *testing.T) {
 	// Setup
-	manager, _ := setupTestManager()
+	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.Suspend(ctx, "test-cronjob", "test-namespace")
+	// Verify initial state
+	assert.False(t, *cronjob.Spec.Suspend)
 
-	// Assert no error
+	// Call the function to suspend the cronjob
+	err := manager.Suspend(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
 
-	// Get the updated cronjob
+	// Get the updated CronJob
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
 	assert.NoError(t, err)
 
-	// Assert the cronjob is suspended
-	assert.NotNil(t, updatedCronJob.Spec.Suspend)
+	// Assert the CronJob is suspended
 	assert.True(t, *updatedCronJob.Spec.Suspend)
 }
 
+// TestResume tests resuming a CronJob
 func TestResume(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Pre-suspend the cronjob
-	suspended := true
-	cronjob.(*batchv1.CronJob).Spec.Suspend = &suspended
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	// First suspend the cronjob
+	suspend := true
+	cronjob.Spec.Suspend = &suspend
+	err := manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function to resume
-	err = manager.Resume(ctx, "test-cronjob", "test-namespace")
-
-	// Assert no error
-	assert.NoError(t, err)
-
-	// Get the updated cronjob
+	// Verify it's suspended
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+	assert.True(t, *updatedCronJob.Spec.Suspend)
+
+	// Call the function to resume the cronjob
+	err = manager.Resume(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
 
-	// Assert the cronjob is not suspended
-	assert.NotNil(t, updatedCronJob.Spec.Suspend)
+	// Get the updated CronJob again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+
+	// Assert the CronJob is resumed
 	assert.False(t, *updatedCronJob.Spec.Suspend)
 }
 
+// TestIsReady tests checking if a CronJob is ready (not suspended)
 func TestIsReady(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Test with unsuspended cronjob
-	suspended := false
-	cronjob.(*batchv1.CronJob).Spec.Suspend = &suspended
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
-	assert.NoError(t, err)
-
-	// Call the function
-	ready, err := manager.IsReady(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
+	// Test with unsuspended CronJob (should be ready)
+	ready, err := manager.IsReady(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
 	assert.True(t, ready)
 
-	// Test with suspended cronjob
-	suspended = true
-	cronjob.(*batchv1.CronJob).Spec.Suspend = &suspended
-	err = manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	// Update CronJob to be suspended
+	suspend := true
+	cronjob.Spec.Suspend = &suspend
+	err = manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function
-	ready, err = manager.IsReady(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
+	// Test with suspended CronJob (should not be ready)
+	ready, err = manager.IsReady(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
 	assert.False(t, ready)
 }
 
+// TestIsSuspended tests checking if a CronJob is suspended
 func TestIsSuspended(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Test with unsuspended cronjob
-	suspended := false
-	cronjob.(*batchv1.CronJob).Spec.Suspend = &suspended
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	// Test with unsuspended CronJob (should not be suspended)
+	suspended, err := manager.IsSuspended(ctx, cronjob.Name, cronjob.Namespace)
+	assert.NoError(t, err)
+	assert.False(t, suspended)
+
+	// Update CronJob to be suspended
+	suspend := true
+	cronjob.Spec.Suspend = &suspend
+	err = manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function
-	isSuspended, err := manager.IsSuspended(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
+	// Test with suspended CronJob (should be suspended)
+	suspended, err = manager.IsSuspended(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
-	assert.False(t, isSuspended)
-
-	// Test with suspended cronjob
-	suspended = true
-	cronjob.(*batchv1.CronJob).Spec.Suspend = &suspended
-	err = manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
-	assert.NoError(t, err)
-
-	// Call the function
-	isSuspended, err = manager.IsSuspended(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
-	assert.NoError(t, err)
-	assert.True(t, isSuspended)
+	assert.True(t, suspended)
 }
 
+// TestAddAnnotation tests adding an annotation to a CronJob
 func TestAddAnnotation(t *testing.T) {
 	// Setup
-	manager, _ := setupTestManager()
+	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.AddAnnotation(ctx, "test-cronjob", "test-namespace", "test-key", "test-value")
-
-	// Assert
+	// Call the function to add an annotation
+	err := manager.AddAnnotation(ctx, cronjob.Name, cronjob.Namespace, "test-key", "test-value")
 	assert.NoError(t, err)
 
-	// Get the updated cronjob
+	// Get the updated CronJob
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
 	assert.NoError(t, err)
 
-	// Assert annotation was added
+	// Assert the annotation was added
 	assert.Equal(t, "test-value", updatedCronJob.Annotations["test-key"])
 }
 
+// TestRemoveAnnotation tests removing an annotation from a CronJob
 func TestRemoveAnnotation(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
 	// Add an annotation first
-	if cronjob.(*batchv1.CronJob).Annotations == nil {
-		cronjob.(*batchv1.CronJob).Annotations = make(map[string]string)
+	if cronjob.Annotations == nil {
+		cronjob.Annotations = make(map[string]string)
 	}
-	cronjob.(*batchv1.CronJob).Annotations["test-key"] = "test-value"
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	cronjob.Annotations["test-key"] = "test-value"
+	err := manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function to remove annotation
-	err = manager.RemoveAnnotation(ctx, "test-cronjob", "test-namespace", "test-key")
-
-	// Assert
-	assert.NoError(t, err)
-
-	// Get the updated cronjob
+	// Verify the annotation exists
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-value", updatedCronJob.Annotations["test-key"])
+
+	// Call the function to remove the annotation
+	err = manager.RemoveAnnotation(ctx, cronjob.Name, cronjob.Namespace, "test-key")
 	assert.NoError(t, err)
 
-	// Assert annotation was removed
+	// Get the updated CronJob again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+
+	// Assert the annotation was removed
 	_, exists := updatedCronJob.Annotations["test-key"]
 	assert.False(t, exists)
 }
 
+// TestGetAnnotation tests getting an annotation from a CronJob
 func TestGetAnnotation(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
 	// Add an annotation
-	if cronjob.(*batchv1.CronJob).Annotations == nil {
-		cronjob.(*batchv1.CronJob).Annotations = make(map[string]string)
+	if cronjob.Annotations == nil {
+		cronjob.Annotations = make(map[string]string)
 	}
-	cronjob.(*batchv1.CronJob).Annotations["test-key"] = "test-value"
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	cronjob.Annotations["test-key"] = "test-value"
+	err := manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function
-	value, exists, err := manager.GetAnnotation(ctx, "test-cronjob", "test-namespace", "test-key")
-
-	// Assert
+	// Call the function to get the annotation
+	value, exists, err := manager.GetAnnotation(ctx, cronjob.Name, cronjob.Namespace, "test-key")
 	assert.NoError(t, err)
 	assert.True(t, exists)
 	assert.Equal(t, "test-value", value)
 
-	// Test for non-existent annotation
-	value, exists, err = manager.GetAnnotation(ctx, "test-cronjob", "test-namespace", "non-existent-key")
-
-	// Assert
+	// Test getting a non-existent annotation
+	value, exists, err = manager.GetAnnotation(ctx, cronjob.Name, cronjob.Namespace, "non-existent")
 	assert.NoError(t, err)
 	assert.False(t, exists)
 	assert.Equal(t, "", value)
 }
 
+// TestAddFluxAnnotation tests adding the Flux reconcile annotation
 func TestAddFluxAnnotation(t *testing.T) {
 	// Setup
-	manager, _ := setupTestManager()
+	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.AddFluxAnnotation(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
+	// Call the function to add flux annotation
+	err := manager.AddFluxAnnotation(ctx, cronjob.Name, cronjob.Namespace)
 	assert.NoError(t, err)
 
-	// Get the updated cronjob
+	// Get the updated CronJob
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
 	assert.NoError(t, err)
 
 	// Assert flux annotation was added
 	assert.Equal(t, DisabledValue, updatedCronJob.Annotations[FluxReconcileAnnotation])
 }
 
+// TestRemoveFluxAnnotation tests removing the Flux reconcile annotation
 func TestRemoveFluxAnnotation(t *testing.T) {
 	// Setup
 	manager, cronjob := setupTestManager()
 	ctx := context.Background()
 
-	// Add the flux annotation first
-	if cronjob.(*batchv1.CronJob).Annotations == nil {
-		cronjob.(*batchv1.CronJob).Annotations = make(map[string]string)
+	// Add flux annotation first
+	if cronjob.Annotations == nil {
+		cronjob.Annotations = make(map[string]string)
 	}
-	cronjob.(*batchv1.CronJob).Annotations[FluxReconcileAnnotation] = DisabledValue
-	err := manager.client.Update(ctx, cronjob.(*batchv1.CronJob))
+	cronjob.Annotations[FluxReconcileAnnotation] = DisabledValue
+	err := manager.client.Update(ctx, cronjob)
 	assert.NoError(t, err)
 
-	// Call the function
-	err = manager.RemoveFluxAnnotation(ctx, "test-cronjob", "test-namespace")
-
-	// Assert
-	assert.NoError(t, err)
-
-	// Get the updated cronjob
+	// Verify the annotation exists
 	updatedCronJob := &batchv1.CronJob{}
-	err = manager.client.Get(ctx, types.NamespacedName{Name: "test-cronjob", Namespace: "test-namespace"}, updatedCronJob)
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
+	assert.NoError(t, err)
+	assert.Equal(t, DisabledValue, updatedCronJob.Annotations[FluxReconcileAnnotation])
+
+	// Call the function to remove flux annotation
+	err = manager.RemoveFluxAnnotation(ctx, cronjob.Name, cronjob.Namespace)
+	assert.NoError(t, err)
+
+	// Get the updated CronJob again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: cronjob.Name, Namespace: cronjob.Namespace}, updatedCronJob)
 	assert.NoError(t, err)
 
 	// Assert flux annotation was removed
 	_, exists := updatedCronJob.Annotations[FluxReconcileAnnotation]
 	assert.False(t, exists)
 }
-
-// Note: WaitForSuspended and WaitForResumed are more complex to test due to polling behavior
-// For proper testing, we would need to mock the wait.PollImmediate function or use a test clock
-// These tests would need to be more sophisticated than the ones here

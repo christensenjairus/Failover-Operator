@@ -82,7 +82,7 @@ func (m *Manager) UpdateVirtualService(ctx context.Context, name, namespace, sta
 	// Set DNS controller annotation based on state
 	updated := false
 	isActive := state == "active"
-	
+
 	if isActive {
 		if annotations[DNSControllerAnnotation] != DNSControllerEnabled {
 			annotations[DNSControllerAnnotation] = DNSControllerEnabled
@@ -297,7 +297,7 @@ func (m *Manager) WaitForReady(ctx context.Context, name, namespace string, time
 
 	// Calculate deadline
 	timeout := time.Duration(timeoutSeconds) * time.Second
-	
+
 	// Use exponential backoff to check
 	backoff := wait.Backoff{
 		Duration: 1 * time.Second,

@@ -6,13 +6,54 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func setupTestManager() *Manager {
-	// Create a fake client
-	client := fake.NewClientBuilder().Build()
-	return NewManager(client)
+// VolumeReplication GroupVersionKind for unstructured creation
+var volumeReplicationGVK = schema.GroupVersionKind{
+	Group:   "replication.storage.openshift.io",
+	Version: "v1alpha1",
+	Kind:    "VolumeReplication",
+}
+
+// setupTestManager creates a test manager with a fake client
+func setupTestManager() (*Manager, *unstructured.Unstructured) {
+	// Create a scheme
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	// Create a test VolumeReplication
+	vr := &unstructured.Unstructured{}
+	vr.SetGroupVersionKind(volumeReplicationGVK)
+	vr.SetName("test-vr")
+	vr.SetNamespace("default")
+	vr.Object["spec"] = map[string]interface{}{
+		"replicationState": "primary",
+	}
+	vr.Object["status"] = map[string]interface{}{
+		"conditions": []interface{}{
+			map[string]interface{}{
+				"type":   "Healthy",
+				"status": "True",
+			},
+			map[string]interface{}{
+				"type":   "DataProtected",
+				"status": "True",
+			},
+		},
+	}
+
+	// Create a fake client with the test VolumeReplication
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vr).
+		Build()
+
+	return NewManager(client), vr
 }
 
 func TestNewManager(t *testing.T) {
@@ -29,175 +70,208 @@ func TestNewManager(t *testing.T) {
 
 func TestSetVolumeReplicationState(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.SetVolumeReplicationState(ctx, "test-vr", "test-namespace", Primary)
+	// Call the function to set the state to secondary
+	err := manager.SetVolumeReplicationState(ctx, vr.GetName(), vr.GetNamespace(), Secondary)
 
-	// Assert
+	// Since this is a stub, we expect no error but no actual state change
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the VolumeReplication state was updated
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The VolumeReplication resource was retrieved
+	// 2. The replicationState field was updated to the requested state
+	// 3. The resource was successfully updated in the API
 }
 
 func TestSetPrimary(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.SetPrimary(ctx, "test-vr", "test-namespace")
+	// Call the function to set to primary
+	err := manager.SetPrimary(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the VolumeReplication was set to primary
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The VolumeReplication resource was retrieved
+	// 2. The replicationState field was set to Primary
+	// 3. The resource was successfully updated in the API
 }
 
 func TestSetSecondary(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	err := manager.SetSecondary(ctx, "test-vr", "test-namespace")
+	// Call the function to set to secondary
+	err := manager.SetSecondary(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add assertions to verify the VolumeReplication was set to secondary
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The VolumeReplication resource was retrieved
+	// 2. The replicationState field was set to Secondary
+	// 3. The resource was successfully updated in the API
 }
 
 func TestGetCurrentState(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	state, err := manager.GetCurrentState(ctx, "test-vr", "test-namespace")
+	// Call the function to get the current state
+	state, err := manager.GetCurrentState(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since this is a stub, we expect no error and the default return value (Primary)
 	assert.NoError(t, err)
-	assert.Equal(t, ReplicationState(""), state) // This will change once the real implementation is in place
+	assert.Equal(t, Primary, state)
 
-	// TODO: Add test setup to create a VolumeReplication with known state
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The VolumeReplication resource was retrieved
+	// 2. The correct replicationState was returned
 }
 
 func TestWaitForStateChange(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
+	timeout := 5 * time.Second
 
-	// Call the function
-	err := manager.WaitForStateChange(ctx, "test-vr", "test-namespace", Primary, 5*time.Second)
+	// Call the function to wait for state change
+	err := manager.WaitForStateChange(ctx, vr.GetName(), vr.GetNamespace(), Primary, timeout)
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add test setup to create a VolumeReplication that changes state
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The function polls the VolumeReplication resource
+	// 2. It correctly identifies when the state matches the desired state
+	// 3. It respects timeouts and returns an error if exceeded
 }
 
 func TestWaitForHealthy(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
+	timeout := 5 * time.Second
 
-	// Call the function
-	err := manager.WaitForHealthy(ctx, "test-vr", "test-namespace", 5*time.Second)
+	// Call the function to wait for healthy state
+	err := manager.WaitForHealthy(ctx, vr.GetName(), vr.GetNamespace(), timeout)
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add test setup to create a VolumeReplication that becomes healthy
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The function polls the VolumeReplication resource
+	// 2. It correctly checks the healthy and dataProtected conditions
+	// 3. It respects timeouts and returns an error if exceeded
 }
 
 func TestIsHealthy(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	healthy, err := manager.IsHealthy(ctx, "test-vr", "test-namespace")
+	// Call the function to check if healthy
+	healthy, err := manager.IsHealthy(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since this is a stub, we expect no error and the default return value (true)
 	assert.NoError(t, err)
-	assert.True(t, healthy) // This will change once the real implementation is in place
+	assert.True(t, healthy)
 
-	// TODO: Add test setup to create VolumeReplications in different health states
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The VolumeReplication resource was retrieved
+	// 2. The healthy and dataProtected conditions were correctly checked
 }
 
 func TestIsPrimary(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	isPrimary, err := manager.IsPrimary(ctx, "test-vr", "test-namespace")
+	// Call the function to check if primary
+	isPrimary, err := manager.IsPrimary(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since GetCurrentState is stubbed to return Primary, this should be true
 	assert.NoError(t, err)
-	assert.False(t, isPrimary) // This will change once the real implementation is in place
+	assert.True(t, isPrimary)
 
-	// TODO: Add test setup to create VolumeReplications in different states
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The function calls GetCurrentState
+	// 2. It correctly identifies when the state is Primary
 }
 
 func TestIsSecondary(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, vr := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function
-	isSecondary, err := manager.IsSecondary(ctx, "test-vr", "test-namespace")
+	// Call the function to check if secondary
+	isSecondary, err := manager.IsSecondary(ctx, vr.GetName(), vr.GetNamespace())
 
-	// Assert
+	// Since GetCurrentState is stubbed to return Primary, this should be false
 	assert.NoError(t, err)
-	assert.False(t, isSecondary) // This will change once the real implementation is in place
+	assert.False(t, isSecondary)
 
-	// TODO: Add test setup to create VolumeReplications in different states
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. The function calls GetCurrentState
+	// 2. It correctly identifies when the state is Secondary
 }
 
 func TestProcessVolumeReplications(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, _ := setupTestManager()
 	ctx := context.Background()
 	names := []string{"test-vr1", "test-vr2"}
 
-	// Call the function
-	err := manager.ProcessVolumeReplications(ctx, names, "test-namespace", true)
+	// Test with active=true (should set to Primary)
+	manager.ProcessVolumeReplications(ctx, "default", names, true)
 
-	// Assert
-	assert.NoError(t, err)
+	// Test with active=false (should set to Secondary)
+	manager.ProcessVolumeReplications(ctx, "default", names, false)
 
-	// TODO: Add assertions to verify the VolumeReplications were processed
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. SetVolumeReplicationState is called for each VolumeReplication
+	// 2. The correct state is set based on the active parameter
 }
 
 func TestWaitForAllReplicationsHealthy(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, _ := setupTestManager()
 	ctx := context.Background()
 	names := []string{"test-vr1", "test-vr2"}
+	timeout := 10 * time.Second
 
-	// Call the function
-	err := manager.WaitForAllReplicationsHealthy(ctx, names, "test-namespace", 5*time.Second)
+	// Call the function to wait for all replications to be healthy
+	err := manager.WaitForAllReplicationsHealthy(ctx, "default", names, timeout)
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add test setup to create VolumeReplications that become healthy
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. WaitForHealthy is called for each VolumeReplication
+	// 2. It respects timeouts and returns an error if exceeded
 }
 
 func TestWaitForAllReplicationsState(t *testing.T) {
 	// Setup
-	manager := setupTestManager()
+	manager, _ := setupTestManager()
 	ctx := context.Background()
 	names := []string{"test-vr1", "test-vr2"}
+	timeout := 10 * time.Second
 
-	// Call the function
-	err := manager.WaitForAllReplicationsState(ctx, names, "test-namespace", Primary, 5*time.Second)
+	// Call the function to wait for all replications to reach the desired state
+	err := manager.WaitForAllReplicationsState(ctx, "default", names, Primary, timeout)
 
-	// Assert
+	// Since this is a stub, we expect no error
 	assert.NoError(t, err)
 
-	// TODO: Add test setup to create VolumeReplications that change state
+	// TODO: Once implementation is complete, add assertions to verify:
+	// 1. WaitForStateChange is called for each VolumeReplication
+	// 2. It respects timeouts and returns an error if exceeded
 }

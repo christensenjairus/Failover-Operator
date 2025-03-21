@@ -145,56 +145,8 @@ func TestStateManager_EnhancedUpdateClusterStatus(t *testing.T) {
 	// Test context
 	ctx := context.Background()
 
-	// Create a detailed StatusData
-	statusData := &StatusData{
-		Workloads: []ResourceStatus{
-			{
-				Kind:   "Deployment",
-				Name:   "frontend",
-				Health: HealthOK,
-				Status: "Running normally",
-			},
-			{
-				Kind:   "StatefulSet",
-				Name:   "database",
-				Health: HealthDegraded,
-				Status: "Scaling in progress",
-			},
-		},
-		NetworkResources: []ResourceStatus{
-			{
-				Kind:   "VirtualService",
-				Name:   "frontend-vs",
-				Health: HealthOK,
-				Status: "Routing traffic",
-			},
-		},
-		FluxResources: []ResourceStatus{
-			{
-				Kind:   "HelmRelease",
-				Name:   "app-release",
-				Health: HealthOK,
-				Status: "Reconciled",
-			},
-		},
-		VolumeReplications: []WorkloadReplicationStatus{
-			{
-				WorkloadKind: "StatefulSet",
-				WorkloadName: "database",
-				VolumeReplications: []ResourceStatus{
-					{
-						Kind:   "VolumeReplication",
-						Name:   "database-data",
-						Health: HealthDegraded,
-						Status: "Replication lag detected",
-					},
-				},
-			},
-		},
-	}
-
 	// Test the UpdateClusterStatus function
-	err := stateManager.UpdateClusterStatus(ctx, TestNamespace, TestGroupName, HealthDegraded, StatePrimary, statusData)
+	err := stateManager.UpdateClusterStatus(ctx, TestNamespace, TestGroupName, "test-cluster", HealthDegraded, StatePrimary, "{}")
 	assert.NoError(t, err)
 }
 
@@ -290,89 +242,19 @@ func TestStateManager_EnhancedGetFailoverHistory(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestStateManagerEnhanced tests the StateManager with more complex scenarios
-func TestStateManagerEnhanced(t *testing.T) {
-	t.Skip("These tests are examples only and need further implementation to pass")
-
-	// Setup
-	ctx := logr.NewContext(context.Background(), zap.New(zap.UseDevMode(true)))
-	mockClient := new(TestManagerMock)
-	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
-	stateManager := NewStateManager(baseManager)
-
-	// Test GetGroupState
-	t.Run("GetGroupState", func(t *testing.T) {
-		// Mock GetItem call for GroupConfigRecord
-		configOutput := &dynamodb.GetItemOutput{
-			Item: map[string]types.AttributeValue{
-				"GroupNamespace": &types.AttributeValueMemberS{Value: "test-namespace"},
-				"GroupName":      &types.AttributeValueMemberS{Value: "test-group"},
-				"OwnerCluster":   &types.AttributeValueMemberS{Value: "test-cluster"},
-			},
-		}
-		mockClient.On("GetItem", mock.Anything, mock.Anything).Return(configOutput, nil).Once()
-
-		// Mock Query call for ClusterStatusRecord
-		statusOutput := &dynamodb.QueryOutput{
-			Items: []map[string]types.AttributeValue{
-				{
-					"ClusterName": &types.AttributeValueMemberS{Value: "test-cluster"},
-					"Health":      &types.AttributeValueMemberS{Value: "OK"},
-					"State":       &types.AttributeValueMemberS{Value: "PRIMARY"},
-				},
-			},
-		}
-		mockClient.On("Query", mock.Anything, mock.Anything).Return(statusOutput, nil).Once()
-
-		// Mock Query call for HistoryRecord
-		historyOutput := &dynamodb.QueryOutput{
-			Items: []map[string]types.AttributeValue{
-				{
-					"SourceCluster": &types.AttributeValueMemberS{Value: "old-cluster"},
-					"TargetCluster": &types.AttributeValueMemberS{Value: "test-cluster"},
-					"Reason":        &types.AttributeValueMemberS{Value: "Planned failover"},
-				},
-			},
-		}
-		mockClient.On("Query", mock.Anything, mock.Anything).Return(historyOutput, nil).Once()
-
-		// Call the function under test
-		result, err := stateManager.GetGroupState(ctx, "test-namespace", "test-group")
-
-		// Assertions
-		assert.NoError(t, err)
-		assert.NotNil(t, result)
-		assert.Equal(t, "test-namespace/test-group", result.GroupID)
-		assert.Equal(t, "OK", result.Status)
-		assert.Equal(t, "PRIMARY", result.CurrentRole)
-
-		// Verify mocks were called as expected
-		mockClient.AssertExpectations(t)
-	})
-
-	// Test UpdateClusterStatus
-	t.Run("UpdateClusterStatus", func(t *testing.T) {
-		// Mock client
-		client := &MockDynamoDBClient{}
-		baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
+// TestStateManager_Enhanced contains several tests to validate enhanced features
+func TestStateManager_Enhanced(t *testing.T) {
+	t.Run("TestUpdateClusterStatus", func(t *testing.T) {
+		// Setup with enhanced test client
+		enhancedClient := CreateTestDynamoDBClient()
+		baseManager := NewBaseManager(enhancedClient, TestTableName, TestClusterName, TestOperatorID)
 		stateManager := NewStateManager(baseManager)
 
 		// Test context
 		ctx := context.Background()
 
-		// Test with simplified StatusData
-		statusData := &StatusData{
-			Workloads: []ResourceStatus{
-				{
-					Kind:   "Deployment",
-					Name:   "app",
-					Health: "OK",
-					Status: "Running",
-				},
-			},
-		}
-
-		err := stateManager.UpdateClusterStatus(ctx, "test-namespace", "test-group", "OK", "PRIMARY", statusData)
+		// Call the method with the updated signature
+		err := stateManager.UpdateClusterStatus(ctx, "test-namespace", "test-group", "test-cluster", HealthDegraded, StatePrimary, "{}")
 		assert.NoError(t, err)
 	})
 }

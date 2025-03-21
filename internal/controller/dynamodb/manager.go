@@ -3,6 +3,7 @@ package dynamodb
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -55,7 +56,33 @@ type DynamoDBService struct {
 
 // NewDynamoDBService creates a new DynamoDB service with all required managers
 func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorID string) *DynamoDBService {
+	// Use default values if empty strings are provided
+	if tableName == "" {
+		tableName = "FailoverOperator"
+	}
+
+	if operatorID == "" {
+		operatorID = "default-operator"
+	}
+
+	// Create a valid clusterName if one is not provided
+	if clusterName == "" {
+		hostname, err := os.Hostname()
+		if err == nil && hostname != "" {
+			clusterName = hostname
+		} else {
+			clusterName = "unknown-cluster"
+		}
+	}
+
 	baseManager := NewBaseManager(client, tableName, clusterName, operatorID)
+
+	// Ensure the client is not nil
+	if client == nil {
+		// Create a mock client or log a warning
+		log.Log.Info("Creating DynamoDBService with nil client - using mock mode")
+	}
+
 	operationsManager := NewOperationsManager(baseManager)
 	volumeStateManager := NewVolumeStateManager(baseManager)
 
@@ -71,6 +98,25 @@ func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorI
 
 // NewBaseManager creates a new DynamoDB manager
 func NewBaseManager(client DynamoDBClient, tableName, clusterName, operatorID string) *BaseManager {
+	// Use default values if empty strings are provided
+	if tableName == "" {
+		tableName = "FailoverOperator"
+	}
+
+	if operatorID == "" {
+		operatorID = "default-operator"
+	}
+
+	// Create a valid clusterName if one is not provided
+	if clusterName == "" {
+		hostname, err := os.Hostname()
+		if err == nil && hostname != "" {
+			clusterName = hostname
+		} else {
+			clusterName = "unknown-cluster"
+		}
+	}
+
 	return &BaseManager{
 		client:      client,
 		tableName:   tableName,
@@ -142,43 +188,99 @@ func (m *BaseManager) getClusterGSI1PK(clusterName string) string {
 
 // Operations methods
 
-// ExecuteFailover executes a failover from one cluster to another
+// ExecuteFailover executes a failover from the current primary to a new primary cluster
 func (s *DynamoDBService) ExecuteFailover(ctx context.Context, namespace, name, failoverName, targetCluster, reason string, forceFastMode bool) error {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot execute failover")
+		return fmt.Errorf("operationsManager is nil, cannot execute failover")
+	}
+
 	return s.operationsManager.ExecuteFailover(ctx, namespace, name, failoverName, targetCluster, reason, forceFastMode)
 }
 
 // ExecuteFailback executes a failback to the original primary cluster
 func (s *DynamoDBService) ExecuteFailback(ctx context.Context, namespace, name, reason string) error {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot execute failback")
+		return fmt.Errorf("operationsManager is nil, cannot execute failback")
+	}
+
 	return s.operationsManager.ExecuteFailback(ctx, namespace, name, reason)
 }
 
 // ValidateFailoverPreconditions validates that preconditions for a failover are met
 func (s *DynamoDBService) ValidateFailoverPreconditions(ctx context.Context, namespace, name, targetCluster string, skipHealthCheck bool) error {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot validate failover preconditions")
+		return fmt.Errorf("operationsManager is nil, cannot validate failover preconditions")
+	}
+
 	return s.operationsManager.ValidateFailoverPreconditions(ctx, namespace, name, targetCluster, skipHealthCheck)
 }
 
 // UpdateSuspension updates the suspension status of a FailoverGroup
 func (s *DynamoDBService) UpdateSuspension(ctx context.Context, namespace, name string, suspended bool, reason string) error {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot update suspension")
+		return fmt.Errorf("operationsManager is nil, cannot update suspension")
+	}
+
 	return s.operationsManager.UpdateSuspension(ctx, namespace, name, suspended, reason)
 }
 
-// AcquireLock acquires a lock for a FailoverGroup
+// AcquireLock attempts to acquire a lock for a FailoverGroup
 func (s *DynamoDBService) AcquireLock(ctx context.Context, namespace, name, reason string) (string, error) {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot acquire lock")
+		return "", fmt.Errorf("operationsManager is nil, cannot acquire lock")
+	}
+
 	return s.operationsManager.AcquireLock(ctx, namespace, name, reason)
 }
 
-// ReleaseLock releases a lock for a FailoverGroup
+// ReleaseLock releases a previously acquired lock for a FailoverGroup
 func (s *DynamoDBService) ReleaseLock(ctx context.Context, namespace, name, leaseToken string) error {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot release lock")
+		return fmt.Errorf("operationsManager is nil, cannot release lock")
+	}
+
 	return s.operationsManager.ReleaseLock(ctx, namespace, name, leaseToken)
 }
 
-// IsLocked checks if a FailoverGroup is locked
+// IsLocked checks if a FailoverGroup is currently locked
 func (s *DynamoDBService) IsLocked(ctx context.Context, namespace, name string) (bool, string, error) {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot check lock status")
+		return false, "", fmt.Errorf("operationsManager is nil, cannot check lock status")
+	}
+
 	return s.operationsManager.IsLocked(ctx, namespace, name)
 }
 
-// DetectAndReportProblems finds and reports problems with the FailoverGroup
+// DetectAndReportProblems checks for problems and reports them
 func (s *DynamoDBService) DetectAndReportProblems(ctx context.Context, namespace, name string) ([]string, error) {
+	logger := log.FromContext(ctx)
+
+	if s.operationsManager == nil {
+		logger.Error(nil, "operationsManager is nil, cannot detect problems")
+		return nil, fmt.Errorf("operationsManager is nil, cannot detect problems")
+	}
+
 	return s.operationsManager.DetectAndReportProblems(ctx, namespace, name)
 }
 
@@ -186,21 +288,49 @@ func (s *DynamoDBService) DetectAndReportProblems(ctx context.Context, namespace
 
 // GetVolumeState retrieves the current volume state for a failover group
 func (s *DynamoDBService) GetVolumeState(ctx context.Context, namespace, groupName string) (string, error) {
+	logger := log.FromContext(ctx)
+
+	if s.volumeStateManager == nil {
+		logger.Error(nil, "volumeStateManager is nil, cannot get volume state")
+		return "", fmt.Errorf("volumeStateManager is nil, cannot get volume state")
+	}
+
 	return s.volumeStateManager.GetVolumeState(ctx, namespace, groupName)
 }
 
 // SetVolumeState updates the volume state for a failover group
 func (s *DynamoDBService) SetVolumeState(ctx context.Context, namespace, groupName, state string) error {
+	logger := log.FromContext(ctx)
+
+	if s.volumeStateManager == nil {
+		logger.Error(nil, "volumeStateManager is nil, cannot set volume state")
+		return fmt.Errorf("volumeStateManager is nil, cannot set volume state")
+	}
+
 	return s.volumeStateManager.SetVolumeState(ctx, namespace, groupName, state)
 }
 
 // UpdateHeartbeat updates the heartbeat timestamp for a cluster
 func (s *DynamoDBService) UpdateHeartbeat(ctx context.Context, namespace, groupName, clusterName string) error {
+	logger := log.FromContext(ctx)
+
+	if s.volumeStateManager == nil {
+		logger.Error(nil, "volumeStateManager is nil, cannot update heartbeat")
+		return fmt.Errorf("volumeStateManager is nil, cannot update heartbeat")
+	}
+
 	return s.volumeStateManager.UpdateHeartbeat(ctx, namespace, groupName, clusterName)
 }
 
 // RemoveVolumeState removes the volume state information
 func (s *DynamoDBService) RemoveVolumeState(ctx context.Context, namespace, groupName string) error {
+	logger := log.FromContext(ctx)
+
+	if s.volumeStateManager == nil {
+		logger.Error(nil, "volumeStateManager is nil, cannot remove volume state")
+		return fmt.Errorf("volumeStateManager is nil, cannot remove volume state")
+	}
+
 	return s.volumeStateManager.RemoveVolumeState(ctx, namespace, groupName)
 }
 

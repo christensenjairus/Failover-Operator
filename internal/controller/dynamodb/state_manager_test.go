@@ -150,20 +150,8 @@ func TestUpdateClusterStatus(t *testing.T) {
 	health := "OK"
 	state := "PRIMARY"
 
-	// Create StatusData for testing
-	statusData := &StatusData{
-		Workloads: []ResourceStatus{
-			{
-				Kind:   "Deployment",
-				Name:   "web-app",
-				Health: "OK",
-				Status: "Running normally",
-			},
-		},
-	}
-
 	// Test the function
-	err := stateManager.UpdateClusterStatus(ctx, namespace, name, health, state, statusData)
+	err := stateManager.UpdateClusterStatus(ctx, namespace, name, "test-cluster", health, state, "{}")
 
 	// Check result
 	assert.NoError(t, err, "UpdateClusterStatus should not return an error")

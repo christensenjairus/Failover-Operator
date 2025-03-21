@@ -18,8 +18,11 @@ package dynamodb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // VolumeState constants for the failover process
@@ -84,23 +87,106 @@ func (v *VolumeStateManager) SetVolumeState(ctx context.Context, namespace, grou
 
 // UpdateHeartbeat updates the heartbeat timestamp for a cluster
 func (v *VolumeStateManager) UpdateHeartbeat(ctx context.Context, namespace, groupName, clusterName string) error {
-	// Get the cluster status
-	status, err := v.GetClusterStatus(ctx, namespace, groupName, clusterName)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster status: %w", err)
+	logger := log.FromContext(ctx)
+
+	// Robust nil checks
+	if v == nil {
+		logger.Error(nil, "VolumeStateManager is nil")
+		return fmt.Errorf("invalid VolumeStateManager: manager is nil")
 	}
 
-	// Update the heartbeat time
-	status.LastHeartbeat = time.Now()
+	if v.BaseManager == nil {
+		logger.Error(nil, "BaseManager is nil")
+		return fmt.Errorf("invalid VolumeStateManager: BaseManager is nil")
+	}
 
-	// Update the status
-	return v.UpdateClusterStatusLegacy(
+	if v.client == nil {
+		logger.Error(nil, "DynamoDB client is nil")
+		return fmt.Errorf("invalid VolumeStateManager: DynamoDB client is nil")
+	}
+
+	// Check parameters
+	if namespace == "" {
+		logger.Error(nil, "Namespace is empty")
+		return fmt.Errorf("namespace cannot be empty")
+	}
+
+	if groupName == "" {
+		logger.Error(nil, "Group name is empty")
+		return fmt.Errorf("group name cannot be empty")
+	}
+
+	// Handle clusterName
+	if clusterName == "" {
+		if v.clusterName == "" {
+			logger.Error(nil, "No cluster name available")
+			clusterName = "unknown-cluster" // Use a fallback name
+		} else {
+			clusterName = v.clusterName // Use manager's cluster name as fallback
+		}
+	}
+
+	// Log what we're doing
+	logger.V(1).Info("Updating heartbeat",
+		"namespace", namespace,
+		"groupName", groupName,
+		"clusterName", clusterName)
+
+	// Create a default record structure
+	defaultStatus := &ClusterStatusRecord{
+		GroupNamespace: namespace,
+		GroupName:      groupName,
+		ClusterName:    clusterName,
+		Health:         HealthOK,
+		State:          StatePrimary, // Default to primary, will be updated by reconciliation
+		Components:     "{}",
+		LastHeartbeat:  time.Now(),
+	}
+
+	// Try to get the existing status, but continue with default if error
+	status, err := v.GetClusterStatus(ctx, namespace, groupName, clusterName)
+	if err != nil || status == nil {
+		if err != nil {
+			logger.V(1).Info("Failed to get cluster status, will create a default one",
+				"error", err)
+		} else {
+			logger.V(1).Info("No existing cluster status found, will create a default one")
+		}
+
+		// Use the default record
+		status = defaultStatus
+	} else {
+		// Update the heartbeat time of the existing record
+		status.LastHeartbeat = time.Now()
+	}
+
+	// Convert components string to map
+	var componentsMap map[string]ComponentStatus
+	if status.Components != "" && status.Components != "{}" {
+		if err := json.Unmarshal([]byte(status.Components), &componentsMap); err != nil {
+			logger.Error(err, "Failed to unmarshal components, using empty components")
+			componentsMap = make(map[string]ComponentStatus)
+		}
+	} else {
+		componentsMap = make(map[string]ComponentStatus)
+	}
+
+	// Marshal the components map to get a valid JSON string
+	componentsJSON, err := json.Marshal(componentsMap)
+	if err != nil {
+		logger.Error(err, "Failed to marshal components, using empty components")
+		componentsJSON = []byte("{}")
+	}
+
+	// Use UpdateClusterStatus directly instead of UpdateClusterStatusLegacy
+	return v.UpdateClusterStatus(
 		ctx,
 		namespace,
 		groupName,
+		clusterName,
 		status.Health,
 		status.State,
-		nil, // Components field is updated elsewhere
+		string(componentsJSON),
 	)
 }
 

@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Don't worry about making old CRDs or CRs work with new code. This is a pre-alpha project and nobody cares if it's not reverse compatible. 
+Keep functions easy to read and easy to test. 
+Ask questions when you don't understand. 
+Remove stale, outdated, and unused code. 
+Add verbose comments.

@@ -2,9 +2,14 @@ package dynamodb
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -34,7 +39,12 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 
 	startTime := time.Now()
 
-	// 1. Get the current configuration to determine the source cluster
+	// 1. Validate preconditions before proceeding
+	if err := m.ValidateFailoverPreconditions(ctx, namespace, name, targetCluster, forceFastMode); err != nil {
+		return fmt.Errorf("failover preconditions not met: %w", err)
+	}
+
+	// 2. Get the current configuration to determine the source cluster
 	config, err := m.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
 		return fmt.Errorf("failed to get current config: %w", err)
@@ -45,7 +55,7 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 		return fmt.Errorf("source and target clusters are the same: %s", sourceCluster)
 	}
 
-	// 2. Acquire a lock to prevent concurrent operations
+	// 3. Acquire a lock to prevent concurrent operations
 	leaseToken, err := m.AcquireLock(ctx, namespace, name, fmt.Sprintf("Failover to %s", targetCluster))
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock: %w", err)
@@ -57,12 +67,22 @@ func (m *OperationsManager) ExecuteFailover(ctx context.Context, namespace, name
 		}
 	}()
 
-	// 3. Transfer ownership from source to target
+	// 4. Update source cluster's state to FAILOVER
+	if err := m.updateClusterStateForFailover(ctx, namespace, name, sourceCluster, StateFailover); err != nil {
+		logger.Error(err, "Failed to update source cluster state")
+	}
+
+	// 5. Update target cluster's state to FAILBACK
+	if err := m.updateClusterStateForFailover(ctx, namespace, name, targetCluster, StateFailback); err != nil {
+		logger.Error(err, "Failed to update target cluster state")
+	}
+
+	// 6. Transfer ownership from source to target
 	if err := m.transferOwnership(ctx, namespace, name, targetCluster); err != nil {
 		return fmt.Errorf("failed to transfer ownership: %w", err)
 	}
 
-	// 4. Record the failover event in history
+	// 7. Record the failover event in history
 	endTime := time.Now()
 	if err := m.recordFailoverEvent(ctx, namespace, name, failoverName, sourceCluster, targetCluster, reason, startTime, endTime, "SUCCESS", int64(endTime.Sub(startTime).Seconds()), int64(endTime.Sub(startTime).Seconds())); err != nil {
 		logger.Error(err, "Failed to record failover event in history")
@@ -163,20 +183,19 @@ func (m *OperationsManager) UpdateSuspension(ctx context.Context, namespace, nam
 	return m.UpdateGroupConfig(ctx, config)
 }
 
-// AcquireLock acquires a lock for a FailoverGroup
+// AcquireLock attempts to acquire a lock for a FailoverGroup
 func (m *OperationsManager) AcquireLock(ctx context.Context, namespace, name, reason string) (string, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
+		"reason", reason,
 	)
 	logger.V(1).Info("Acquiring lock")
 
 	// Generate a unique lease token
 	leaseToken := uuid.New().String()
 
-	// TODO: Implement actual DynamoDB operation to acquire lock
-
-	// Check if lock already exists
+	// Check if the lock is already held
 	locked, lockedBy, err := m.IsLocked(ctx, namespace, name)
 	if err != nil {
 		return "", fmt.Errorf("failed to check existing lock: %w", err)
@@ -186,24 +205,49 @@ func (m *OperationsManager) AcquireLock(ctx context.Context, namespace, name, re
 		return "", fmt.Errorf("lock already held by %s", lockedBy)
 	}
 
-	// Placeholder implementation
+	// Set lock expiration time (10 minutes is a reasonable default)
+	now := time.Now()
+	expiresAt := now.Add(10 * time.Minute)
+
 	// Create a lock record
-	lock := &LockRecord{
-		PK:             m.getGroupPK(namespace, name),
-		SK:             "LOCK",
-		OperatorID:     m.operatorID,
-		GroupNamespace: namespace,
-		GroupName:      name,
-		LockedBy:       m.clusterName,
-		LockReason:     reason,
-		AcquiredAt:     time.Now(),
-		ExpiresAt:      time.Now().Add(10 * time.Minute),
-		LeaseToken:     leaseToken,
+	lockItem := map[string]types.AttributeValue{
+		"PK":             &types.AttributeValueMemberS{Value: m.getGroupPK(namespace, name)},
+		"SK":             &types.AttributeValueMemberS{Value: "LOCK"},
+		"operatorID":     &types.AttributeValueMemberS{Value: m.operatorID},
+		"groupNamespace": &types.AttributeValueMemberS{Value: namespace},
+		"groupName":      &types.AttributeValueMemberS{Value: name},
+		"lockedBy":       &types.AttributeValueMemberS{Value: m.clusterName},
+		"lockReason":     &types.AttributeValueMemberS{Value: reason},
+		"acquiredAt":     &types.AttributeValueMemberS{Value: now.Format(time.RFC3339)},
+		"expiresAt":      &types.AttributeValueMemberS{Value: expiresAt.Format(time.RFC3339)},
+		"leaseToken":     &types.AttributeValueMemberS{Value: leaseToken},
 	}
 
-	// In a real implementation, we would put this record to DynamoDB
-	// with a condition that the record doesn't already exist
-	_ = lock
+	// Create a conditional write to ensure the lock doesn't already exist
+	// or if it exists, that it has expired
+	input := &dynamodb.PutItemInput{
+		TableName:           &m.tableName,
+		Item:                lockItem,
+		ConditionExpression: aws.String("attribute_not_exists(#PK) OR (attribute_exists(#PK) AND #expiresAt < :now)"),
+		ExpressionAttributeNames: map[string]string{
+			"#PK":        "PK",
+			"#expiresAt": "expiresAt",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now": &types.AttributeValueMemberS{Value: now.Format(time.RFC3339)},
+		},
+	}
+
+	// Attempt to write the lock record
+	_, err = m.client.PutItem(ctx, input)
+	if err != nil {
+		var conditionErr *types.ConditionalCheckFailedException
+		if errors.As(err, &conditionErr) {
+			// This means the lock already exists and hasn't expired
+			return "", fmt.Errorf("lock already held by another process")
+		}
+		return "", fmt.Errorf("failed to acquire lock: %w", err)
+	}
 
 	return leaseToken, nil
 }
@@ -216,8 +260,36 @@ func (m *OperationsManager) ReleaseLock(ctx context.Context, namespace, name, le
 	)
 	logger.V(1).Info("Releasing lock")
 
-	// TODO: Implement actual DynamoDB operation to release lock
-	// This should check that the lease token matches before releasing
+	// Create the key for the lock record
+	key := map[string]types.AttributeValue{
+		"PK": &types.AttributeValueMemberS{Value: m.getGroupPK(namespace, name)},
+		"SK": &types.AttributeValueMemberS{Value: "LOCK"},
+	}
+
+	// Set up a conditional delete to ensure we only delete the lock if it's ours
+	input := &dynamodb.DeleteItemInput{
+		TableName:           &m.tableName,
+		Key:                 key,
+		ConditionExpression: aws.String("attribute_exists(#PK) AND #leaseToken = :leaseToken"),
+		ExpressionAttributeNames: map[string]string{
+			"#PK":         "PK",
+			"#leaseToken": "leaseToken",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":leaseToken": &types.AttributeValueMemberS{Value: leaseToken},
+		},
+	}
+
+	// Execute the delete
+	_, err := m.client.DeleteItem(ctx, input)
+	if err != nil {
+		var conditionErr *types.ConditionalCheckFailedException
+		if errors.As(err, &conditionErr) {
+			// This means the lock doesn't exist or the lease token doesn't match
+			return fmt.Errorf("lock doesn't exist or lease token doesn't match")
+		}
+		return fmt.Errorf("failed to release lock: %w", err)
+	}
 
 	return nil
 }
@@ -230,11 +302,57 @@ func (m *OperationsManager) IsLocked(ctx context.Context, namespace, name string
 	)
 	logger.V(1).Info("Checking lock status")
 
-	// TODO: Implement actual DynamoDB query for lock record
-	// This should also check if lock has expired
+	// Create the key for the lock record
+	key := map[string]types.AttributeValue{
+		"PK": &types.AttributeValueMemberS{Value: m.getGroupPK(namespace, name)},
+		"SK": &types.AttributeValueMemberS{Value: "LOCK"},
+	}
 
-	// Placeholder implementation
-	return false, "", nil
+	// Get the lock record if it exists
+	input := &dynamodb.GetItemInput{
+		TableName: &m.tableName,
+		Key:       key,
+	}
+
+	// Execute the query
+	result, err := m.client.GetItem(ctx, input)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to check lock status: %w", err)
+	}
+
+	// Check if the item was found
+	if result.Item == nil || len(result.Item) == 0 {
+		// No lock exists
+		return false, "", nil
+	}
+
+	// Check if the lock has expired
+	var expiresAt time.Time
+	if v, ok := result.Item["expiresAt"]; ok {
+		if sv, ok := v.(*types.AttributeValueMemberS); ok {
+			var err error
+			expiresAt, err = time.Parse(time.RFC3339, sv.Value)
+			if err != nil {
+				return false, "", fmt.Errorf("invalid expiration time in lock: %w", err)
+			}
+		}
+	}
+
+	if time.Now().After(expiresAt) {
+		// Lock has expired
+		return false, "", nil
+	}
+
+	// Extract who holds the lock
+	var lockedBy string
+	if v, ok := result.Item["lockedBy"]; ok {
+		if sv, ok := v.(*types.AttributeValueMemberS); ok {
+			lockedBy = sv.Value
+		}
+	}
+
+	// Lock exists and hasn't expired
+	return true, lockedBy, nil
 }
 
 // transferOwnership transfers ownership of a FailoverGroup to a new cluster
@@ -276,47 +394,116 @@ func (m *OperationsManager) recordFailoverEvent(ctx context.Context, namespace, 
 	)
 	logger.V(1).Info("Recording failover event")
 
-	// Create a new history record
-	historyRecord := &HistoryRecord{
-		PK:             m.getGroupPK(namespace, name),
-		SK:             m.getHistorySK(startTime),
-		OperatorID:     m.operatorID,
-		GroupNamespace: namespace,
-		GroupName:      name,
-		FailoverName:   failoverName,
-		SourceCluster:  sourceCluster,
-		TargetCluster:  targetCluster,
-		StartTime:      startTime,
-		EndTime:        endTime,
-		Status:         status,
-		Reason:         reason,
-		Downtime:       downtime,
-		Duration:       duration,
+	// Create the attributes for the history record
+	historyItem := map[string]types.AttributeValue{
+		"PK":             &types.AttributeValueMemberS{Value: m.getGroupPK(namespace, name)},
+		"SK":             &types.AttributeValueMemberS{Value: m.getHistorySK(startTime)},
+		"operatorID":     &types.AttributeValueMemberS{Value: m.operatorID},
+		"groupNamespace": &types.AttributeValueMemberS{Value: namespace},
+		"groupName":      &types.AttributeValueMemberS{Value: name},
+		"failoverName":   &types.AttributeValueMemberS{Value: failoverName},
+		"sourceCluster":  &types.AttributeValueMemberS{Value: sourceCluster},
+		"targetCluster":  &types.AttributeValueMemberS{Value: targetCluster},
+		"startTime":      &types.AttributeValueMemberS{Value: startTime.Format(time.RFC3339)},
+		"endTime":        &types.AttributeValueMemberS{Value: endTime.Format(time.RFC3339)},
+		"status":         &types.AttributeValueMemberS{Value: status},
+		"downtime":       &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", downtime)},
+		"duration":       &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", duration)},
 	}
 
-	// TODO: Implement actual DynamoDB operation to store the record
-	_ = historyRecord
+	// Add reason if provided
+	if reason != "" {
+		historyItem["reason"] = &types.AttributeValueMemberS{Value: reason}
+	}
+
+	// Create the PutItem input
+	input := &dynamodb.PutItemInput{
+		TableName: &m.tableName,
+		Item:      historyItem,
+	}
+
+	// Execute the put operation
+	_, err := m.client.PutItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to record failover event: %w", err)
+	}
+
+	// Also update the LastFailover reference in the group configuration
+	config, err := m.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		logger.Error(err, "Failed to get group config for updating LastFailover reference")
+		// Continue despite this error, as the history record was successfully created
+		return nil
+	}
+
+	// Update the LastFailover reference
+	config.LastFailover = &FailoverReference{
+		Name:      failoverName,
+		Namespace: namespace,
+		Timestamp: startTime,
+	}
+
+	// Save the updated config
+	if err := m.UpdateGroupConfig(ctx, config); err != nil {
+		logger.Error(err, "Failed to update LastFailover reference")
+		// Continue despite this error
+	}
 
 	return nil
 }
 
-// DetectAndReportProblems finds and reports problems with the FailoverGroup
+// DetectAndReportProblems checks for problems in a FailoverGroup and returns a list of issues
 func (m *OperationsManager) DetectAndReportProblems(ctx context.Context, namespace, name string) ([]string, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
 	)
-	logger.V(1).Info("Detecting and reporting problems")
+	logger.V(1).Info("Detecting problems")
 
-	problems := []string{}
+	// TODO: Implement actual problem detection
+	// This is a placeholder implementation
+	return []string{}, nil
+}
 
-	// For now, we'll just return a placeholder implementation
-	// The actual implementation would check for stale heartbeats and unhealthy components
+// updateClusterStateForFailover updates a cluster's state in the cluster status record during failover operations
+func (m *OperationsManager) updateClusterStateForFailover(ctx context.Context, namespace, name, clusterName, state string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"cluster", clusterName,
+		"state", state,
+	)
+	logger.V(1).Info("Updating cluster state for failover")
 
-	// This is a placeholder until we implement the actual functionality
-	if false {
-		problems = append(problems, "Simulated problem for testing")
+	// Get the current status
+	status, err := m.GetClusterStatus(ctx, namespace, name, clusterName)
+	if err != nil {
+		logger.Error(err, "Failed to get cluster status")
+		// Create a minimal status if it does not exist
+		status = &ClusterStatusRecord{
+			GroupNamespace: namespace,
+			GroupName:      name,
+			ClusterName:    clusterName,
+			Health:         HealthOK,
+			State:          state,
+			Components:     "{}",
+		}
+	} else {
+		// Update the state
+		status.State = state
 	}
 
-	return problems, nil
+	// Convert components string to map
+	var componentsMap map[string]ComponentStatus
+	if status.Components != "" && status.Components != "{}" {
+		if err := json.Unmarshal([]byte(status.Components), &componentsMap); err != nil {
+			logger.Error(err, "Failed to unmarshal components, using empty components")
+			componentsMap = make(map[string]ComponentStatus)
+		}
+	} else {
+		componentsMap = make(map[string]ComponentStatus)
+	}
+
+	// Update the status
+	return m.UpdateClusterStatus(ctx, namespace, name, clusterName, status.Health, state, status.Components)
 }

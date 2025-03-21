@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: failover-operator-config
+  namespace: system
+data:
+  # AWS Configuration
+  AWS_REGION: "us-west-2"
+  # AWS_ENDPOINT: "http://localhost:8000"  # Uncomment for local DynamoDB
+  # AWS_USE_LOCAL_ENDPOINT: "true"         # Uncomment for local DynamoDB
+  
+  # DynamoDB Configuration
+  DYNAMODB_TABLE_NAME: "failover-operator"
+  
+  # Operator Configuration
+  CLUSTER_NAME: "primary-cluster"          # Override the cluster name
+  OPERATOR_ID: "failover-operator"
+  
+  # Timeouts and intervals
+  RECONCILE_INTERVAL: "30s"
+  DEFAULT_HEARTBEAT_INTERVAL: "30s"
+  
+  # Additional configuration settings can be added here
+  # The operator will ignore unknown settings 

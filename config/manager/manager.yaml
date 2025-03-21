@@ -63,8 +63,40 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # Uncomment the following lines to use a Kubernetes secret for AWS credentials
+          # - --aws-secret-name=aws-credentials
+          # - --aws-secret-namespace=system
+          # Uncomment the following lines to use a ConfigMap for configuration
+          # - --config-map-name=failover-operator-config
+          # - --config-map-namespace=system
         image: controller:latest
         name: manager
+        env:
+        - name: CLUSTER_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['topology.kubernetes.io/zone']
+          # Default to a unique identifier if the zone label is not available
+          value: "default-cluster"
+        - name: OPERATOR_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DYNAMODB_TABLE_NAME
+          value: "failover-operator"
+        # Optional: Use AWS credentials from environment variables
+        # - name: AWS_REGION
+        #   value: "us-west-2"
+        # - name: AWS_ACCESS_KEY_ID
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: aws-credentials
+        #       key: access_key
+        # - name: AWS_SECRET_ACCESS_KEY
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: aws-credentials
+        #       key: secret_key
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

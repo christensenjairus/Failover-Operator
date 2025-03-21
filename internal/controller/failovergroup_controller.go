@@ -57,7 +57,7 @@ type FailoverGroupReconciler struct {
 	HelmReleasesManager       *helmreleases.Manager       // Manages FluxCD HelmRelease health checks
 	VirtualServicesManager    *virtualservices.Manager    // Manages Istio VirtualService configuration
 	VolumeReplicationsManager *volumereplications.Manager // Manages Rook VolumeReplication health checks
-	DynamoDBManager           *dynamodb.Manager           // Manages DynamoDB state coordination and heartbeats
+	DynamoDBManager           *dynamodb.DynamoDBService   // Manages DynamoDB state coordination and heartbeats
 	IngressesManager          *ingresses.Manager          // Manages Kubernetes Ingress health checks
 }
 

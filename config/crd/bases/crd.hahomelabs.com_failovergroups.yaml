@@ -67,6 +67,12 @@ spec:
                       - safe
                       - fast
                       type: string
+                    ingresses:
+                      description: Ingresses are the Kubernetes ingress resources
+                        associated with this component
+                      items:
+                        type: string
+                      type: array
                     name:
                       description: Name of the component
                       type: string

@@ -56,7 +56,7 @@ type FailoverReconciler struct {
 	HelmReleasesManager       *helmreleases.Manager       // Manages FluxCD HelmRelease reconciliation
 	VirtualServicesManager    *virtualservices.Manager    // Manages Istio VirtualService traffic routing
 	VolumeReplicationsManager *volumereplications.Manager // Manages Rook VolumeReplication state changes
-	DynamoDBManager           *dynamodb.Manager           // Manages DynamoDB state coordination and locking
+	DynamoDBManager           *dynamodb.DynamoDBService   // Manages DynamoDB state coordination and locking
 	IngressesManager          *ingresses.Manager          // Manages Kubernetes Ingress configuration
 }
 

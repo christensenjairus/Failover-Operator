@@ -11,7 +11,7 @@ import (
 func TestNewStateManager(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -28,7 +28,7 @@ func TestNewStateManager(t *testing.T) {
 func TestGetGroupState(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -50,7 +50,7 @@ func TestGetGroupState(t *testing.T) {
 func TestGetGroupConfig(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -78,7 +78,7 @@ func TestGetGroupConfig(t *testing.T) {
 func TestUpdateGroupConfig(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -108,7 +108,7 @@ func TestUpdateGroupConfig(t *testing.T) {
 func TestGetClusterStatus(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -138,7 +138,7 @@ func TestGetClusterStatus(t *testing.T) {
 func TestUpdateClusterStatus(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -166,7 +166,7 @@ func TestUpdateClusterStatus(t *testing.T) {
 func TestGetAllClusterStatuses(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -189,7 +189,7 @@ func TestGetAllClusterStatuses(t *testing.T) {
 func TestGetFailoverHistory(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -212,7 +212,7 @@ func TestGetFailoverHistory(t *testing.T) {
 func TestSyncClusterState(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -232,7 +232,7 @@ func TestSyncClusterState(t *testing.T) {
 func TestDetectStaleHeartbeats(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",

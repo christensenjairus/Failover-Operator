@@ -11,7 +11,7 @@ import (
 func TestNewOperationsManager(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -29,7 +29,7 @@ func TestNewOperationsManager(t *testing.T) {
 func TestExecuteFailover(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -53,7 +53,7 @@ func TestExecuteFailover(t *testing.T) {
 func TestExecuteFailback(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -74,7 +74,7 @@ func TestExecuteFailback(t *testing.T) {
 func TestValidateFailoverPreconditions(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -96,7 +96,7 @@ func TestValidateFailoverPreconditions(t *testing.T) {
 func TestUpdateSuspension(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -118,7 +118,7 @@ func TestUpdateSuspension(t *testing.T) {
 func TestAcquireLock(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -140,7 +140,7 @@ func TestAcquireLock(t *testing.T) {
 func TestReleaseLock(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -161,7 +161,7 @@ func TestReleaseLock(t *testing.T) {
 func TestIsLocked(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -183,7 +183,7 @@ func TestIsLocked(t *testing.T) {
 func TestTransferOwnership(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -204,7 +204,7 @@ func TestTransferOwnership(t *testing.T) {
 func TestRecordFailoverEvent(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",
@@ -233,7 +233,7 @@ func TestRecordFailoverEvent(t *testing.T) {
 func TestDetectAndReportProblems(t *testing.T) {
 	// Setup
 	baseManager := &BaseManager{
-		client:      &mockDynamoDBClient{},
+		client:      &TestDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
 		operatorID:  "test-operator",

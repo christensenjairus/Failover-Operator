@@ -9,7 +9,7 @@ import (
 
 func TestBaseManagerCreation(t *testing.T) {
 	// Setup
-	client := &mockDynamoDBClient{}
+	client := &TestDynamoDBClient{}
 	tableName := "test-table"
 	clusterName := "test-cluster"
 	operatorID := "test-operator"

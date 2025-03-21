@@ -43,41 +43,10 @@ func (m *MockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dyn
 	return &dynamodb.TransactWriteItemsOutput{}, nil
 }
 
-// mockDynamoDBClient is a basic implementation for tests
-type mockDynamoDBClient struct{}
-
-func (m *mockDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
-	return &dynamodb.GetItemOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
-	return &dynamodb.PutItemOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	return &dynamodb.UpdateItemOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	return &dynamodb.DeleteItemOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	return &dynamodb.QueryOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
-	return &dynamodb.ScanOutput{}, nil
-}
-
-func (m *mockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
-	return &dynamodb.TransactWriteItemsOutput{}, nil
-}
-
 // TestNewBaseManager tests the creation of a new DynamoDB base manager
 func TestNewBaseManager(t *testing.T) {
 	// Setup
-	client := &mockDynamoDBClient{}
+	client := &TestDynamoDBClient{}
 	tableName := "test-table"
 	clusterName := "test-cluster"
 	operatorID := "test-operator"
@@ -127,7 +96,7 @@ func TestGetPKSK(t *testing.T) {
 // TestDynamoDBServiceCreation tests the creation of the DynamoDB service that contains all managers
 func TestDynamoDBServiceCreation(t *testing.T) {
 	// Setup
-	client := &mockDynamoDBClient{}
+	client := &TestDynamoDBClient{}
 	tableName := "test-table"
 	clusterName := "test-cluster"
 	operatorID := "test-operator"

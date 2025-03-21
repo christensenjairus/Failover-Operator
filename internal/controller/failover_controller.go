@@ -31,6 +31,7 @@ import (
 	"github.com/christensenjairus/Failover-Operator/internal/controller/cronjobs"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/deployments"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/failover"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/helmreleases"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/ingresses"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/kustomizations"
@@ -47,6 +48,9 @@ type FailoverReconciler struct {
 	Scheme      *runtime.Scheme
 	Log         logr.Logger
 	ClusterName string // The name of the current Kubernetes cluster
+
+	// Failover manager handles all the complexities of the failover process
+	FailoverManager *failover.Manager
 
 	// Resource Managers handle specific resource types during failover operations
 	DeploymentsManager        *deployments.Manager        // Manages Deployment scaling operations
@@ -104,30 +108,31 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.handleDeletion(ctx, failover)
 	}
 
-	// TODO: Initialize status if it's empty
-	// This would set initial values for tracking progress and health
+	// Initialize status if needed
+	if failover.Status.Status == "" {
+		failover.Status.Status = "IN_PROGRESS"
+		failover.Status.FailoverGroups = make([]crdv1alpha1.FailoverGroupReference, len(failover.Spec.FailoverGroups))
+		copy(failover.Status.FailoverGroups, failover.Spec.FailoverGroups)
+		if err := r.Status().Update(ctx, failover); err != nil {
+			logger.Error(err, "Failed to initialize Failover status")
+			return ctrl.Result{}, err
+		}
+	}
 
-	// TODO: Check if another failover is in progress (for non-emergency types)
-	// For non-emergency failovers, we should prevent concurrent operations
+	// If the failover is already completed (SUCCESS or FAILED), don't process it again
+	if failover.Status.Status == "SUCCESS" || failover.Status.Status == "FAILED" {
+		logger.Info("Failover already processed", "status", failover.Status.Status)
+		return ctrl.Result{}, nil
+	}
 
-	// TODO: Process each FailoverGroup
-	// For each FailoverGroup:
-	// 1. Verify prerequisites (source and target clusters, resource health)
-	// 2. Lock the FailoverGroup in DynamoDB
-	// 3. Execute failover workflow:
-	//    a. Update VolumeReplication direction
-	//    b. Wait for data synchronization
-	//    c. Scale down applications in source cluster
-	//    d. Scale up applications in target cluster
-	//    e. Update virtualservices/ingresses to point to target cluster
-	// 4. Update status with progress and results
-	// 5. Release lock
-
-	// TODO: Handle metrics and status updates
-	// Record performance metrics (downtime, total operation time)
-	// Update final status with results and timestamp
+	// Process the failover using the failover manager
+	if err := r.FailoverManager.ProcessFailover(ctx, failover); err != nil {
+		logger.Error(err, "Failed to process failover")
+		return ctrl.Result{}, err
+	}
 
 	// Requeue to check progress and status
+	// Since failover operations are asynchronous, we need to periodically check their status
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -137,13 +142,34 @@ func (r *FailoverReconciler) handleDeletion(ctx context.Context, failover *crdv1
 	logger := r.Log.WithValues("phase", "deletion")
 	logger.Info("Handling deletion of Failover resource")
 
-	// TODO: Implement cleanup logic
-	// This could include:
-	// 1. Release any locks held by this failover operation
-	// 2. Mark in-progress operations as cancelled
-	// 3. Cleanup temporary resources created during the failover
-	// 4. Record the cancellation in the failover history
-	logger.Info("Performing cleanup for Failover deletion")
+	// Cleanup logic
+	// 1. Ensure any lock held by this failover operation is released
+	// 2. Update the status of any in-progress failover operations to show they were cancelled
+
+	// For each failover group that is still IN_PROGRESS, mark it as FAILED due to deletion
+	for i, group := range failover.Status.FailoverGroups {
+		if group.Status == "IN_PROGRESS" {
+			failover.Status.FailoverGroups[i].Status = "FAILED"
+			failover.Status.FailoverGroups[i].Message = "Failover cancelled due to resource deletion"
+		}
+	}
+
+	// Update the overall status
+	if failover.Status.Status == "IN_PROGRESS" {
+		failover.Status.Status = "FAILED"
+		// Add condition to record the cancellation
+		now := time.Now().Format(time.RFC3339)
+		for i := range failover.Status.FailoverGroups {
+			if failover.Status.FailoverGroups[i].CompletionTime == "" {
+				failover.Status.FailoverGroups[i].CompletionTime = now
+			}
+		}
+
+		if err := r.Status().Update(ctx, failover); err != nil {
+			logger.Error(err, "Failed to update status during deletion")
+			// Continue with finalizer removal anyway
+		}
+	}
 
 	// Remove the finalizer to allow Kubernetes to complete deletion
 	logger.Info("Removing finalizer from Failover")
@@ -172,32 +198,13 @@ func (r *FailoverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.VolumeReplicationsManager = volumereplications.NewManager(r.Client)
 	r.IngressesManager = ingresses.NewManager(r.Client)
 
-	// Note: DynamoDBManager initialization requires additional AWS configuration
-	// This is a placeholder - in an actual implementation, we would:
-	// 1. Get AWS credentials from environment variables or secrets
-	// 2. Set up a DynamoDB client
-	// 3. Configure the table name based on configuration
-	// 4. Generate a unique operator ID if not provided
-	// Example:
-	//
-	// tableName := os.Getenv("DYNAMODB_TABLE_NAME")
-	// if tableName == "" {
-	//     tableName = "failover-operator"
-	// }
-	//
-	// operatorID := os.Getenv("OPERATOR_ID")
-	// if operatorID == "" {
-	//     // Generate a unique ID
-	//     operatorID = uuid.New().String()
-	// }
-	//
-	// awsConfig, err := config.LoadDefaultConfig(context.Background())
-	// if err != nil {
-	//     return err
-	// }
-	//
-	// dynamoClient := dynamodb.NewFromConfig(awsConfig)
-	// r.DynamoDBManager = dynamodb.NewManager(dynamoClient, tableName, operatorID, r.ClusterName)
+	// Initialize the failover manager
+	r.FailoverManager = failover.NewManager(r.Client, r.ClusterName, r.Log)
+
+	// Set DynamoDB manager if it's initialized
+	if r.DynamoDBManager != nil {
+		r.FailoverManager.SetDynamoDBManager(r.DynamoDBManager)
+	}
 
 	// Register this controller for Failover resources
 	return ctrl.NewControllerManagedBy(mgr).

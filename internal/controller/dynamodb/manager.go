@@ -42,8 +42,11 @@ type GroupState struct {
 // DynamoDBService provides access to all DynamoDB functionality
 // This is the main entry point for controllers interacting with DynamoDB
 type DynamoDBService struct {
-	State      *StateManager
-	Operations *OperationsManager
+	State       *StateManager
+	Operations  *OperationsManager
+	ClusterName string
+	OperatorID  string
+	TableName   string
 }
 
 // NewDynamoDBService creates a new DynamoDB service with all required managers
@@ -53,8 +56,11 @@ func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorI
 	operationsManager := NewOperationsManager(baseManager)
 
 	return &DynamoDBService{
-		State:      stateManager,
-		Operations: operationsManager,
+		State:       stateManager,
+		Operations:  operationsManager,
+		ClusterName: clusterName,
+		OperatorID:  operatorID,
+		TableName:   tableName,
 	}
 }
 

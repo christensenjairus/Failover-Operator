@@ -172,3 +172,69 @@ type TimeoutSettings struct {
 	UnhealthyPrimary string `json:"unhealthyPrimary"` // Time PRIMARY can be unhealthy
 	Heartbeat        string `json:"heartbeat"`        // Time without heartbeats before auto-failover
 }
+
+// FailoverGroupState represents the consolidated state of a failover group
+type FailoverGroupState struct {
+	// ActiveCluster is the currently active cluster for this group
+	ActiveCluster string `json:"activeCluster"`
+
+	// LastFailover contains information about the most recent failover
+	LastFailover *FailoverRecord `json:"lastFailover,omitempty"`
+
+	// Clusters maps cluster names to their states
+	Clusters map[string]ClusterState `json:"clusters"`
+
+	// LastUpdate is the timestamp when this state was last updated
+	LastUpdate time.Time `json:"lastUpdate"`
+
+	// Suspended indicates whether automatic failovers are disabled
+	Suspended bool `json:"suspended"`
+
+	// SuspensionReason explains why failovers are suspended (if applicable)
+	SuspensionReason string `json:"suspensionReason,omitempty"`
+}
+
+// ClusterState represents the state of a single cluster in a failover group
+type ClusterState struct {
+	// Role of the cluster (PRIMARY or STANDBY)
+	Role string `json:"role"`
+
+	// Health status of the cluster (OK, DEGRADED, ERROR)
+	Health string `json:"health"`
+
+	// LastHeartbeat is the last time this cluster reported its status
+	LastHeartbeat time.Time `json:"lastHeartbeat"`
+}
+
+// FailoverRecord contains information about a failover operation
+type FailoverRecord struct {
+	// Timestamp when the failover occurred
+	Timestamp time.Time `json:"timestamp"`
+
+	// SourceCluster is the cluster that was PRIMARY before the failover
+	SourceCluster string `json:"sourceCluster"`
+
+	// TargetCluster is the cluster that became PRIMARY after the failover
+	TargetCluster string `json:"targetCluster"`
+
+	// Reason explains why the failover occurred
+	Reason string `json:"reason,omitempty"`
+
+	// Emergency indicates whether this was an emergency failover
+	Emergency bool `json:"emergency"`
+
+	// Duration is how long the failover took to complete
+	DurationSeconds int64 `json:"durationSeconds"`
+}
+
+// SimpleLockRecord is a simplified version of LockRecord for external use
+type SimpleLockRecord struct {
+	// Owner identifies which operator instance holds the lock
+	Owner string `json:"owner"`
+
+	// Expiry is when the lock automatically expires
+	Expiry time.Time `json:"expiry"`
+
+	// Operation describes what operation the lock is for
+	Operation string `json:"operation"`
+}

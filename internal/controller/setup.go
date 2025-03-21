@@ -9,6 +9,7 @@ import (
 	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/failover"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/failovergroup"
+	"github.com/christensenjairus/Failover-Operator/internal/workflow"
 	replicationv1alpha1 "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,12 +29,19 @@ func RegisterSchemes(scheme *runtime.Scheme) error {
 
 // SetupControllers sets up all controllers with the manager
 func SetupControllers(mgr ctrl.Manager, config *config.Config) error {
+	// Setup DynamoDB if configured
+	dynamoDBService, err := setupDynamoDB(mgr.GetLogger(), config)
+	if err != nil {
+		return fmt.Errorf("failed to setup DynamoDB: %w", err)
+	}
+
 	// Set up Failover controller
 	failoverReconciler := &failover.FailoverReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		ClusterName: config.ClusterName,
-		Logger:      mgr.GetLogger().WithName("controllers").WithName("Failover"),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ClusterName:     config.ClusterName,
+		Logger:          mgr.GetLogger().WithName("controllers").WithName("Failover"),
+		DynamoDBManager: dynamoDBService,
 	}
 
 	// Set up FailoverGroup controller
@@ -44,22 +52,30 @@ func SetupControllers(mgr ctrl.Manager, config *config.Config) error {
 		ClusterName: config.ClusterName,
 	}
 
-	// Setup DynamoDB if configured
-	dynamoDBService, err := setupDynamoDB(mgr.GetLogger(), config)
-	if err != nil {
-		return fmt.Errorf("failed to setup DynamoDB: %w", err)
-	}
-
-	// If DynamoDB is configured, set the manager in the controllers
+	// If DynamoDB is configured, set up our components
 	if dynamoDBService != nil {
+		// Setup AutoFailoverChecker
+		autoFailoverChecker := failover.NewAutoFailoverChecker(
+			mgr.GetClient(),
+			mgr.GetLogger().WithName("auto-failover"),
+			config.ClusterName,
+			dynamoDBService,
+		)
+		failoverReconciler.AutoFailoverCheck = autoFailoverChecker
+
 		// Create the FailoverGroup manager and set the DynamoDB service
 		failoverGroupManager := failovergroup.NewManager(mgr.GetClient(), config.ClusterName, failoverGroupReconciler.Log)
 		failoverGroupManager.SetDynamoDBManager(dynamoDBService)
 		failoverGroupReconciler.Manager = failoverGroupManager
 
-		// Create the Failover manager and set the DynamoDB service
-		failoverManager := failover.NewManager(mgr.GetClient(), config.ClusterName, failoverReconciler.Logger)
-		failoverManager.SetDynamoDBManager(dynamoDBService)
+		// Create workflow adapter
+		workflowAdapter := workflow.NewManagerAdapter(
+			mgr.GetClient(),
+			mgr.GetLogger().WithName("workflow"),
+			config.ClusterName,
+			dynamoDBService,
+		)
+		failoverReconciler.WorkflowAdapter = workflowAdapter
 	}
 
 	// Register the controllers with the manager

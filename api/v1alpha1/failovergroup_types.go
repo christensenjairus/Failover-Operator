@@ -171,7 +171,6 @@ type FailoverGroupSpec struct {
 	// Network resources that just need annotation flips during failover
 	// +optional
 	NetworkResources []NetworkResourceSpec `json:"networkResources,omitempty"`
-
 	// Flux resources to manage during failover
 	// +optional
 	FluxResources []FluxResourceSpec `json:"fluxResources,omitempty"`

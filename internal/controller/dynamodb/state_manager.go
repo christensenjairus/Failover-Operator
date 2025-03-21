@@ -433,7 +433,7 @@ func (m *BaseManager) GetClusterStatus(ctx context.Context, namespace, name, clu
 		}
 	}
 
-	// Extract timestamp
+	// Extract time fields
 	if v, ok := result.Item["lastHeartbeat"]; ok {
 		if sv, ok := v.(*types.AttributeValueMemberS); ok {
 			if sv.Value != "" {
@@ -585,6 +585,7 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 			":pk":        &types.AttributeValueMemberS{Value: pk},
 			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
 		},
+		ConsistentRead: aws.Bool(true), // Ensure we get the latest data
 	}
 
 	// Execute the query
@@ -595,8 +596,11 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 
 	// Check if any items were found
 	if len(result.Items) == 0 {
+		logger.Info("No cluster records found in DynamoDB")
 		return make(map[string]*ClusterStatusRecord), nil
 	}
+
+	logger.Info("Found cluster records in DynamoDB", "count", len(result.Items))
 
 	// Process the results
 	statuses := make(map[string]*ClusterStatusRecord)
@@ -611,8 +615,11 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 
 		if clusterName == "" {
 			// Skip records without a cluster name
+			logger.Info("Skipping record without cluster name")
 			continue
 		}
+
+		logger.Info("Processing cluster record", "clusterName", clusterName)
 
 		// Create a new status record
 		status := &ClusterStatusRecord{
@@ -654,7 +661,7 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 			}
 		}
 
-		// Extract lastHeartbeat timestamp
+		// Extract time fields
 		if v, ok := item["lastHeartbeat"]; ok {
 			if sv, ok := v.(*types.AttributeValueMemberS); ok {
 				if sv.Value != "" {
@@ -670,13 +677,16 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 			}
 		}
 
-		// Add to the map - ensure we don't add nil values
-		if status != nil {
-			statuses[clusterName] = status
-		} else {
-			logger.Info("Skipping nil status record", "clusterName", clusterName)
-		}
+		// Add the status to the map
+		statuses[clusterName] = status
 	}
+
+	// Log the clusters found
+	clusterNames := make([]string, 0, len(statuses))
+	for name := range statuses {
+		clusterNames = append(clusterNames, name)
+	}
+	logger.Info("Returning cluster statuses", "count", len(statuses), "clusters", clusterNames)
 
 	return statuses, nil
 }

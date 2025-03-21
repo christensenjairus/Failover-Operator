@@ -18,6 +18,7 @@ package failovergroup
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -42,7 +43,7 @@ type FailoverGroupReconciler struct {
 	ClusterName string
 
 	// Manager for handling FailoverGroup operations
-	FailoverGroupManager *Manager
+	Manager *Manager
 
 	// For managing the periodic synchronization
 	ctx        context.Context
@@ -64,72 +65,47 @@ type FailoverGroupReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("failovergroup", req.NamespacedName)
+	log := r.Log.WithValues("failovergroup", req.NamespacedName)
 
-	// Fetch the FailoverGroup instance
+	// Get the FailoverGroup resource
 	failoverGroup := &crdv1alpha1.FailoverGroup{}
 	if err := r.Get(ctx, req.NamespacedName, failoverGroup); err != nil {
+		// Handle not-found error
 		if errors.IsNotFound(err) {
-			// Object not found, likely deleted
+			log.Info("FailoverGroup resource not found, ignoring")
 			return ctrl.Result{}, nil
 		}
-		// Error reading the object - requeue the request
-		logger.Error(err, "Failed to get FailoverGroup")
+		log.Error(err, "Failed to get FailoverGroup resource")
 		return ctrl.Result{}, err
 	}
 
-	// Handle finalizer and deletion
-	if !failoverGroup.ObjectMeta.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, failoverGroup)
+	// Initialize the manager for this FailoverGroup if needed
+	if r.Manager == nil {
+		log.Error(nil, "FailoverGroup manager not initialized")
+		return ctrl.Result{}, fmt.Errorf("FailoverGroup manager not initialized")
 	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(failoverGroup, finalizerName) {
-		controllerutil.AddFinalizer(failoverGroup, finalizerName)
-		if err := r.Update(ctx, failoverGroup); err != nil {
-			logger.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+	// Synchronize with DynamoDB to ensure local status reflects global state
+	if err := r.Manager.SyncWithDynamoDB(ctx, failoverGroup); err != nil {
+		log.Error(err, "Failed to sync with DynamoDB")
+		// Continue anyway to update heartbeat and local status
 	}
 
-	// Synchronize with DynamoDB
-	if err := r.FailoverGroupManager.SyncWithDynamoDB(ctx, failoverGroup); err != nil {
-		logger.Error(err, "Failed to synchronize with DynamoDB")
-		return ctrl.Result{RequeueAfter: time.Second * 10}, err
+	// Update the heartbeat in DynamoDB
+	if err := r.Manager.UpdateHeartbeat(ctx, failoverGroup); err != nil {
+		log.Error(err, "Failed to update heartbeat")
+		// Continue anyway to update local status
 	}
 
-	// Check for ongoing failover operations and handle state transitions
-	if shouldHandle, result, err := r.checkAndHandleFailoverStages(ctx, failoverGroup); shouldHandle {
-		return result, err
+	// Update cluster status in DynamoDB
+	if err := r.Manager.UpdateDynamoDBStatus(ctx, failoverGroup); err != nil {
+		log.Error(err, "Failed to update status in DynamoDB")
+		// Continue anyway
 	}
 
-	// Update heartbeat in DynamoDB
-	if err := r.FailoverGroupManager.UpdateHeartbeat(ctx, failoverGroup); err != nil {
-		logger.Error(err, "Failed to update heartbeat")
-		// Continue processing despite heartbeat update failure
-	}
-
-	// Update DynamoDB with current status
-	if err := r.FailoverGroupManager.UpdateDynamoDBStatus(ctx, failoverGroup); err != nil {
-		logger.Error(err, "Failed to update DynamoDB status")
-		return ctrl.Result{RequeueAfter: time.Second * 10}, err
-	}
-
-	// Determine reconciliation interval based on group state
-	var requeueAfter time.Duration
-	if failoverGroup.Status.State == "PRIMARY" || failoverGroup.Status.State == "STANDBY" {
-		// Normal state - check every minute
-		requeueAfter = time.Minute
-	} else if failoverGroup.Status.State == "FAILOVER" || failoverGroup.Status.State == "FAILBACK" {
-		// During failover - check more frequently
-		requeueAfter = time.Second * 10
-	} else {
-		// Default to 30 seconds
-		requeueAfter = time.Second * 30
-	}
-
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	// Requeue after the heartbeat interval to ensure regular updates
+	// For now, use a fixed interval
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // checkAndHandleFailoverStages checks for ongoing failover operations
@@ -144,7 +120,7 @@ func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
 	)
 
 	// Check if there's an ongoing failover operation that requires action
-	volumeState, exists := r.FailoverGroupManager.GetVolumeStateFromDynamoDB(ctx, failoverGroup)
+	volumeState, exists := r.Manager.GetVolumeStateFromDynamoDB(ctx, failoverGroup)
 	if !exists {
 		// No volume state information in DynamoDB, nothing to do
 		return false, ctrl.Result{}, nil
@@ -157,7 +133,7 @@ func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
 		logger.Info("Detected volumes ready for promotion, handling Volume Promotion Stage (Stage 4)")
 
 		// Handle the volume promotion here, or delegate to the manager
-		if err := r.FailoverGroupManager.HandleVolumePromotion(ctx, failoverGroup); err != nil {
+		if err := r.Manager.HandleVolumePromotion(ctx, failoverGroup); err != nil {
 			logger.Error(err, "Failed to handle volume promotion")
 			return true, ctrl.Result{RequeueAfter: time.Second * 30}, err
 		}
@@ -172,7 +148,7 @@ func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
 		logger.Info("Detected volumes promoted, handling Target Cluster Activation (Stage 5)")
 
 		// Handle activation here, or delegate to the manager
-		if err := r.FailoverGroupManager.HandleTargetActivation(ctx, failoverGroup); err != nil {
+		if err := r.Manager.HandleTargetActivation(ctx, failoverGroup); err != nil {
 			logger.Error(err, "Failed to handle target activation")
 			return true, ctrl.Result{RequeueAfter: time.Second * 30}, err
 		}
@@ -201,17 +177,17 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 		// 3. Scale down any workloads
 
 		// Release any locks if they exist
-		if r.FailoverGroupManager.DynamoDBManager != nil {
+		if r.Manager.DynamoDBManager != nil {
 			// Check if lock exists and release it
-			locked, leaseToken, _ := r.FailoverGroupManager.DynamoDBManager.IsLocked(
+			locked, leaseToken, _ := r.Manager.DynamoDBManager.IsLocked(
 				ctx, failoverGroup.Namespace, failoverGroup.Name)
 			if locked && leaseToken != "" {
-				_ = r.FailoverGroupManager.DynamoDBManager.ReleaseLock(
+				_ = r.Manager.DynamoDBManager.ReleaseLock(
 					ctx, failoverGroup.Namespace, failoverGroup.Name, leaseToken)
 			}
 
 			// Cleanup any volume state information
-			_ = r.FailoverGroupManager.DynamoDBManager.RemoveVolumeState(
+			_ = r.Manager.DynamoDBManager.RemoveVolumeState(
 				ctx, failoverGroup.Namespace, failoverGroup.Name)
 		}
 
@@ -229,9 +205,9 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 // SetupWithManager sets up the controller with the Manager.
 func (r *FailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize the manager if it hasn't been set
-	if r.FailoverGroupManager == nil {
+	if r.Manager == nil {
 		// Create the manager with client and logger
-		r.FailoverGroupManager = NewManager(r.Client, r.ClusterName, r.Log.WithName("failovergroup-manager"))
+		r.Manager = NewManager(r.Client, r.ClusterName, r.Log.WithName("failovergroup-manager"))
 
 		// Initialize resource managers if needed
 		// This would happen if you want to inject specialized or mock implementations
@@ -255,7 +231,7 @@ func (r *FailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	// Start the periodic synchronization
 	r.ctx, r.cancelFunc = context.WithCancel(context.Background())
-	r.FailoverGroupManager.StartPeriodicSynchronization(r.ctx, 30) // 30 second intervals
+	r.Manager.StartPeriodicSynchronization(r.ctx, 30) // 30 second intervals
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&crdv1alpha1.FailoverGroup{}).

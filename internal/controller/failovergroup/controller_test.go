@@ -78,13 +78,11 @@ func TestFailoverGroupController(t *testing.T) {
 		ClusterName: "test-cluster",
 	}
 
-	// Create and set the FailoverGroupManager
+	// Create and set the Manager
 	failoverGroupManager := NewManager(fakeClient, "test-cluster", logger)
-	// Set up DynamoDB service if needed for more complex tests
-	// Example:
-	// dynamodbService := &dynamodb.DynamoDBService{}
+	// You can mock the DynamoDB service here if needed
 	// failoverGroupManager.SetDynamoDBManager(dynamodbService)
-	reconciler.FailoverGroupManager = failoverGroupManager
+	reconciler.Manager = failoverGroupManager
 
 	// Test the reconcile function
 	_, err = reconciler.Reconcile(ctx, reconcile.Request{

@@ -40,8 +40,8 @@ func SetupControllers(mgr ctrl.Manager, config *config.Config) error {
 	failoverGroupReconciler := &failovergroup.FailoverGroupReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		ClusterName: config.ClusterName,
 		Log:         mgr.GetLogger().WithName("controllers").WithName("FailoverGroup"),
+		ClusterName: config.ClusterName,
 	}
 
 	// Setup DynamoDB if configured
@@ -55,7 +55,7 @@ func SetupControllers(mgr ctrl.Manager, config *config.Config) error {
 		// Create the FailoverGroup manager and set the DynamoDB service
 		failoverGroupManager := failovergroup.NewManager(mgr.GetClient(), config.ClusterName, failoverGroupReconciler.Log)
 		failoverGroupManager.SetDynamoDBManager(dynamoDBService)
-		failoverGroupReconciler.FailoverGroupManager = failoverGroupManager
+		failoverGroupReconciler.Manager = failoverGroupManager
 
 		// Create the Failover manager and set the DynamoDB service
 		failoverManager := failover.NewManager(mgr.GetClient(), config.ClusterName, failoverReconciler.Logger)

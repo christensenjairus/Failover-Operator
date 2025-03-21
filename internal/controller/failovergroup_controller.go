@@ -202,8 +202,35 @@ func (r *FailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.IngressesManager == nil {
 		r.IngressesManager = ingresses.NewManager(r.Client)
 	}
+
 	// Note: DynamoDBManager initialization requires additional AWS configuration
-	// This would typically be handled separately using AWS credentials
+	// This is a placeholder - in an actual implementation, we would:
+	// 1. Get AWS credentials from environment variables or secrets
+	// 2. Set up a DynamoDB client
+	// 3. Configure the table name based on configuration
+	// 4. Generate a unique operator ID if not provided
+	// Example:
+	//
+	// if r.DynamoDBManager == nil {
+	//     tableName := os.Getenv("DYNAMODB_TABLE_NAME")
+	//     if tableName == "" {
+	//         tableName = "failover-operator"
+	//     }
+	//
+	//     operatorID := os.Getenv("OPERATOR_ID")
+	//     if operatorID == "" {
+	//         // Generate a unique ID
+	//         operatorID = uuid.New().String()
+	//     }
+	//
+	//     awsConfig, err := config.LoadDefaultConfig(context.Background())
+	//     if err != nil {
+	//         return err
+	//     }
+	//
+	//     dynamoClient := dynamodb.NewFromConfig(awsConfig)
+	//     r.DynamoDBManager = dynamodb.NewManager(dynamoClient, tableName, operatorID, r.ClusterName)
+	// }
 
 	// Register this controller for FailoverGroup resources
 	// Use predicate to ignore status-only updates to reduce reconciliation load

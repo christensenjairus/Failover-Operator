@@ -107,6 +107,10 @@ type FailoverStatus struct {
 	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS
 	Status string `json:"status,omitempty"`
 
+	// Message provides additional details about the overall failover operation
+	// +optional
+	Message string `json:"message,omitempty"`
+
 	// FailoverGroups contains status information for each FailoverGroup
 	// +optional
 	FailoverGroups []FailoverGroupReference `json:"failoverGroups,omitempty"`

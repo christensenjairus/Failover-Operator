@@ -850,3 +850,36 @@ func (m *OperationsManager) updateClusterStateForFailover(ctx context.Context, n
 	// Update the status
 	return m.UpdateClusterStatus(ctx, namespace, name, clusterName, status.Health, state, status.Components)
 }
+
+// RemoveClusterStatus removes a cluster's status entry from DynamoDB
+func (m *OperationsManager) RemoveClusterStatus(ctx context.Context, namespace, name, clusterName string) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"clusterName", clusterName,
+	)
+	logger.Info("Removing cluster status from DynamoDB")
+
+	// Calculate the key for the status item
+	key := map[string]types.AttributeValue{
+		"PK": &types.AttributeValueMemberS{Value: fmt.Sprintf("FG#%s#%s", namespace, name)},
+		"SK": &types.AttributeValueMemberS{Value: fmt.Sprintf("STATUS#%s", clusterName)},
+	}
+
+	// Delete the item
+	_, err := m.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(m.tableName),
+		Key:       key,
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to delete cluster status: %w", err)
+	}
+
+	return nil
+}
+
+// TransferOwnership transfers ownership of a FailoverGroup to a new cluster
+func (m *OperationsManager) TransferOwnership(ctx context.Context, namespace, name, newOwner string) error {
+	return m.transferOwnership(ctx, namespace, name, newOwner)
+}

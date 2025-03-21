@@ -216,6 +216,10 @@ spec:
                   - name
                   type: object
                 type: array
+              message:
+                description: Message provides additional details about the overall
+                  failover operation
+                type: string
               metrics:
                 description: Metrics contains metrics related to the failover operation
                 properties:

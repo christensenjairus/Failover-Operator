@@ -2,6 +2,7 @@ package failover
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -155,16 +156,28 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 			Namespace: namespace,
 			Name:      groupRef.Name,
 		}, failoverGroup); err != nil {
-			groupLog.Error(err, "Failed to get failover group")
+			// Log error with context about which FailoverGroup couldn't be found
+			errorMsg := fmt.Sprintf("Failed to get FailoverGroup %s in namespace %s: %v",
+				groupRef.Name, namespace, err)
+			groupLog.Error(err, "Failed to get FailoverGroup",
+				"namespace", namespace,
+				"name", groupRef.Name)
 
 			// Update status for this group
 			failover.Status.FailoverGroups[i].Status = "FAILED"
-			failover.Status.FailoverGroups[i].Message = "Failed to get failover group: " + err.Error()
+			failover.Status.FailoverGroups[i].Message = errorMsg
+
+			// Set overall failover status to FAILED since missing FailoverGroup is critical
+			failover.Status.Status = "FAILED"
+			failover.Status.Message = fmt.Sprintf("Required FailoverGroup not found: %s/%s",
+				namespace, groupRef.Name)
+
 			if updateErr := r.Status().Update(ctx, failover); updateErr != nil {
-				logger.Error(updateErr, "Failed to update failover group status")
+				logger.Error(updateErr, "Failed to update failover status")
 			}
 
-			continue
+			// Return error to stop processing - a missing FailoverGroup is a critical error
+			return reconcile.Result{}, fmt.Errorf(errorMsg)
 		}
 
 		// Check if this operator should process this group

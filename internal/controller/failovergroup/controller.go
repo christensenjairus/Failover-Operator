@@ -28,9 +28,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
 )
 
 const finalizerName = "failovergroup.failover-operator.io/finalizer"
@@ -77,6 +77,28 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		log.Error(err, "Failed to get FailoverGroup resource")
 		return ctrl.Result{}, err
+	}
+
+	// Handle deletion if needed
+	if !failoverGroup.ObjectMeta.DeletionTimestamp.IsZero() {
+		log.Info("FailoverGroup is being deleted")
+		if err := r.handleDeletion(ctx, failoverGroup); err != nil {
+			log.Error(err, "Failed to handle deletion")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if it doesn't exist
+	if !controllerutil.ContainsFinalizer(failoverGroup, finalizerName) {
+		log.Info("Adding finalizer to FailoverGroup")
+		controllerutil.AddFinalizer(failoverGroup, finalizerName)
+		if err := r.Update(ctx, failoverGroup); err != nil {
+			log.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		// Return and requeue to continue with normal reconciliation
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Initialize the manager for this FailoverGroup if needed
@@ -160,46 +182,110 @@ func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
 	return false, ctrl.Result{}, nil
 }
 
-// handleDeletion cleans up resources and removes finalizer
-func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues(
-		"namespace", failoverGroup.Namespace,
-		"name", failoverGroup.Name,
-	)
+// handleDeletion implements finalizer logic for FailoverGroup to ensure proper cleanup
+// When a FailoverGroup is deleted, this method:
+// 1. Checks if this cluster is the primary and transfers ownership to another healthy cluster if possible
+// 2. Updates this cluster's status to INACTIVE
+// 3. Releases any locks held by this cluster
+// 4. Removes this cluster's status from DynamoDB
+// 5. Removes any volume state information if this was the primary cluster
+// 6. Removes the finalizer to allow Kubernetes to delete the object
+//
+// This ensures that DynamoDB resources are properly cleaned up when a FailoverGroup is deleted.
+// The finalizer prevents Kubernetes from removing the FailoverGroup until all this cleanup is complete.
+func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, fg *crdv1alpha1.FailoverGroup) error {
+	// Check if our finalizer is present
+	if !controllerutil.ContainsFinalizer(fg, finalizerName) {
+		return nil
+	}
 
-	// Check if the finalizer is still present
-	if controllerutil.ContainsFinalizer(failoverGroup, finalizerName) {
-		logger.Info("Performing cleanup before deletion")
+	// Perform cleanup
+	logger := log.FromContext(ctx).WithValues("failovergroup", fg.Name, "namespace", fg.Namespace)
+	logger.Info("Processing deletion")
 
-		// Perform cleanup:
-		// 1. Remove from DynamoDB if this is the last cluster
-		// 2. Release any locks
-		// 3. Scale down any workloads
+	dynamoDB := r.Manager.DynamoDBManager
+	baseManager := dynamoDB.BaseManager
+	operationsManager := dynamodb.NewOperationsManager(baseManager)
 
-		// Release any locks if they exist
-		if r.Manager.DynamoDBManager != nil {
-			// Check if lock exists and release it
-			locked, leaseToken, _ := r.Manager.DynamoDBManager.IsLocked(
-				ctx, failoverGroup.Namespace, failoverGroup.Name)
-			if locked && leaseToken != "" {
-				_ = r.Manager.DynamoDBManager.ReleaseLock(
-					ctx, failoverGroup.Namespace, failoverGroup.Name, leaseToken)
+	clusterName := r.ClusterName
+	namespace := fg.Namespace
+	name := fg.Name
+
+	// Check if this cluster is the primary cluster
+	statuses, err := dynamoDB.GetAllClusterStatuses(ctx, namespace, name)
+	if err != nil {
+		logger.Error(err, "Failed to get cluster statuses")
+		// Continue with deletion even if we can't get statuses
+	} else {
+		currentClusterStatus, exists := statuses[clusterName]
+		if exists && currentClusterStatus.State == "PRIMARY" {
+			logger.Info("This cluster is the primary - will attempt to transfer ownership")
+
+			// Find another cluster to transfer ownership to
+			for otherCluster, status := range statuses {
+				if otherCluster != clusterName && status.Health == "OK" {
+					logger.Info("Transferring ownership to another cluster", "targetCluster", otherCluster)
+					err := operationsManager.TransferOwnership(ctx, namespace, name, otherCluster)
+					if err != nil {
+						logger.Error(err, "Failed to transfer ownership", "targetCluster", otherCluster)
+					} else {
+						logger.Info("Successfully transferred ownership", "targetCluster", otherCluster)
+					}
+					break
+				}
 			}
-
-			// Cleanup any volume state information
-			_ = r.Manager.DynamoDBManager.RemoveVolumeState(
-				ctx, failoverGroup.Namespace, failoverGroup.Name)
-		}
-
-		// Remove the finalizer
-		controllerutil.RemoveFinalizer(failoverGroup, finalizerName)
-		if err := r.Update(ctx, failoverGroup); err != nil {
-			logger.Error(err, "Failed to remove finalizer")
-			return ctrl.Result{}, err
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Update this cluster's status to INACTIVE
+	logger.Info("Setting cluster status to INACTIVE")
+
+	// Create an empty StatusData since we're just updating status
+	emptyStatusData := &dynamodb.StatusData{
+		Workloads:        []dynamodb.ResourceStatus{},
+		NetworkResources: []dynamodb.ResourceStatus{},
+		FluxResources:    []dynamodb.ResourceStatus{},
+	}
+
+	err = dynamoDB.UpdateClusterStatus(ctx, namespace, name, "INACTIVE", "INACTIVE", emptyStatusData)
+	if err != nil {
+		logger.Error(err, "Failed to update cluster status")
+	}
+
+	// Release any locks held by this cluster
+	lockAcquired, leaseToken, err := dynamoDB.IsLocked(ctx, namespace, name)
+	if err != nil {
+		logger.Error(err, "Failed to check lock status")
+	} else if lockAcquired {
+		logger.Info("Releasing lock")
+		err = dynamoDB.ReleaseLock(ctx, namespace, name, leaseToken)
+		if err != nil {
+			logger.Error(err, "Failed to release lock")
+		}
+	}
+
+	// Remove cluster status from DynamoDB
+	logger.Info("Removing cluster status from DynamoDB")
+	err = operationsManager.RemoveClusterStatus(ctx, namespace, name, clusterName)
+	if err != nil {
+		logger.Error(err, "Failed to remove cluster status")
+	}
+
+	// Remove volume state if this was the primary cluster
+	err = dynamoDB.RemoveVolumeState(ctx, namespace, name)
+	if err != nil {
+		logger.Error(err, "Failed to remove volume state")
+	}
+
+	// Remove finalizer to allow Kubernetes to delete the object
+	controllerutil.RemoveFinalizer(fg, finalizerName)
+	err = r.Update(ctx, fg)
+	if err != nil {
+		return fmt.Errorf("failed to remove finalizer: %w", err)
+	}
+
+	logger.Info("Successfully cleaned up FailoverGroup")
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -235,6 +321,5 @@ func (r *FailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&crdv1alpha1.FailoverGroup{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Complete(r)
 }

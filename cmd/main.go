@@ -35,8 +35,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	failoverv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 	"github.com/christensenjairus/Failover-Operator/internal/controller"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/failover"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/failovergroup"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -48,7 +50,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(failoverv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(crdv1alpha1.AddToScheme(scheme))
 	// Register VolumeReplication scheme
 	utilruntime.Must(controller.RegisterSchemes(scheme))
 	// +kubebuilder:scaffold:scheme
@@ -60,10 +62,12 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var clusterName string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&clusterName, "cluster-name", "default-cluster", "The name of this cluster for multi-cluster operations.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -146,17 +150,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.FailoverGroupReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	if err = (&failovergroup.FailoverGroupReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Log:         ctrl.Log.WithName("controllers").WithName("FailoverGroup"),
+		ClusterName: clusterName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FailoverGroup")
 		os.Exit(1)
 	}
 
-	if err = (&controller.FailoverReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	if err = (&failover.FailoverReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Logger:      ctrl.Log.WithName("controllers").WithName("Failover"),
+		ClusterName: clusterName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Failover")
 		os.Exit(1)

@@ -151,23 +151,28 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 func (r *FailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize the manager if it hasn't been set
 	if r.FailoverGroupManager == nil {
+		// Create the manager with client and logger
 		r.FailoverGroupManager = NewManager(r.Client, r.ClusterName, r.Log.WithName("failovergroup-manager"))
-	}
 
-	// Set up DynamoDB manager if needed
-	// In a real implementation, you would initialize DynamoDB service from configuration
-	// For example:
-	// awsConfig := aws.NewConfig().WithRegion("us-west-2")
-	// if os.Getenv("AWS_ENDPOINT") != "" {
-	//     awsConfig = awsConfig.WithEndpoint(os.Getenv("AWS_ENDPOINT"))
-	// }
-	// dbSvc := dynamodb.NewDynamoDBService(
-	//     awsSession.New(awsConfig),
-	//     os.Getenv("DYNAMODB_TABLE"),
-	//     r.ClusterName,
-	//     os.Getenv("OPERATOR_ID"),
-	// )
-	// r.FailoverGroupManager.SetDynamoDBManager(dbSvc)
+		// Initialize resource managers if needed
+		// This would happen if you want to inject specialized or mock implementations
+		// for testing or other specific use cases
+
+		// In a production environment, you would configure the DynamoDB service
+		// based on your AWS configuration
+		// Example:
+		// awsConfig := aws.NewConfig().WithRegion("us-west-2")
+		// if os.Getenv("AWS_ENDPOINT") != "" {
+		//     awsConfig = awsConfig.WithEndpoint(os.Getenv("AWS_ENDPOINT"))
+		// }
+		// dbSvc := dynamodb.NewDynamoDBService(
+		//     awsSession.New(awsConfig),
+		//     os.Getenv("DYNAMODB_TABLE"),
+		//     r.ClusterName,
+		//     os.Getenv("OPERATOR_ID"),
+		// )
+		// r.FailoverGroupManager.SetDynamoDBManager(dbSvc)
+	}
 
 	// Start the periodic synchronization
 	r.ctx, r.cancelFunc = context.WithCancel(context.Background())

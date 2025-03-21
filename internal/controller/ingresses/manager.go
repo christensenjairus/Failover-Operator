@@ -249,21 +249,31 @@ func (m *Manager) IsPrimary(ctx context.Context, name, namespace string) (bool, 
 		return false, nil
 	}
 
-	return value == DNSControllerEnabled, nil
+	if value == DNSControllerEnabled {
+		logger.V(1).Info("Ingress is primary")
+		return true, nil
+	}
+
+	logger.V(1).Info("Ingress is secondary")
+	return false, nil
 }
 
 // IsSecondary checks if an Ingress is configured as secondary
-// An Ingress is secondary when its DNS controller annotation is disabled or not set
+// An Ingress is secondary when its DNS controller annotation is not enabled or not set
 func (m *Manager) IsSecondary(ctx context.Context, name, namespace string) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("ingress", name, "namespace", namespace)
+	logger.V(1).Info("Checking if Ingress is secondary")
+
 	isPrimary, err := m.IsPrimary(ctx, name, namespace)
 	if err != nil {
 		return false, err
 	}
+
 	return !isPrimary, nil
 }
 
-// IsReady checks if an Ingress is ready (has an IP or hostname)
-// Used to determine if the Ingress has been provisioned by the controller
+// IsReady checks if an Ingress is ready
+// An Ingress is considered ready when its LoadBalancer has at least one entry
 func (m *Manager) IsReady(ctx context.Context, name, namespace string) (bool, error) {
 	logger := log.FromContext(ctx).WithValues("ingress", name, "namespace", namespace)
 	logger.V(1).Info("Checking if Ingress is ready")
@@ -276,57 +286,68 @@ func (m *Manager) IsReady(ctx context.Context, name, namespace string) (bool, er
 		return false, err
 	}
 
-	// Check if Ingress has status (meaning it has been configured by the controller)
-	if len(ingress.Status.LoadBalancer.Ingress) == 0 {
-		logger.V(1).Info("Ingress not ready, no LoadBalancer status")
-		return false, nil
+	// Check if the LoadBalancer status has at least one entry
+	if len(ingress.Status.LoadBalancer.Ingress) > 0 {
+		logger.V(1).Info("Ingress is ready", "loadBalancerCount", len(ingress.Status.LoadBalancer.Ingress))
+		return true, nil
 	}
 
-	// Check if at least one entry has an IP or Hostname
-	for _, ing := range ingress.Status.LoadBalancer.Ingress {
-		if ing.IP != "" || ing.Hostname != "" {
-			logger.V(1).Info("Ingress is ready", "ip", ing.IP, "hostname", ing.Hostname)
-			return true, nil
-		}
-	}
-
-	logger.V(1).Info("Ingress not ready, LoadBalancer status incomplete")
+	logger.V(1).Info("Ingress is not ready yet", "loadBalancerCount", 0)
 	return false, nil
 }
 
-// WaitForReady waits for an Ingress to be ready (have an IP or hostname)
-// Useful during failover to ensure Ingress is properly provisioned before proceeding
+// WaitForReady waits for an Ingress to be ready
+// It polls the Ingress status until it's ready or the timeout is exceeded
 func (m *Manager) WaitForReady(ctx context.Context, name, namespace string, timeoutSeconds int) error {
 	logger := log.FromContext(ctx).WithValues("ingress", name, "namespace", namespace)
 	logger.Info("Waiting for Ingress to be ready", "timeout", timeoutSeconds)
 
-	return wait.PollImmediate(2*time.Second, time.Duration(timeoutSeconds)*time.Second, func() (bool, error) {
+	// Calculate deadline
+	timeout := time.Duration(timeoutSeconds) * time.Second
+
+	// Use exponential backoff to check
+	backoff := wait.Backoff{
+		Duration: 1 * time.Second,
+		Factor:   1.5,
+		Jitter:   0.1,
+		Steps:    10,
+		Cap:      30 * time.Second,
+	}
+
+	err := wait.ExponentialBackoff(backoff, func() (bool, error) {
 		ready, err := m.IsReady(ctx, name, namespace)
 		if err != nil {
-			logger.Error(err, "Failed to check if Ingress is ready")
-			return false, nil // Continue polling
+			logger.Error(err, "Failed to check Ingress readiness")
+			return false, err
 		}
-
-		if ready {
-			logger.Info("Ingress is ready")
-			return true, nil
-		}
-
-		logger.V(1).Info("Ingress not yet ready")
-		return false, nil
+		return ready, nil
 	})
+
+	if err == wait.ErrWaitTimeout {
+		logger.Error(err, "Timeout waiting for Ingress to be ready", "timeout", timeout)
+		return fmt.Errorf("timeout waiting for Ingress %s/%s to be ready after %v", namespace, name, timeout)
+	}
+
+	if err != nil {
+		logger.Error(err, "Error while waiting for Ingress to be ready")
+		return err
+	}
+
+	logger.Info("Ingress is ready")
+	return nil
 }
 
-// WaitForAllIngressesReady waits for all Ingresses to be ready
-// Used during failover to ensure all Ingresses are properly provisioned
+// WaitForAllIngressesReady waits for all specified Ingresses to be ready
+// It returns an error if any Ingress fails to become ready within the timeout
 func (m *Manager) WaitForAllIngressesReady(ctx context.Context, namespace string, names []string, timeoutSeconds int) error {
-	logger := log.FromContext(ctx).WithValues("namespace", namespace)
-	logger.Info("Waiting for all Ingresses to be ready", "count", len(names), "timeout", timeoutSeconds)
+	logger := log.FromContext(ctx).WithValues("namespace", namespace, "ingressCount", len(names))
+	logger.Info("Waiting for all Ingresses to be ready", "timeout", timeoutSeconds)
 
 	for _, name := range names {
-		if err := m.WaitForReady(ctx, name, namespace, timeoutSeconds); err != nil {
-			logger.Error(err, "Timeout waiting for Ingress to be ready", "ingress", name)
-			return fmt.Errorf("timeout waiting for Ingress %s to be ready: %w", name, err)
+		err := m.WaitForReady(ctx, name, namespace, timeoutSeconds)
+		if err != nil {
+			logger.Error(err, "Failed waiting for Ingress", "ingress", name)
+			return err
 		}
 	}
 

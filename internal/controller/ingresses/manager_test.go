@@ -8,6 +8,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -85,31 +86,75 @@ func TestUpdateIngress(t *testing.T) {
 	// Call the function to update the ingress to active state
 	updated, err := manager.UpdateIngress(ctx, ingress.Name, ingress.Namespace, "active")
 
-	// Since this is a stub, we expect no error and no change
+	// Verify operation succeeded
 	assert.NoError(t, err)
-	assert.False(t, updated)
+	assert.True(t, updated, "Ingress should be marked as updated")
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. Annotations were properly updated based on active/passive state
-	// 3. The resource was successfully updated in the API
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotations were set correctly for active state
+	assert.Equal(t, DNSControllerEnabled, updatedIngress.Annotations[DNSControllerAnnotation])
+	assert.Equal(t, DisabledValue, updatedIngress.Annotations[FluxReconcileAnnotation])
+
+	// Test updating to passive state
+	updated, err = manager.UpdateIngress(ctx, ingress.Name, ingress.Namespace, "passive")
+	assert.NoError(t, err)
+	assert.True(t, updated, "Ingress should be marked as updated")
+
+	// Get the updated ingress again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotations were set correctly for passive state
+	assert.Equal(t, DNSControllerDisabled, updatedIngress.Annotations[DNSControllerAnnotation])
+	assert.Equal(t, DisabledValue, updatedIngress.Annotations[FluxReconcileAnnotation])
 }
 
 func TestProcessIngresses(t *testing.T) {
 	// Setup
 	manager, _ := setupTestManager()
 	ctx := context.Background()
-	names := []string{"test-ingress1", "test-ingress2"}
+	names := []string{"test-ingress"}
+
+	// Setup a second ingress for testing multiple ingresses
+	secondIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-ingress2",
+			Namespace:   "default",
+			Annotations: map[string]string{},
+		},
+		Spec: networkingv1.IngressSpec{},
+	}
+	err := manager.client.Create(ctx, secondIngress)
+	assert.NoError(t, err)
+	names = append(names, "test-ingress2")
 
 	// Test with active=true
 	manager.ProcessIngresses(ctx, "default", names, true)
 
+	// Verify all ingresses have been updated
+	for _, name := range names {
+		ingress := &networkingv1.Ingress{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, ingress)
+		assert.NoError(t, err)
+		assert.Equal(t, DNSControllerEnabled, ingress.Annotations[DNSControllerAnnotation])
+		assert.Equal(t, DisabledValue, ingress.Annotations[FluxReconcileAnnotation])
+	}
+
 	// Test with active=false
 	manager.ProcessIngresses(ctx, "default", names, false)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. UpdateIngress is called for each Ingress
-	// 2. The correct state is passed based on the active parameter
+	// Verify all ingresses have been updated
+	for _, name := range names {
+		ingress := &networkingv1.Ingress{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, ingress)
+		assert.NoError(t, err)
+		assert.Equal(t, DNSControllerDisabled, ingress.Annotations[DNSControllerAnnotation])
+		assert.Equal(t, DisabledValue, ingress.Annotations[FluxReconcileAnnotation])
+	}
 }
 
 func TestAddFluxAnnotation(t *testing.T) {
@@ -120,13 +165,16 @@ func TestAddFluxAnnotation(t *testing.T) {
 	// Call the function to add flux annotation
 	err := manager.AddFluxAnnotation(ctx, ingress.Name, ingress.Namespace)
 
-	// Since this is a stub, we expect no error
+	// Verify operation succeeded
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The flux annotation was added with the correct value
-	// 3. The resource was successfully updated in the API
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was added
+	assert.Equal(t, DisabledValue, updatedIngress.Annotations[FluxReconcileAnnotation])
 }
 
 func TestRemoveFluxAnnotation(t *testing.T) {
@@ -134,22 +182,25 @@ func TestRemoveFluxAnnotation(t *testing.T) {
 	manager, ingress := setupTestManager()
 	ctx := context.Background()
 
-	// First add the flux annotation
-	if ingress.Annotations == nil {
-		ingress.Annotations = make(map[string]string)
-	}
+	// First add the flux annotation to the test ingress
 	ingress.Annotations[FluxReconcileAnnotation] = DisabledValue
-
-	// Call the function to remove flux annotation
-	err := manager.RemoveFluxAnnotation(ctx, ingress.Name, ingress.Namespace)
-
-	// Since this is a stub, we expect no error
+	err := manager.client.Update(ctx, ingress)
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The flux annotation was removed
-	// 3. The resource was successfully updated in the API
+	// Call the function to remove flux annotation
+	err = manager.RemoveFluxAnnotation(ctx, ingress.Name, ingress.Namespace)
+
+	// Verify operation succeeded
+	assert.NoError(t, err)
+
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was removed
+	_, exists := updatedIngress.Annotations[FluxReconcileAnnotation]
+	assert.False(t, exists)
 }
 
 func TestAddAnnotation(t *testing.T) {
@@ -160,13 +211,16 @@ func TestAddAnnotation(t *testing.T) {
 	// Call the function to add annotation
 	err := manager.AddAnnotation(ctx, ingress.Name, ingress.Namespace, "test-key", "test-value")
 
-	// Since this is a stub, we expect no error
+	// Verify operation succeeded
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The annotation was added with the correct key and value
-	// 3. The resource was successfully updated in the API
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was added
+	assert.Equal(t, "test-value", updatedIngress.Annotations["test-key"])
 }
 
 func TestRemoveAnnotation(t *testing.T) {
@@ -175,21 +229,24 @@ func TestRemoveAnnotation(t *testing.T) {
 	ctx := context.Background()
 
 	// Add a test annotation
-	if ingress.Annotations == nil {
-		ingress.Annotations = make(map[string]string)
-	}
 	ingress.Annotations["test-key"] = "test-value"
-
-	// Call the function to remove annotation
-	err := manager.RemoveAnnotation(ctx, ingress.Name, ingress.Namespace, "test-key")
-
-	// Since this is a stub, we expect no error
+	err := manager.client.Update(ctx, ingress)
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The annotation was removed
-	// 3. The resource was successfully updated in the API
+	// Call the function to remove annotation
+	err = manager.RemoveAnnotation(ctx, ingress.Name, ingress.Namespace, "test-key")
+
+	// Verify operation succeeded
+	assert.NoError(t, err)
+
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was removed
+	_, exists := updatedIngress.Annotations["test-key"]
+	assert.False(t, exists)
 }
 
 func TestGetAnnotation(t *testing.T) {
@@ -198,23 +255,25 @@ func TestGetAnnotation(t *testing.T) {
 	ctx := context.Background()
 
 	// Add a test annotation
-	if ingress.Annotations == nil {
-		ingress.Annotations = make(map[string]string)
-	}
-	ingress.Annotations["test-key"] = "test-value"
+	const testKey = "test-key"
+	const testValue = "test-value"
+	ingress.Annotations[testKey] = testValue
+	err := manager.client.Update(ctx, ingress)
+	assert.NoError(t, err)
 
 	// Call the function to get annotation
-	value, exists, err := manager.GetAnnotation(ctx, ingress.Name, ingress.Namespace, "test-key")
+	value, exists, err := manager.GetAnnotation(ctx, ingress.Name, ingress.Namespace, testKey)
 
-	// Since this is a stub, we expect no error and default return values
+	// Verify operation succeeded and returned the correct values
 	assert.NoError(t, err)
-	assert.False(t, exists)    // This will change with real implementation
-	assert.Equal(t, "", value) // This will change with real implementation
+	assert.True(t, exists)
+	assert.Equal(t, testValue, value)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The annotation value was correctly returned
-	// 3. The exists flag correctly indicates whether the annotation exists
+	// Test for non-existent annotation
+	value, exists, err = manager.GetAnnotation(ctx, ingress.Name, ingress.Namespace, "nonexistent-key")
+	assert.NoError(t, err)
+	assert.False(t, exists)
+	assert.Equal(t, "", value)
 }
 
 func TestSetDNSController(t *testing.T) {
@@ -226,14 +285,24 @@ func TestSetDNSController(t *testing.T) {
 	err := manager.SetDNSController(ctx, ingress.Name, ingress.Namespace, true)
 	assert.NoError(t, err)
 
+	// Get the updated ingress
+	updatedIngress := &networkingv1.Ingress{}
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was set correctly
+	assert.Equal(t, DNSControllerEnabled, updatedIngress.Annotations[DNSControllerAnnotation])
+
 	// Test enable=false
 	err = manager.SetDNSController(ctx, ingress.Name, ingress.Namespace, false)
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The DNS controller annotation was set to the correct value
-	// 3. The resource was successfully updated in the API
+	// Get the updated ingress again
+	err = manager.client.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, updatedIngress)
+	assert.NoError(t, err)
+
+	// Verify annotation was set correctly
+	assert.Equal(t, DNSControllerDisabled, updatedIngress.Annotations[DNSControllerAnnotation])
 }
 
 func TestIsPrimary(t *testing.T) {
@@ -241,16 +310,30 @@ func TestIsPrimary(t *testing.T) {
 	manager, ingress := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function to check if primary
+	// Test with annotation not set
 	isPrimary, err := manager.IsPrimary(ctx, ingress.Name, ingress.Namespace)
-
-	// Since this is a stub, we expect no error and the default return value
 	assert.NoError(t, err)
 	assert.False(t, isPrimary)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The function correctly checks the DNS controller annotation
+	// Set DNS controller annotation to enabled
+	ingress.Annotations[DNSControllerAnnotation] = DNSControllerEnabled
+	err = manager.client.Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	// Test with annotation set to enabled
+	isPrimary, err = manager.IsPrimary(ctx, ingress.Name, ingress.Namespace)
+	assert.NoError(t, err)
+	assert.True(t, isPrimary)
+
+	// Set DNS controller annotation to disabled
+	ingress.Annotations[DNSControllerAnnotation] = DNSControllerDisabled
+	err = manager.client.Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	// Test with annotation set to disabled
+	isPrimary, err = manager.IsPrimary(ctx, ingress.Name, ingress.Namespace)
+	assert.NoError(t, err)
+	assert.False(t, isPrimary)
 }
 
 func TestIsSecondary(t *testing.T) {
@@ -258,16 +341,30 @@ func TestIsSecondary(t *testing.T) {
 	manager, ingress := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function to check if secondary
+	// Test with annotation not set
 	isSecondary, err := manager.IsSecondary(ctx, ingress.Name, ingress.Namespace)
-
-	// Since this is a stub, we expect no error and the default return value based on IsPrimary
 	assert.NoError(t, err)
-	assert.True(t, isSecondary) // Since IsPrimary returns false, this should be true
+	assert.True(t, isSecondary, "Should be secondary by default when annotation is not set")
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The function calls IsPrimary
-	// 2. It correctly returns the opposite of IsPrimary
+	// Set DNS controller annotation to enabled
+	ingress.Annotations[DNSControllerAnnotation] = DNSControllerEnabled
+	err = manager.client.Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	// Test with annotation set to enabled
+	isSecondary, err = manager.IsSecondary(ctx, ingress.Name, ingress.Namespace)
+	assert.NoError(t, err)
+	assert.False(t, isSecondary, "Should not be secondary when annotation is enabled")
+
+	// Set DNS controller annotation to disabled
+	ingress.Annotations[DNSControllerAnnotation] = DNSControllerDisabled
+	err = manager.client.Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	// Test with annotation set to disabled
+	isSecondary, err = manager.IsSecondary(ctx, ingress.Name, ingress.Namespace)
+	assert.NoError(t, err)
+	assert.True(t, isSecondary, "Should be secondary when annotation is disabled")
 }
 
 func TestIsReady(t *testing.T) {
@@ -275,50 +372,97 @@ func TestIsReady(t *testing.T) {
 	manager, ingress := setupTestManager()
 	ctx := context.Background()
 
-	// Call the function to check if ready
+	// Test without status
 	isReady, err := manager.IsReady(ctx, ingress.Name, ingress.Namespace)
-
-	// Since this is a stub, we expect no error and the default return value
 	assert.NoError(t, err)
-	assert.True(t, isReady)
+	assert.False(t, isReady, "Ingress without status should not be ready")
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The Ingress resource was retrieved
-	// 2. The function correctly checks the Ingress status
+	// Add status with LoadBalancer ingress
+	ingress.Status = networkingv1.IngressStatus{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
+				{
+					IP: "192.168.1.1",
+				},
+			},
+		},
+	}
+	err = manager.client.Status().Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	// Test with status containing LoadBalancer ingress
+	isReady, err = manager.IsReady(ctx, ingress.Name, ingress.Namespace)
+	assert.NoError(t, err)
+	assert.True(t, isReady, "Ingress with LoadBalancer status should be ready")
 }
 
 func TestWaitForReady(t *testing.T) {
 	// Setup
 	manager, ingress := setupTestManager()
 	ctx := context.Background()
-	timeout := 5
 
-	// Call the function to wait for ready
-	err := manager.WaitForReady(ctx, ingress.Name, ingress.Namespace, timeout)
-
-	// Since this is a stub, we expect no error
+	// Add status with LoadBalancer ingress synchronously since this is a unit test
+	// In a real environment, this would be set by the ingress controller
+	ingress.Status = networkingv1.IngressStatus{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
+				{
+					IP: "192.168.1.1",
+				},
+			},
+		},
+	}
+	err := manager.client.Status().Update(ctx, ingress)
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. The function polls the Ingress status
-	// 2. It correctly identifies when the Ingress is ready
-	// 3. It respects timeouts and returns an error if exceeded
+	// Test the wait function with a timeout of 1 second
+	err = manager.WaitForReady(ctx, ingress.Name, ingress.Namespace, 1)
+	assert.NoError(t, err)
 }
 
 func TestWaitForAllIngressesReady(t *testing.T) {
 	// Setup
-	manager, _ := setupTestManager()
+	manager, ingress := setupTestManager()
 	ctx := context.Background()
-	names := []string{"test-ingress1", "test-ingress2"}
-	timeout := 5
 
-	// Call the function to wait for all Ingresses to be ready
-	err := manager.WaitForAllIngressesReady(ctx, "default", names, timeout)
-
-	// Since this is a stub, we expect no error
+	// Create a second ingress
+	secondIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-ingress2",
+			Namespace:   "default",
+			Annotations: map[string]string{},
+		},
+		Spec: networkingv1.IngressSpec{},
+	}
+	err := manager.client.Create(ctx, secondIngress)
 	assert.NoError(t, err)
 
-	// TODO: Once implementation is complete, add assertions to verify:
-	// 1. WaitForReady is called for each Ingress
-	// 2. It respects timeouts and returns an error if exceeded
+	// Update status for both ingresses synchronously
+	ingress.Status = networkingv1.IngressStatus{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
+				{
+					IP: "192.168.1.1",
+				},
+			},
+		},
+	}
+	err = manager.client.Status().Update(ctx, ingress)
+	assert.NoError(t, err)
+
+	secondIngress.Status = networkingv1.IngressStatus{
+		LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+			Ingress: []networkingv1.IngressLoadBalancerIngress{
+				{
+					IP: "192.168.1.2",
+				},
+			},
+		},
+	}
+	err = manager.client.Status().Update(ctx, secondIngress)
+	assert.NoError(t, err)
+
+	// Test the wait function with a timeout of 1 second
+	err = manager.WaitForAllIngressesReady(ctx, "default", []string{ingress.Name, secondIngress.Name}, 1)
+	assert.NoError(t, err)
 }

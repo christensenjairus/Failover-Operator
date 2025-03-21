@@ -1,0 +1,56 @@
+// ComponentSpec needs to be updated to include Ingresses field:
+
+// ComponentSpec defines a component in the application being managed
+type ComponentSpec struct {
+	// Name of the component
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// FailoverMode determines the failover approach for this specific component
+	// If not specified, the default failover mode from the parent will be used
+	// +kubebuilder:validation:Enum=safe;fast
+	// +optional
+	FailoverMode string `json:"failoverMode,omitempty"`
+
+	// Workloads are the resources that make up this component
+	// +optional
+	Workloads []ResourceRef `json:"workloads,omitempty"`
+
+	// VolumeReplications are the volume replications associated with this component
+	// +optional
+	VolumeReplications []string `json:"volumeReplications,omitempty"`
+
+	// VirtualServices are the Istio virtual services associated with this component
+	// +optional
+	VirtualServices []string `json:"virtualServices,omitempty"`
+  
+	// Ingresses are the Kubernetes ingress resources associated with this component
+	// +optional
+	Ingresses []string `json:"ingresses,omitempty"`
+}
+
+// After reviewing the existing implementations and comparing with the YAML provided:
+// 1. The FailoverGroup type already has all fields specified in the YAML.
+// 2. The Failover type already has all fields specified in the YAML.
+// 3. Only the ComponentSpec needs to be updated to include the Ingresses field.
+
+// The SupportedResourceKind list should also be updated to include Ingress resources:
+
+// IngressKind represents Ingress resources
+var IngressKind = SupportedResourceKind{
+	Kind:            "Ingress",
+	APIGroup:        "networking.k8s.io",
+	DefaultAPIGroup: "networking.k8s.io",
+}
+
+// And add it to AllSupportedResourceKinds:
+var AllSupportedResourceKinds = []SupportedResourceKind{
+	VolumeReplicationKind,
+	DeploymentKind,
+	StatefulSetKind,
+	CronJobKind,
+	VirtualServiceKind,
+	HelmReleaseKind,
+	KustomizationKind,
+	IngressKind, // Added Ingress
+} 

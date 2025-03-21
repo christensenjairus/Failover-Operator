@@ -62,16 +62,25 @@ type FailoverMetrics struct {
 
 // FailoverSpec defines the desired state of Failover
 type FailoverSpec struct {
-	// Type of failover:
-	// - "planned" allows for a controlled, sequential failover with minimal downtime
-	// - "emergency" prioritizes availability on the target cluster as quickly as possible
-	// +kubebuilder:validation:Enum=planned;emergency
-	// +kubebuilder:validation:Required
-	Type string `json:"type"`
-
 	// TargetCluster specifies which cluster should become the PRIMARY
 	// +kubebuilder:validation:Required
 	TargetCluster string `json:"targetCluster"`
+
+	// When true, overrides component failoverMode settings to use 'fast' mode
+	// Fast mode starts the new cluster first before stopping the old one
+	// This minimizes downtime but may cause brief data inconsistency
+	// +optional
+	ForceFastMode bool `json:"forceFastMode,omitempty"`
+
+	// When true, skips safety checks like replication lag or volume sync state
+	// Use with caution - can lead to data loss if replication isn't complete
+	// +optional
+	Force bool `json:"force,omitempty"`
+
+	// Optional documentation field explaining the reason for this failover
+	// Not used by controller logic but useful for auditing and tracking
+	// +optional
+	Reason string `json:"reason,omitempty"`
 
 	// FailoverGroups references the FailoverGroup resources to be failed over
 	// +kubebuilder:validation:Required
@@ -101,7 +110,6 @@ type FailoverStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
-//+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
 //+kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetCluster`
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

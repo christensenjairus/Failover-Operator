@@ -21,6 +21,9 @@ spec:
     - jsonPath: .status.health
       name: Health
       type: string
+    - jsonPath: .status.globalState.activeCluster
+      name: Active
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -110,6 +113,16 @@ spec:
                 - safe
                 - fast
                 type: string
+              heartbeatInterval:
+                description: |-
+                  How often the operator updates heartbeats in DynamoDB
+                  This controls the frequency of cluster health updates in the global state
+                type: string
+              operatorID:
+                description: |-
+                  Identifier for the operator instance that should process this FailoverGroup
+                  This allows running multiple operator instances for different applications
+                type: string
               parentFluxResources:
                 description: ParentFluxResources defines the Flux resources that need
                   to be suspended during failover operations
@@ -128,6 +141,35 @@ spec:
                   - name
                   type: object
                 type: array
+              suspended:
+                description: |-
+                  When true, automatic failovers are disabled (manual override for maintenance)
+                  The operator will not create automatic failovers even if it detects problems
+                type: boolean
+              suspensionReason:
+                description: |-
+                  Documentation field explaining why automatic failovers are suspended
+                  Only meaningful when suspended=true
+                type: string
+              timeouts:
+                description: Timeout settings for automatic operations
+                properties:
+                  heartbeat:
+                    description: |-
+                      Time without heartbeats before assuming a cluster is down
+                      The operator creates a failover after this period if no heartbeats are received
+                    type: string
+                  transitoryState:
+                    description: |-
+                      Maximum time a FailoverGroup can remain in FAILOVER/FAILBACK states
+                      After this period, the operator initiates an automatic rollback
+                    type: string
+                  unhealthyPrimary:
+                    description: |-
+                      Time that a PRIMARY cluster can remain unhealthy before auto-failover
+                      The operator creates a failover after this period if health status=ERROR
+                    type: string
+                type: object
             required:
             - components
             - defaultFailoverMode
@@ -219,6 +261,64 @@ spec:
                   - type
                   type: object
                 type: array
+              globalState:
+                description: GlobalState contains global state information synced
+                  from DynamoDB
+                properties:
+                  activeCluster:
+                    description: Which cluster is currently PRIMARY for this group
+                    type: string
+                  clusters:
+                    description: Information about all clusters participating in this
+                      FailoverGroup
+                    items:
+                      description: ClusterInfo contains information about a cluster
+                        in the FailoverGroup
+                      properties:
+                        health:
+                          description: Health status of the cluster
+                          enum:
+                          - OK
+                          - DEGRADED
+                          - ERROR
+                          type: string
+                        lastHeartbeat:
+                          description: LastHeartbeat is the timestamp of the last
+                            heartbeat received
+                          type: string
+                        name:
+                          description: Name of the cluster
+                          type: string
+                        role:
+                          description: Role of the cluster (PRIMARY or STANDBY)
+                          enum:
+                          - PRIMARY
+                          - STANDBY
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  dbSyncStatus:
+                    description: Status of DynamoDB synchronization
+                    enum:
+                    - Synced
+                    - Syncing
+                    - Error
+                    type: string
+                  lastFailover:
+                    additionalProperties:
+                      type: string
+                    description: Reference to the most recent failover operation
+                    type: object
+                  lastSyncTime:
+                    description: LastSyncTime is when the last successful sync with
+                      DynamoDB occurred
+                    type: string
+                  thisCluster:
+                    description: This cluster's name (for convenience)
+                    type: string
+                type: object
               health:
                 description: |-
                   Health indicates the overall health of the failover group

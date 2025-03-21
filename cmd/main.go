@@ -36,9 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
+	"github.com/christensenjairus/Failover-Operator/internal/config"
 	"github.com/christensenjairus/Failover-Operator/internal/controller"
-	"github.com/christensenjairus/Failover-Operator/internal/controller/failover"
-	"github.com/christensenjairus/Failover-Operator/internal/controller/failovergroup"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -150,26 +149,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&failovergroup.FailoverGroupReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Log:         ctrl.Log.WithName("controllers").WithName("FailoverGroup"),
-		ClusterName: clusterName,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "FailoverGroup")
+	// Load configuration
+	operatorConfig, err := config.LoadConfig()
+	if err != nil {
+		setupLog.Error(err, "unable to load operator configuration")
 		os.Exit(1)
 	}
 
-	if err = (&failover.FailoverReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Logger:      ctrl.Log.WithName("controllers").WithName("Failover"),
-		ClusterName: clusterName,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Failover")
+	// Override cluster name from command line if provided
+	if clusterName != "default-cluster" {
+		operatorConfig.ClusterName = clusterName
+	}
+
+	setupLog.Info("starting with configuration",
+		"clusterName", operatorConfig.ClusterName,
+		"operatorID", operatorConfig.OperatorID,
+		"dynamoDBTable", operatorConfig.DynamoDBTableName,
+		"awsRegion", operatorConfig.AWSRegion)
+
+	// Setup all controllers
+	if err = controller.SetupControllers(mgr, operatorConfig); err != nil {
+		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
-	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

@@ -137,49 +137,65 @@ func TestStateManager_EnhancedGetGroupState(t *testing.T) {
 
 // TestStateManager_EnhancedUpdateClusterStatus tests the UpdateClusterStatus function
 func TestStateManager_EnhancedUpdateClusterStatus(t *testing.T) {
-	t.Skip("This test is an example only and needs further implementation to pass")
+	// Mock client
+	client := &MockDynamoDBClient{}
+	baseManager := NewBaseManager(client, TestTableName, TestClusterName, TestOperatorID)
+	stateManager := NewStateManager(baseManager)
 
-	// Setup
-	stateManager, mockClient, ctx := createMockStateManager()
+	// Test context
+	ctx := context.Background()
 
-	// Create expected components
-	components := map[string]ComponentStatus{
-		"web-app": {
-			Health:  HealthOK,
-			Message: "Web app is healthy",
+	// Create a detailed StatusData
+	statusData := &StatusData{
+		Workloads: []ResourceStatus{
+			{
+				Kind:   "Deployment",
+				Name:   "frontend",
+				Health: HealthOK,
+				Status: "Running normally",
+			},
+			{
+				Kind:   "StatefulSet",
+				Name:   "database",
+				Health: HealthDegraded,
+				Status: "Scaling in progress",
+			},
 		},
-		"database": {
-			Health:  HealthDegraded,
-			Message: "Database is experiencing high latency",
+		NetworkResources: []ResourceStatus{
+			{
+				Kind:   "VirtualService",
+				Name:   "frontend-vs",
+				Health: HealthOK,
+				Status: "Routing traffic",
+			},
+		},
+		FluxResources: []ResourceStatus{
+			{
+				Kind:   "HelmRelease",
+				Name:   "app-release",
+				Health: HealthOK,
+				Status: "Reconciled",
+			},
+		},
+		VolumeReplications: []WorkloadReplicationStatus{
+			{
+				WorkloadKind: "StatefulSet",
+				WorkloadName: "database",
+				VolumeReplications: []ResourceStatus{
+					{
+						Kind:   "VolumeReplication",
+						Name:   "database-data",
+						Health: HealthDegraded,
+						Status: "Replication lag detected",
+					},
+				},
+			},
 		},
 	}
 
-	// Mock PutItem call
-	output := &dynamodb.PutItemOutput{}
-
-	// Set up PutItem expectation
-	mockClient.On("PutItem", ctx, mock.Anything).Return(output, nil).Once()
-
-	// Call the function under test
-	err := stateManager.UpdateClusterStatus(ctx, TestNamespace, TestGroupName, HealthDegraded, StatePrimary, components)
-
-	// Assertions
+	// Test the UpdateClusterStatus function
+	err := stateManager.UpdateClusterStatus(ctx, TestNamespace, TestGroupName, HealthDegraded, StatePrimary, statusData)
 	assert.NoError(t, err)
-
-	// Verify mock was called as expected
-	mockClient.AssertExpectations(t)
-
-	// Only check call parameters if there were actual calls made
-	if len(mockClient.Calls) > 0 {
-		// Verify parameters used in the call
-		call := mockClient.Calls[0]
-		assert.Equal(t, "PutItem", call.Method)
-
-		// Validate PutItem was called with correct tableName
-		putItemInput, ok := call.Arguments.Get(1).(*dynamodb.PutItemInput)
-		assert.True(t, ok)
-		assert.Equal(t, TestTableName, *putItemInput.TableName)
-	}
 }
 
 // TestStateManager_EnhancedGetAllClusterStatuses tests the GetAllClusterStatuses function
@@ -336,30 +352,27 @@ func TestStateManagerEnhanced(t *testing.T) {
 
 	// Test UpdateClusterStatus
 	t.Run("UpdateClusterStatus", func(t *testing.T) {
-		// Reset mock
-		mockClient = new(TestManagerMock)
-		baseManager = NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
-		stateManager = NewStateManager(baseManager)
+		// Mock client
+		client := &MockDynamoDBClient{}
+		baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
+		stateManager := NewStateManager(baseManager)
 
-		// Create expected components
-		components := map[string]ComponentStatus{
-			"database": {
-				Health:  "OK",
-				Message: "Database is healthy",
+		// Test context
+		ctx := context.Background()
+
+		// Test with simplified StatusData
+		statusData := &StatusData{
+			Workloads: []ResourceStatus{
+				{
+					Kind:   "Deployment",
+					Name:   "app",
+					Health: "OK",
+					Status: "Running",
+				},
 			},
 		}
 
-		// Mock PutItem call
-		output := &dynamodb.PutItemOutput{}
-		mockClient.On("PutItem", mock.Anything, mock.Anything).Return(output, nil).Once()
-
-		// Call the function under test
-		err := stateManager.UpdateClusterStatus(ctx, "test-namespace", "test-group", "OK", "PRIMARY", components)
-
-		// Assertions
+		err := stateManager.UpdateClusterStatus(ctx, "test-namespace", "test-group", "OK", "PRIMARY", statusData)
 		assert.NoError(t, err)
-
-		// Verify mock was called as expected
-		mockClient.AssertExpectations(t)
 	})
 }

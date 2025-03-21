@@ -136,31 +136,72 @@ func TestGetClusterStatus(t *testing.T) {
 }
 
 func TestUpdateClusterStatus(t *testing.T) {
-	// Setup
-	baseManager := &BaseManager{
-		client:      &EnhancedTestDynamoDBClient{},
-		tableName:   "test-table",
-		clusterName: "test-cluster",
-		operatorID:  "test-operator",
-	}
+	// Mock client
+	client := &MockDynamoDBClient{}
+	baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
 	stateManager := NewStateManager(baseManager)
+
+	// Test context
 	ctx := context.Background()
+
+	// Test parameters
 	namespace := "test-namespace"
-	name := "test-name"
-	health := HealthOK
-	state := StatePrimary
+	name := "test-group"
+	health := "OK"
+	state := "PRIMARY"
+
+	// Create StatusData for testing
+	statusData := &StatusData{
+		Workloads: []ResourceStatus{
+			{
+				Kind:   "Deployment",
+				Name:   "web-app",
+				Health: "OK",
+				Status: "Running normally",
+			},
+		},
+	}
+
+	// Test the function
+	err := stateManager.UpdateClusterStatus(ctx, namespace, name, health, state, statusData)
+
+	// Check result
+	assert.NoError(t, err, "UpdateClusterStatus should not return an error")
+}
+
+// For backward compatibility testing
+func TestUpdateClusterStatusLegacy(t *testing.T) {
+	// Mock client
+	client := &MockDynamoDBClient{}
+	baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
+	stateManager := NewStateManager(baseManager)
+
+	// Test context
+	ctx := context.Background()
+
+	// Test parameters
+	namespace := "test-namespace"
+	name := "test-group"
+	health := "OK"
+	state := "PRIMARY"
+
+	// Create legacy components map for testing
 	components := map[string]ComponentStatus{
+		"web-app": {
+			Health:  "OK",
+			Message: "Web app is healthy",
+		},
 		"database": {
-			Health:  HealthOK,
+			Health:  "OK",
 			Message: "Database is healthy",
 		},
 	}
 
-	// Call the function under test
-	err := stateManager.UpdateClusterStatus(ctx, namespace, name, health, state, components)
+	// Test the function
+	err := stateManager.UpdateClusterStatusLegacy(ctx, namespace, name, health, state, components)
 
-	// Verify the results
-	assert.NoError(t, err, "UpdateClusterStatus should not return an error")
+	// Check result
+	assert.NoError(t, err, "UpdateClusterStatusLegacy should not return an error")
 }
 
 func TestGetAllClusterStatuses(t *testing.T) {

@@ -136,6 +136,29 @@ type ComponentStatus struct {
 	Message string `json:"message"` // Optional message with details about the health status
 }
 
+// ResourceStatus represents the status of a resource
+type ResourceStatus struct {
+	Kind   string `json:"kind"`   // Kind of the resource
+	Name   string `json:"name"`   // Name of the resource
+	Health string `json:"health"` // Health status: OK, DEGRADED, ERROR
+	Status string `json:"status"` // Status message about the resource
+}
+
+// WorkloadReplicationStatus represents the status of volume replications for a workload
+type WorkloadReplicationStatus struct {
+	WorkloadKind       string           `json:"workloadKind"`       // Kind of the workload
+	WorkloadName       string           `json:"workloadName"`       // Name of the workload
+	VolumeReplications []ResourceStatus `json:"volumeReplications"` // Status of volume replications
+}
+
+// StatusData represents the detailed status information for all resource types
+type StatusData struct {
+	Workloads          []ResourceStatus            `json:"workloads,omitempty"`
+	NetworkResources   []ResourceStatus            `json:"networkResources,omitempty"`
+	FluxResources      []ResourceStatus            `json:"fluxResources,omitempty"`
+	VolumeReplications []WorkloadReplicationStatus `json:"volumeReplications,omitempty"`
+}
+
 // FailoverReference is a reference to a Failover resource
 type FailoverReference struct {
 	Name      string    `json:"name"`      // Name of the Failover resource

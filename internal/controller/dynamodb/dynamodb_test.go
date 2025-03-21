@@ -137,7 +137,42 @@ func TestOperationsManager_ExecuteFailover(t *testing.T) {
 }
 
 func TestClusterStatusRecord_JsonComponents(t *testing.T) {
-	// Test that components can be marshaled and unmarshaled from JSON
+	// Test that StatusData can be marshaled and unmarshaled from JSON
+	statusData := &StatusData{
+		Workloads: []ResourceStatus{
+			{
+				Kind:   "Deployment",
+				Name:   "app",
+				Health: HealthOK,
+				Status: "Running normally",
+			},
+		},
+		NetworkResources: []ResourceStatus{
+			{
+				Kind:   "VirtualService",
+				Name:   "app-vs",
+				Health: HealthOK,
+				Status: "Routing traffic correctly",
+			},
+		},
+	}
+
+	client := &MockDynamoDBClient{}
+	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
+
+	// Test marshaling by calling UpdateClusterStatus
+	err := service.State.UpdateClusterStatus(
+		context.Background(),
+		"test-namespace",
+		"test-group",
+		HealthDegraded,
+		StatePrimary,
+		statusData,
+	)
+
+	assert.NoError(t, err)
+
+	// For backward compatibility, test the legacy function too
 	components := map[string]ComponentStatus{
 		"database": {
 			Health:  HealthOK,
@@ -149,11 +184,8 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 		},
 	}
 
-	client := &MockDynamoDBClient{}
-	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
-
-	// Test marshaling by calling UpdateClusterStatus
-	err := service.State.UpdateClusterStatus(
+	// Test marshaling by calling the legacy function
+	err = service.State.UpdateClusterStatusLegacy(
 		context.Background(),
 		"test-namespace",
 		"test-group",

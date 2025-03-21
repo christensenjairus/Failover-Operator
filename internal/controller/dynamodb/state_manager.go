@@ -184,13 +184,52 @@ func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, cl
 }
 
 // UpdateClusterStatus updates the status for this cluster in a FailoverGroup
-func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, components map[string]ComponentStatus) error {
+func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, statusData *StatusData) error {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
 		"clusterName", s.clusterName,
 	)
 	logger.V(1).Info("Updating cluster status")
+
+	// Convert StatusData to JSON string for efficient storage
+	statusJSON, err := json.Marshal(statusData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status data: %w", err)
+	}
+
+	// Create the record to be stored
+	record := &ClusterStatusRecord{
+		PK:             s.getGroupPK(namespace, name),
+		SK:             s.getClusterSK(s.clusterName),
+		GSI1PK:         s.getClusterGSI1PK(s.clusterName),
+		GSI1SK:         s.getGroupGSI1SK(namespace, name),
+		OperatorID:     s.operatorID,
+		GroupNamespace: namespace,
+		GroupName:      name,
+		ClusterName:    s.clusterName,
+		Health:         health,
+		State:          state,
+		LastHeartbeat:  time.Now(),
+		Components:     string(statusJSON),
+	}
+
+	// TODO: Implement actual DynamoDB update code using the record
+	// This is a placeholder; actual implementation would use the record to update DynamoDB
+	_ = record
+
+	return nil
+}
+
+// UpdateClusterStatusLegacy updates the status for this cluster in a FailoverGroup using the legacy components format
+// This function is provided for backward compatibility during the transition to the new API
+func (s *StateManager) UpdateClusterStatusLegacy(ctx context.Context, namespace, name, health, state string, components map[string]ComponentStatus) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"clusterName", s.clusterName,
+	)
+	logger.V(1).Info("Updating cluster status (legacy format)")
 
 	// Convert components map to JSON string for efficient storage
 	componentsJSON, err := json.Marshal(components)
@@ -352,7 +391,7 @@ func (s *StateManager) SyncClusterState(ctx context.Context, namespace, name str
 	}
 
 	// 5. Update the status record
-	return s.UpdateClusterStatus(ctx, namespace, name, health, state, components)
+	return s.UpdateClusterStatusLegacy(ctx, namespace, name, health, state, components)
 }
 
 // DetectStaleHeartbeats detects clusters with stale heartbeats

@@ -2,28 +2,23 @@ package dynamodb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// StateManager provides higher-level functionality that combines multiple managers
-// It's used to manage the overall state of FailoverGroups
+// StateManager provides functionality for managing the state of FailoverGroups
+// This consolidates the previous separate managers into a unified API
 type StateManager struct {
-	*Manager
-	configManager  *GroupConfigManager
-	statusManager  *ClusterStatusManager
-	historyManager *HistoryManager
+	*BaseManager
 }
 
 // NewStateManager creates a new state manager
-func NewStateManager(baseManager *Manager) *StateManager {
+func NewStateManager(baseManager *BaseManager) *StateManager {
 	return &StateManager{
-		Manager:        baseManager,
-		configManager:  NewGroupConfigManager(baseManager),
-		statusManager:  NewClusterStatusManager(baseManager),
-		historyManager: NewHistoryManager(baseManager),
+		BaseManager: baseManager,
 	}
 }
 
@@ -37,20 +32,20 @@ func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string
 	logger.V(1).Info("Getting group state")
 
 	// Get the group configuration
-	config, err := s.configManager.GetGroupConfig(ctx, namespace, name)
+	config, err := s.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group config: %w", err)
 	}
 
 	// Get the status for the owner cluster
-	status, err := s.statusManager.GetClusterStatus(ctx, namespace, name, config.OwnerCluster)
+	status, err := s.GetClusterStatus(ctx, namespace, name, config.OwnerCluster)
 	if err != nil {
 		// If we can't get the status, still return a state with what we know
 		logger.Error(err, "Failed to get cluster status, returning partial state")
 	}
 
 	// Get the failover history count
-	history, err := s.historyManager.GetFailoverHistory(ctx, namespace, name, 1)
+	history, err := s.GetFailoverHistory(ctx, namespace, name, 1)
 	if err != nil {
 		logger.Error(err, "Failed to get failover history")
 	}
@@ -100,20 +95,213 @@ func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string
 	}, nil
 }
 
-// UpdateState updates the state of a FailoverGroup
-// This is primarily for testing and manual operations
-func (s *StateManager) UpdateState(ctx context.Context, state *GroupState) error {
+// GetGroupConfig retrieves the current configuration for a FailoverGroup
+func (s *StateManager) GetGroupConfig(ctx context.Context, namespace, name string) (*GroupConfigRecord, error) {
 	logger := log.FromContext(ctx).WithValues(
-		"groupID", state.GroupID,
+		"namespace", namespace,
+		"name", name,
 	)
-	logger.V(1).Info("Updating group state")
+	logger.V(1).Info("Getting group configuration")
 
-	// This is a placeholder implementation
-	// In a real implementation, this would update multiple records:
-	// - The group configuration
-	// - The cluster status
+	pk := s.getGroupPK(namespace, name)
+	sk := "CONFIG"
 
-	return fmt.Errorf("not implemented - this is for testing only")
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for the config record
+	// 2. Deserialize the record into a GroupConfigRecord
+	// 3. Return the record or error
+
+	// Placeholder implementation
+	return &GroupConfigRecord{
+		PK:                pk,
+		SK:                sk,
+		GSI1PK:            s.getOperatorGSI1PK(),
+		GSI1SK:            s.getGroupGSI1SK(namespace, name),
+		OperatorID:        s.operatorID,
+		GroupNamespace:    namespace,
+		GroupName:         name,
+		OwnerCluster:      s.clusterName, // Default to current cluster
+		Version:           1,
+		LastUpdated:       time.Now(),
+		Suspended:         false,
+		HeartbeatInterval: "30s",
+		Timeouts: TimeoutSettings{
+			TransitoryState:  "5m",
+			UnhealthyPrimary: "2m",
+			Heartbeat:        "1m",
+		},
+	}, nil
+}
+
+// UpdateGroupConfig updates the configuration for a FailoverGroup
+func (s *StateManager) UpdateGroupConfig(ctx context.Context, config *GroupConfigRecord) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", config.GroupNamespace,
+		"name", config.GroupName,
+	)
+	logger.V(1).Info("Updating group configuration")
+
+	// TODO: Implement actual DynamoDB update
+	// 1. Update the config record in DynamoDB
+	// 2. Use optimistic concurrency control with Version
+	// 3. Return an error if the update fails
+
+	return nil
+}
+
+// GetClusterStatus retrieves the status for a specific cluster in a FailoverGroup
+func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, clusterName string) (*ClusterStatusRecord, error) {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"clusterName", clusterName,
+	)
+	logger.V(1).Info("Getting cluster status")
+
+	pk := s.getGroupPK(namespace, name)
+	sk := s.getClusterSK(clusterName)
+
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for the status record
+	// 2. Deserialize the record into a ClusterStatusRecord
+	// 3. Return the record or error
+
+	// Placeholder implementation
+	return &ClusterStatusRecord{
+		PK:             pk,
+		SK:             sk,
+		GSI1PK:         s.getClusterGSI1PK(clusterName),
+		GSI1SK:         s.getGroupGSI1SK(namespace, name),
+		OperatorID:     s.operatorID,
+		GroupNamespace: namespace,
+		GroupName:      name,
+		ClusterName:    clusterName,
+		Health:         HealthOK,
+		State:          StatePrimary,
+		LastHeartbeat:  time.Now(),
+		Components:     "{}",
+	}, nil
+}
+
+// UpdateClusterStatus updates the status for this cluster in a FailoverGroup
+func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, components map[string]ComponentStatus) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"clusterName", s.clusterName,
+	)
+	logger.V(1).Info("Updating cluster status")
+
+	// Convert components map to JSON string for efficient storage
+	componentsJSON, err := json.Marshal(components)
+	if err != nil {
+		return fmt.Errorf("failed to marshal components: %w", err)
+	}
+
+	// Create the record to be stored
+	record := &ClusterStatusRecord{
+		PK:             s.getGroupPK(namespace, name),
+		SK:             s.getClusterSK(s.clusterName),
+		GSI1PK:         s.getClusterGSI1PK(s.clusterName),
+		GSI1SK:         s.getGroupGSI1SK(namespace, name),
+		OperatorID:     s.operatorID,
+		GroupNamespace: namespace,
+		GroupName:      name,
+		ClusterName:    s.clusterName,
+		Health:         health,
+		State:          state,
+		LastHeartbeat:  time.Now(),
+		Components:     string(componentsJSON),
+	}
+
+	// TODO: Implement actual DynamoDB update code using the record
+	// This is a placeholder; actual implementation would use the record to update DynamoDB
+	_ = record
+
+	return nil
+}
+
+// GetAllClusterStatuses retrieves the status for all clusters in a FailoverGroup
+func (s *StateManager) GetAllClusterStatuses(ctx context.Context, namespace, name string) (map[string]*ClusterStatusRecord, error) {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Getting all cluster statuses")
+
+	pk := s.getGroupPK(namespace, name)
+
+	// Define the prefix for querying cluster records
+	// Used in actual implementation for query filtering
+	clusterPrefix := "CLUSTER#"
+	_ = clusterPrefix
+
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for all records with the given PK and SK starting with clusterPrefix
+	// 2. Deserialize the records into ClusterStatusRecords
+	// 3. Return the records or error
+
+	// Placeholder implementation
+	result := make(map[string]*ClusterStatusRecord)
+	result[s.clusterName] = &ClusterStatusRecord{
+		PK:             pk,
+		SK:             s.getClusterSK(s.clusterName),
+		GSI1PK:         s.getClusterGSI1PK(s.clusterName),
+		GSI1SK:         s.getGroupGSI1SK(namespace, name),
+		OperatorID:     s.operatorID,
+		GroupNamespace: namespace,
+		GroupName:      name,
+		ClusterName:    s.clusterName,
+		Health:         HealthOK,
+		State:          StatePrimary,
+		LastHeartbeat:  time.Now(),
+		Components:     "{}",
+	}
+
+	return result, nil
+}
+
+// GetFailoverHistory retrieves the failover history for a FailoverGroup
+func (s *StateManager) GetFailoverHistory(ctx context.Context, namespace, name string, limit int) ([]*HistoryRecord, error) {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+		"limit", limit,
+	)
+	logger.V(1).Info("Getting failover history")
+
+	pk := s.getGroupPK(namespace, name)
+
+	// Define the prefix for querying history records
+	// Used in actual implementation for query filtering
+	historyPrefix := "HISTORY#"
+	_ = historyPrefix
+
+	// TODO: Implement actual DynamoDB query
+	// 1. Query the DynamoDB table for all records with the given PK and SK starting with historyPrefix
+	// 2. Deserialize the records into HistoryRecords
+	// 3. Return the records or error
+
+	// Placeholder implementation
+	result := make([]*HistoryRecord, 0, 1)
+	result = append(result, &HistoryRecord{
+		PK:             pk,
+		SK:             s.getHistorySK(time.Now().Add(-24 * time.Hour)),
+		OperatorID:     s.operatorID,
+		GroupNamespace: namespace,
+		GroupName:      name,
+		FailoverName:   "sample-failover",
+		SourceCluster:  "cluster-1",
+		TargetCluster:  "cluster-2",
+		StartTime:      time.Now().Add(-24 * time.Hour),
+		EndTime:        time.Now().Add(-24 * time.Hour).Add(5 * time.Minute),
+		Status:         "SUCCESS",
+		Reason:         "Planned failover for testing",
+		Downtime:       30,
+		Duration:       300,
+	})
+
+	return result, nil
 }
 
 // SyncClusterState synchronizes the state of this cluster with DynamoDB
@@ -127,7 +315,7 @@ func (s *StateManager) SyncClusterState(ctx context.Context, namespace, name str
 	logger.V(1).Info("Synchronizing cluster state")
 
 	// 1. Get the current group configuration
-	config, err := s.configManager.GetGroupConfig(ctx, namespace, name)
+	config, err := s.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
 		return fmt.Errorf("failed to get group config: %w", err)
 	}
@@ -164,49 +352,43 @@ func (s *StateManager) SyncClusterState(ctx context.Context, namespace, name str
 	}
 
 	// 5. Update the status record
-	return s.statusManager.UpdateClusterStatus(ctx, namespace, name, health, state, components)
+	return s.UpdateClusterStatus(ctx, namespace, name, health, state, components)
 }
 
-// DetectAndReportProblems detects problems with FailoverGroups
-// This is used to identify issues that might require attention
-func (s *StateManager) DetectAndReportProblems(ctx context.Context, namespace, name string) ([]string, error) {
+// DetectStaleHeartbeats detects clusters with stale heartbeats
+func (s *StateManager) DetectStaleHeartbeats(ctx context.Context, namespace, name string) ([]string, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
 	)
-	logger.V(1).Info("Detecting problems")
+	logger.V(1).Info("Detecting stale heartbeats")
 
-	var problems []string
-
-	// 1. Check for stale heartbeats
-	staleClusters, err := s.statusManager.DetectStaleHeartbeats(ctx, namespace, name)
+	// 1. Get all cluster statuses
+	statuses, err := s.GetAllClusterStatuses(ctx, namespace, name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to detect stale heartbeats: %w", err)
-	}
-	for _, cluster := range staleClusters {
-		problems = append(problems, fmt.Sprintf("Stale heartbeat detected for cluster %s", cluster))
+		return nil, fmt.Errorf("failed to get cluster statuses: %w", err)
 	}
 
-	// 2. Check for unhealthy components in all clusters
-	statuses, err := s.statusManager.GetAllClusterStatuses(ctx, namespace, name)
+	// 2. Get group config for heartbeat timeout
+	config, err := s.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
-		return problems, fmt.Errorf("failed to get cluster statuses: %w", err)
+		return nil, fmt.Errorf("failed to get group config: %w", err)
 	}
 
+	// Convert heartbeat timeout string to duration
+	heartbeatTimeout, err := time.ParseDuration(config.Timeouts.Heartbeat)
+	if err != nil {
+		return nil, fmt.Errorf("invalid heartbeat timeout: %w", err)
+	}
+
+	// 3. Check for stale heartbeats
+	var staleClusters []string
+	now := time.Now()
 	for clusterName, status := range statuses {
-		if status.Health == HealthError {
-			problems = append(problems, fmt.Sprintf("Cluster %s is reporting ERROR health state", clusterName))
-		} else if status.Health == HealthDegraded {
-			problems = append(problems, fmt.Sprintf("Cluster %s is reporting DEGRADED health state", clusterName))
-		}
-
-		for componentName, componentStatus := range status.Components {
-			if componentStatus.Health == HealthError {
-				problems = append(problems, fmt.Sprintf("Component %s in cluster %s is reporting ERROR health state: %s",
-					componentName, clusterName, componentStatus.Message))
-			}
+		if now.Sub(status.LastHeartbeat) > heartbeatTimeout {
+			staleClusters = append(staleClusters, clusterName)
 		}
 	}
 
-	return problems, nil
+	return staleClusters, nil
 }

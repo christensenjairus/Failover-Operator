@@ -39,6 +39,10 @@ func (m *MockDynamoDBClient) Scan(ctx context.Context, params *dynamodb.ScanInpu
 	return &dynamodb.ScanOutput{}, nil
 }
 
+func (m *MockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
 // mockDynamoDBClient is a basic implementation for tests
 type mockDynamoDBClient struct{}
 
@@ -66,8 +70,12 @@ func (m *mockDynamoDBClient) Scan(ctx context.Context, params *dynamodb.ScanInpu
 	return &dynamodb.ScanOutput{}, nil
 }
 
-// TestNewManager tests the creation of a new DynamoDB manager
-func TestNewManager(t *testing.T) {
+func (m *mockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+// TestNewBaseManager tests the creation of a new DynamoDB base manager
+func TestNewBaseManager(t *testing.T) {
 	// Setup
 	client := &mockDynamoDBClient{}
 	tableName := "test-table"
@@ -75,28 +83,60 @@ func TestNewManager(t *testing.T) {
 	operatorID := "test-operator"
 
 	// Call the function under test
-	manager := NewManager(client, tableName, clusterName, operatorID)
+	manager := NewBaseManager(client, tableName, clusterName, operatorID)
 
 	// Verify the results
-	assert.NotNil(t, manager, "Manager should not be nil")
+	assert.NotNil(t, manager, "BaseManager should not be nil")
 	assert.Equal(t, client, manager.client, "Client should be set correctly")
 	assert.Equal(t, tableName, manager.tableName, "Table name should be set correctly")
 	assert.Equal(t, clusterName, manager.clusterName, "Cluster name should be set correctly")
 	assert.Equal(t, operatorID, manager.operatorID, "Operator ID should be set correctly")
 }
 
-// TestGetItemKey tests retrieving the item key for a given item type and ID
-func TestGetItemKey(t *testing.T) {
+// TestGetPKSK tests the generation of partition and sort keys
+func TestGetPKSK(t *testing.T) {
 	// Setup
-	manager := &Manager{
+	manager := &BaseManager{
+		operatorID:  "test-operator",
 		clusterName: "test-cluster",
 	}
-	itemType := "test-type"
-	id := "test-id"
+	namespace := "test-namespace"
+	name := "test-name"
+
+	// Test getGroupPK
+	pk := manager.getGroupPK(namespace, name)
+	assert.Equal(t, "GROUP#test-operator#test-namespace#test-name", pk, "PK should be formatted correctly")
+
+	// Test getClusterSK
+	clusterSK := manager.getClusterSK(manager.clusterName)
+	assert.Equal(t, "CLUSTER#test-cluster", clusterSK, "Cluster SK should be formatted correctly")
+
+	// Test getOperatorGSI1PK
+	gsi1pk := manager.getOperatorGSI1PK()
+	assert.Equal(t, "OPERATOR#test-operator", gsi1pk, "GSI1PK should be formatted correctly")
+
+	// Test getGroupGSI1SK
+	gsi1sk := manager.getGroupGSI1SK(namespace, name)
+	assert.Equal(t, "GROUP#test-namespace#test-name", gsi1sk, "GSI1SK should be formatted correctly")
+
+	// Test getClusterGSI1PK
+	clusterGSI1pk := manager.getClusterGSI1PK(manager.clusterName)
+	assert.Equal(t, "CLUSTER#test-cluster", clusterGSI1pk, "Cluster GSI1PK should be formatted correctly")
+}
+
+// TestDynamoDBServiceCreation tests the creation of the DynamoDB service that contains all managers
+func TestDynamoDBServiceCreation(t *testing.T) {
+	// Setup
+	client := &mockDynamoDBClient{}
+	tableName := "test-table"
+	clusterName := "test-cluster"
+	operatorID := "test-operator"
 
 	// Call the function under test
-	key := manager.getItemKey(itemType, id)
+	service := NewDynamoDBService(client, tableName, clusterName, operatorID)
 
 	// Verify the results
-	assert.Equal(t, "test-cluster#test-type#test-id", key, "Item key should be formatted correctly")
+	assert.NotNil(t, service, "DynamoDBService should not be nil")
+	assert.NotNil(t, service.State, "StateManager should not be nil")
+	assert.NotNil(t, service.Operations, "OperationsManager should not be nil")
 }

@@ -3,13 +3,14 @@ package dynamodb
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewStateManager(t *testing.T) {
 	// Setup
-	baseManager := &Manager{
+	baseManager := &BaseManager{
 		client:      &mockDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -21,12 +22,12 @@ func TestNewStateManager(t *testing.T) {
 
 	// Verify the results
 	assert.NotNil(t, stateManager, "StateManager should not be nil")
-	assert.Equal(t, baseManager, stateManager.Manager, "Base manager should be set correctly")
+	assert.Equal(t, baseManager, stateManager.BaseManager, "Base manager should be set correctly")
 }
 
-func TestGetState(t *testing.T) {
+func TestGetGroupState(t *testing.T) {
 	// Setup
-	baseManager := &Manager{
+	baseManager := &BaseManager{
 		client:      &mockDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -46,9 +47,9 @@ func TestGetState(t *testing.T) {
 	assert.Equal(t, namespace+"/"+name, state.GroupID, "GroupID should match")
 }
 
-func TestUpdateState(t *testing.T) {
+func TestGetGroupConfig(t *testing.T) {
 	// Setup
-	baseManager := &Manager{
+	baseManager := &BaseManager{
 		client:      &mockDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -56,24 +57,161 @@ func TestUpdateState(t *testing.T) {
 	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
-	state := &GroupState{
-		GroupID:     "test-group",
-		Status:      "Available",
-		CurrentRole: "Primary",
-		LastUpdate:  1234567890,
+	namespace := "test-namespace"
+	name := "test-name"
+
+	// Call the function under test
+	config, err := stateManager.GetGroupConfig(ctx, namespace, name)
+
+	// Verify the results
+	assert.NoError(t, err, "GetGroupConfig should not return an error")
+	assert.NotNil(t, config, "Config should not be nil")
+	assert.Equal(t, namespace, config.GroupNamespace, "Namespace should match")
+	assert.Equal(t, name, config.GroupName, "Name should match")
+	assert.Equal(t, baseManager.operatorID, config.OperatorID, "OperatorID should match")
+
+	// Check GSI fields are set correctly
+	assert.Equal(t, baseManager.getOperatorGSI1PK(), config.GSI1PK, "GSI1PK should match")
+	assert.Equal(t, baseManager.getGroupGSI1SK(namespace, name), config.GSI1SK, "GSI1SK should match")
+}
+
+func TestUpdateGroupConfig(t *testing.T) {
+	// Setup
+	baseManager := &BaseManager{
+		client:      &mockDynamoDBClient{},
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+	stateManager := NewStateManager(baseManager)
+	ctx := context.Background()
+	config := &GroupConfigRecord{
+		PK:             baseManager.getGroupPK("test-namespace", "test-name"),
+		SK:             "CONFIG",
+		GSI1PK:         baseManager.getOperatorGSI1PK(),
+		GSI1SK:         baseManager.getGroupGSI1SK("test-namespace", "test-name"),
+		OperatorID:     baseManager.operatorID,
+		GroupNamespace: "test-namespace",
+		GroupName:      "test-name",
+		OwnerCluster:   baseManager.clusterName,
+		Version:        1,
+		LastUpdated:    time.Now(),
 	}
 
 	// Call the function under test
-	err := stateManager.UpdateState(ctx, state)
+	err := stateManager.UpdateGroupConfig(ctx, config)
 
 	// Verify the results
-	assert.Error(t, err, "UpdateState should return an error as it's for testing only")
-	assert.Contains(t, err.Error(), "not implemented", "Error should indicate not implemented")
+	assert.NoError(t, err, "UpdateGroupConfig should not return an error")
+}
+
+func TestGetClusterStatus(t *testing.T) {
+	// Setup
+	baseManager := &BaseManager{
+		client:      &mockDynamoDBClient{},
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+	stateManager := NewStateManager(baseManager)
+	ctx := context.Background()
+	namespace := "test-namespace"
+	name := "test-name"
+	clusterName := "test-cluster"
+
+	// Call the function under test
+	status, err := stateManager.GetClusterStatus(ctx, namespace, name, clusterName)
+
+	// Verify the results
+	assert.NoError(t, err, "GetClusterStatus should not return an error")
+	assert.NotNil(t, status, "Status should not be nil")
+	assert.Equal(t, namespace, status.GroupNamespace, "Namespace should match")
+	assert.Equal(t, name, status.GroupName, "Name should match")
+	assert.Equal(t, clusterName, status.ClusterName, "ClusterName should match")
+	assert.Equal(t, baseManager.operatorID, status.OperatorID, "OperatorID should match")
+
+	// Check GSI fields are set correctly
+	assert.Equal(t, baseManager.getClusterGSI1PK(clusterName), status.GSI1PK, "GSI1PK should match")
+	assert.Equal(t, baseManager.getGroupGSI1SK(namespace, name), status.GSI1SK, "GSI1SK should match")
+}
+
+func TestUpdateClusterStatus(t *testing.T) {
+	// Setup
+	baseManager := &BaseManager{
+		client:      &mockDynamoDBClient{},
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+	stateManager := NewStateManager(baseManager)
+	ctx := context.Background()
+	namespace := "test-namespace"
+	name := "test-name"
+	health := HealthOK
+	state := StatePrimary
+	components := map[string]ComponentStatus{
+		"database": {
+			Health:  HealthOK,
+			Message: "Database is healthy",
+		},
+	}
+
+	// Call the function under test
+	err := stateManager.UpdateClusterStatus(ctx, namespace, name, health, state, components)
+
+	// Verify the results
+	assert.NoError(t, err, "UpdateClusterStatus should not return an error")
+}
+
+func TestGetAllClusterStatuses(t *testing.T) {
+	// Setup
+	baseManager := &BaseManager{
+		client:      &mockDynamoDBClient{},
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+	stateManager := NewStateManager(baseManager)
+	ctx := context.Background()
+	namespace := "test-namespace"
+	name := "test-name"
+
+	// Call the function under test
+	statuses, err := stateManager.GetAllClusterStatuses(ctx, namespace, name)
+
+	// Verify the results
+	assert.NoError(t, err, "GetAllClusterStatuses should not return an error")
+	assert.NotNil(t, statuses, "Statuses should not be nil")
+	assert.NotEmpty(t, statuses, "Statuses should not be empty")
+	assert.Contains(t, statuses, baseManager.clusterName, "Statuses should contain the current cluster")
+}
+
+func TestGetFailoverHistory(t *testing.T) {
+	// Setup
+	baseManager := &BaseManager{
+		client:      &mockDynamoDBClient{},
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
+	stateManager := NewStateManager(baseManager)
+	ctx := context.Background()
+	namespace := "test-namespace"
+	name := "test-name"
+	limit := 1
+
+	// Call the function under test
+	history, err := stateManager.GetFailoverHistory(ctx, namespace, name, limit)
+
+	// Verify the results
+	assert.NoError(t, err, "GetFailoverHistory should not return an error")
+	assert.NotNil(t, history, "History should not be nil")
+	assert.Len(t, history, 1, "History should have exactly one element with limit=1")
 }
 
 func TestSyncClusterState(t *testing.T) {
 	// Setup
-	baseManager := &Manager{
+	baseManager := &BaseManager{
 		client:      &mockDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -91,9 +229,9 @@ func TestSyncClusterState(t *testing.T) {
 	assert.NoError(t, err, "SyncClusterState should not return an error")
 }
 
-func TestDetectAndReportProblems(t *testing.T) {
+func TestDetectStaleHeartbeats(t *testing.T) {
 	// Setup
-	baseManager := &Manager{
+	baseManager := &BaseManager{
 		client:      &mockDynamoDBClient{},
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -105,9 +243,9 @@ func TestDetectAndReportProblems(t *testing.T) {
 	name := "test-name"
 
 	// Call the function under test
-	problems, err := stateManager.DetectAndReportProblems(ctx, namespace, name)
+	staleClusters, err := stateManager.DetectStaleHeartbeats(ctx, namespace, name)
 
 	// Verify the results
-	assert.NoError(t, err, "DetectAndReportProblems should not return an error")
-	assert.NotNil(t, problems, "Problems should not be nil even if empty")
+	assert.NoError(t, err, "DetectStaleHeartbeats should not return an error")
+	assert.NotNil(t, staleClusters, "StaleClusters should not be nil even if empty")
 }

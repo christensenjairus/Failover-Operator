@@ -9,10 +9,10 @@ type RecordType string
 
 const (
 	// RecordTypeGroupConfig represents a record that stores ownership and configuration for a FailoverGroup
-	RecordTypeGroupConfig RecordType = "CONFIG"
+	RecordTypeGroupConfig RecordType = "GROUP_CONFIG"
 
 	// RecordTypeClusterStatus represents a record that tracks status and heartbeats from clusters
-	RecordTypeClusterStatus RecordType = "CLUSTER"
+	RecordTypeClusterStatus RecordType = "CLUSTER_STATUS"
 
 	// RecordTypeLock represents a record used for distributed locking during failover operations
 	RecordTypeLock RecordType = "LOCK"
@@ -66,6 +66,8 @@ const (
 type GroupConfigRecord struct {
 	PK                string             `json:"pk"`                         // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
 	SK                string             `json:"sk"`                         // Sort Key: "CONFIG"
+	GSI1PK            string             `json:"gsi1pk"`                     // GSI Primary Key: "OPERATOR#{operatorID}"
+	GSI1SK            string             `json:"gsi1sk"`                     // GSI Sort Key: "GROUP#{namespace}#{name}"
 	OperatorID        string             `json:"operatorID"`                 // ID of the operator instance
 	GroupNamespace    string             `json:"groupNamespace"`             // Kubernetes namespace of the FailoverGroup
 	GroupName         string             `json:"groupName"`                  // Name of the FailoverGroup
@@ -82,16 +84,18 @@ type GroupConfigRecord struct {
 
 // ClusterStatusRecord represents the status and heartbeat of a cluster for a FailoverGroup
 type ClusterStatusRecord struct {
-	PK             string                     `json:"pk"`             // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
-	SK             string                     `json:"sk"`             // Sort Key: "CLUSTER#{clusterName}"
-	OperatorID     string                     `json:"operatorID"`     // ID of the operator instance
-	GroupNamespace string                     `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
-	GroupName      string                     `json:"groupName"`      // Name of the FailoverGroup
-	ClusterName    string                     `json:"clusterName"`    // Name of the cluster this status is for
-	Health         string                     `json:"health"`         // Overall health: OK, DEGRADED, ERROR
-	State          string                     `json:"state"`          // State: PRIMARY, STANDBY, FAILOVER, FAILBACK
-	LastHeartbeat  time.Time                  `json:"lastHeartbeat"`  // When the heartbeat was last updated
-	Components     map[string]ComponentStatus `json:"components"`     // Status of individual components
+	PK             string    `json:"pk"`             // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK             string    `json:"sk"`             // Sort Key: "CLUSTER#{clusterName}"
+	GSI1PK         string    `json:"gsi1pk"`         // GSI Primary Key: "CLUSTER#{clusterName}"
+	GSI1SK         string    `json:"gsi1sk"`         // GSI Sort Key: "GROUP#{namespace}#{name}"
+	OperatorID     string    `json:"operatorID"`     // ID of the operator instance
+	GroupNamespace string    `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
+	GroupName      string    `json:"groupName"`      // Name of the FailoverGroup
+	ClusterName    string    `json:"clusterName"`    // Name of the cluster this status is for
+	Health         string    `json:"health"`         // Overall health: OK, DEGRADED, ERROR
+	State          string    `json:"state"`          // State: PRIMARY, STANDBY, FAILOVER, FAILBACK
+	LastHeartbeat  time.Time `json:"lastHeartbeat"`  // When the heartbeat was last updated
+	Components     string    `json:"components"`     // JSON string of component status map for more efficient querying
 }
 
 // LockRecord represents a distributed lock for a FailoverGroup
@@ -110,19 +114,20 @@ type LockRecord struct {
 
 // HistoryRecord represents a record of a failover operation
 type HistoryRecord struct {
-	PK             string           `json:"pk"`                // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
-	SK             string           `json:"sk"`                // Sort Key: "HISTORY#{timestamp}"
-	OperatorID     string           `json:"operatorID"`        // ID of the operator instance
-	GroupNamespace string           `json:"groupNamespace"`    // Kubernetes namespace of the FailoverGroup
-	GroupName      string           `json:"groupName"`         // Name of the FailoverGroup
-	FailoverName   string           `json:"failoverName"`      // Name of the Failover resource
-	SourceCluster  string           `json:"sourceCluster"`     // Cluster that was PRIMARY before
-	TargetCluster  string           `json:"targetCluster"`     // Cluster that became PRIMARY
-	StartTime      time.Time        `json:"startTime"`         // When the failover started
-	EndTime        time.Time        `json:"endTime"`           // When the failover completed
-	Status         string           `json:"status"`            // SUCCESS, FAILED, etc.
-	Reason         string           `json:"reason"`            // Why the failover was performed
-	Metrics        *FailoverMetrics `json:"metrics,omitempty"` // Performance metrics for the operation
+	PK             string    `json:"pk"`             // Primary Key: "GROUP#{operatorID}#{namespace}#{name}"
+	SK             string    `json:"sk"`             // Sort Key: "HISTORY#{timestamp}"
+	OperatorID     string    `json:"operatorID"`     // ID of the operator instance
+	GroupNamespace string    `json:"groupNamespace"` // Kubernetes namespace of the FailoverGroup
+	GroupName      string    `json:"groupName"`      // Name of the FailoverGroup
+	FailoverName   string    `json:"failoverName"`   // Name of the Failover resource
+	SourceCluster  string    `json:"sourceCluster"`  // Cluster that was PRIMARY before
+	TargetCluster  string    `json:"targetCluster"`  // Cluster that became PRIMARY
+	StartTime      time.Time `json:"startTime"`      // When the failover started
+	EndTime        time.Time `json:"endTime"`        // When the failover completed
+	Status         string    `json:"status"`         // SUCCESS, FAILED, etc.
+	Reason         string    `json:"reason"`         // Why the failover was performed
+	Downtime       int64     `json:"downtime"`       // Total application downtime in seconds
+	Duration       int64     `json:"duration"`       // Total operation time in seconds
 }
 
 // ComponentStatus represents the health status of a component
@@ -136,12 +141,6 @@ type FailoverReference struct {
 	Name      string    `json:"name"`      // Name of the Failover resource
 	Namespace string    `json:"namespace"` // Namespace of the Failover resource
 	Timestamp time.Time `json:"timestamp"` // When the failover occurred
-}
-
-// FailoverMetrics contains performance metrics for failover operations
-type FailoverMetrics struct {
-	TotalDowntimeSeconds     int64 `json:"totalDowntimeSeconds"`     // Total application downtime
-	TotalFailoverTimeSeconds int64 `json:"totalFailoverTimeSeconds"` // Total operation time
 }
 
 // TimeoutSettings defines various timeout settings for a FailoverGroup

@@ -16,10 +16,11 @@ type DynamoDBClient interface {
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
+	TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 }
 
-// Manager provides core functionality for interacting with DynamoDB
-type Manager struct {
+// BaseManager provides core functionality for interacting with DynamoDB
+type BaseManager struct {
 	client      DynamoDBClient
 	tableName   string
 	clusterName string
@@ -38,9 +39,28 @@ type GroupState struct {
 	LastUpdate     int64      `json:"lastUpdate"`
 }
 
-// NewManager creates a new DynamoDB manager
-func NewManager(client DynamoDBClient, tableName, clusterName, operatorID string) *Manager {
-	return &Manager{
+// DynamoDBService provides access to all DynamoDB functionality
+// This is the main entry point for controllers interacting with DynamoDB
+type DynamoDBService struct {
+	State      *StateManager
+	Operations *OperationsManager
+}
+
+// NewDynamoDBService creates a new DynamoDB service with all required managers
+func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorID string) *DynamoDBService {
+	baseManager := NewBaseManager(client, tableName, clusterName, operatorID)
+	stateManager := NewStateManager(baseManager)
+	operationsManager := NewOperationsManager(baseManager)
+
+	return &DynamoDBService{
+		State:      stateManager,
+		Operations: operationsManager,
+	}
+}
+
+// NewBaseManager creates a new DynamoDB manager
+func NewBaseManager(client DynamoDBClient, tableName, clusterName, operatorID string) *BaseManager {
+	return &BaseManager{
 		client:      client,
 		tableName:   tableName,
 		clusterName: clusterName,
@@ -49,18 +69,33 @@ func NewManager(client DynamoDBClient, tableName, clusterName, operatorID string
 }
 
 // getGroupPK creates a primary key for a FailoverGroup
-func (m *Manager) getGroupPK(namespace, name string) string {
+func (m *BaseManager) getGroupPK(namespace, name string) string {
 	return fmt.Sprintf("GROUP#%s#%s#%s", m.operatorID, namespace, name)
 }
 
 // getClusterSK creates a sort key for a cluster status record
-func (m *Manager) getClusterSK(clusterName string) string {
+func (m *BaseManager) getClusterSK(clusterName string) string {
 	return fmt.Sprintf("CLUSTER#%s", clusterName)
 }
 
 // getHistorySK creates a sort key for a history record
-func (m *Manager) getHistorySK(timestamp time.Time) string {
+func (m *BaseManager) getHistorySK(timestamp time.Time) string {
 	return fmt.Sprintf("HISTORY#%s", timestamp.Format(time.RFC3339))
+}
+
+// getGSI1PK creates a GSI1 primary key for an operator
+func (m *BaseManager) getOperatorGSI1PK() string {
+	return fmt.Sprintf("OPERATOR#%s", m.operatorID)
+}
+
+// getGSI1SK creates a GSI1 sort key for a group
+func (m *BaseManager) getGroupGSI1SK(namespace, name string) string {
+	return fmt.Sprintf("GROUP#%s#%s", namespace, name)
+}
+
+// getClusterGSI1PK creates a GSI1 primary key for a cluster
+func (m *BaseManager) getClusterGSI1PK(clusterName string) string {
+	return fmt.Sprintf("CLUSTER#%s", clusterName)
 }
 
 // Key Workflow Scenarios

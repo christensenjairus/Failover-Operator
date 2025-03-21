@@ -4,7 +4,11 @@ package dynamodb
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -35,6 +39,9 @@ func CreateAWSDynamoDBClient(ctx context.Context) (DynamoDBClient, error) {
 
 	// Set region
 	options = append(options, awsconfig.WithRegion(region))
+
+	// Configure connection pooling and timeouts
+	options = append(options, configureHTTPClientSettings())
 
 	// Use credentials or profile
 	if profile != "" {
@@ -86,6 +93,51 @@ func CreateAWSDynamoDBClient(ctx context.Context) (DynamoDBClient, error) {
 		"maxBackoffMs", retryClient.config.MaxBackoffMs)
 
 	return retryClient, nil
+}
+
+// configureHTTPClientSettings sets up optimal HTTP client settings for DynamoDB
+func configureHTTPClientSettings() func(*awsconfig.LoadOptions) error {
+	return func(opts *awsconfig.LoadOptions) error {
+		// Get connection pool settings from environment or use defaults
+		timeoutSec, _ := strconv.Atoi(getEnvWithDefault("AWS_HTTP_TIMEOUT_SEC", "30"))
+		keepAliveSec, _ := strconv.Atoi(getEnvWithDefault("AWS_HTTP_KEEPALIVE_SEC", "30"))
+		maxIdleConns, _ := strconv.Atoi(getEnvWithDefault("AWS_HTTP_MAX_IDLE_CONNS", "100"))
+		maxIdleConnsPerHost, _ := strconv.Atoi(getEnvWithDefault("AWS_HTTP_MAX_IDLE_CONNS_PER_HOST", "100"))
+		idleConnTimeoutSec, _ := strconv.Atoi(getEnvWithDefault("AWS_HTTP_IDLE_CONN_TIMEOUT_SEC", "90"))
+
+		// Create a custom HTTP client with optimized settings
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   time.Duration(timeoutSec) * time.Second,
+				KeepAlive: time.Duration(keepAliveSec) * time.Second,
+			}).DialContext,
+			MaxIdleConns:          maxIdleConns,
+			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+			IdleConnTimeout:       time.Duration(idleConnTimeoutSec) * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}
+
+		httpClient := &http.Client{
+			Transport: transport,
+			Timeout:   time.Duration(timeoutSec) * time.Second,
+		}
+
+		// Apply the custom HTTP client to the AWS configuration
+		opts.HTTPClient = httpClient
+
+		return nil
+	}
+}
+
+// getEnvWithDefault gets an environment variable or returns a default value
+func getEnvWithDefault(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }
 
 // GetDynamoDBService creates and returns a new DynamoDB service instance

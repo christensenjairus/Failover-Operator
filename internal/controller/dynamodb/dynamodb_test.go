@@ -19,6 +19,8 @@ type MockDynamoDBClient struct {
 	QueryFunc              func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	ScanFunc               func(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	TransactWriteItemsFunc func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
+	BatchGetItemFunc       func(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
+	BatchWriteItemFunc     func(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
 
 func (m *MockDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -68,6 +70,20 @@ func (m *MockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dyn
 		return m.TransactWriteItemsFunc(ctx, params, optFns...)
 	}
 	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+func (m *MockDynamoDBClient) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	if m.BatchGetItemFunc != nil {
+		return m.BatchGetItemFunc(ctx, params, optFns...)
+	}
+	return &dynamodb.BatchGetItemOutput{}, nil
+}
+
+func (m *MockDynamoDBClient) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	if m.BatchWriteItemFunc != nil {
+		return m.BatchWriteItemFunc(ctx, params, optFns...)
+	}
+	return &dynamodb.BatchWriteItemOutput{}, nil
 }
 
 // MockStateManager overrides specific methods for testing

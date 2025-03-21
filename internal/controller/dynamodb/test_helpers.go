@@ -70,3 +70,11 @@ func (m *EnhancedTestDynamoDBClient) Scan(ctx context.Context, params *dynamodb.
 func (m *EnhancedTestDynamoDBClient) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
 	return &dynamodb.TransactWriteItemsOutput{}, nil
 }
+
+func (m *EnhancedTestDynamoDBClient) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	return &dynamodb.BatchGetItemOutput{}, nil
+}
+
+func (m *EnhancedTestDynamoDBClient) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	return &dynamodb.BatchWriteItemOutput{}, nil
+}

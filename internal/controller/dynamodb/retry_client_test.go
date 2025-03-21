@@ -28,6 +28,8 @@ type MockDynamoDBClientWithRetries struct {
 	QueryFailCount       int
 	ScanFailCount        int
 	TransactFailCount    int
+	BatchGetFailCount    int
+	BatchWriteFailCount  int
 	GetItemCallCount     int
 	PutItemCallCount     int
 	UpdateItemCallCount  int
@@ -35,6 +37,8 @@ type MockDynamoDBClientWithRetries struct {
 	QueryCallCount       int
 	ScanCallCount        int
 	TransactCallCount    int
+	BatchGetCallCount    int
+	BatchWriteCallCount  int
 	FailWithRetryable    bool
 	FailWithNonRetryable bool
 }
@@ -104,6 +108,22 @@ func (m *MockDynamoDBClientWithRetries) TransactWriteItems(ctx context.Context, 
 		return nil, m.retryableError()
 	}
 	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+func (m *MockDynamoDBClientWithRetries) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	m.BatchGetCallCount++
+	if m.BatchGetCallCount <= m.BatchGetFailCount {
+		return nil, m.retryableError()
+	}
+	return &dynamodb.BatchGetItemOutput{}, nil
+}
+
+func (m *MockDynamoDBClientWithRetries) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	m.BatchWriteCallCount++
+	if m.BatchWriteCallCount <= m.BatchWriteFailCount {
+		return nil, m.retryableError()
+	}
+	return &dynamodb.BatchWriteItemOutput{}, nil
 }
 
 // Test that the retry client successfully retries operations
@@ -239,6 +259,8 @@ func TestRetryClient_AllOperations(t *testing.T) {
 		QueryFailCount:      1,
 		ScanFailCount:       1,
 		TransactFailCount:   1,
+		BatchGetFailCount:   1,
+		BatchWriteFailCount: 1,
 		FailWithRetryable:   true,
 	}
 
@@ -279,4 +301,12 @@ func TestRetryClient_AllOperations(t *testing.T) {
 	_, err = retryClient.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{})
 	assert.NoError(t, err, "TransactWriteItems should succeed after retry")
 	assert.Equal(t, 2, mockClient.TransactCallCount)
+
+	_, err = retryClient.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{})
+	assert.NoError(t, err, "BatchGetItem should succeed after retry")
+	assert.Equal(t, 2, mockClient.BatchGetCallCount)
+
+	_, err = retryClient.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{})
+	assert.NoError(t, err, "BatchWriteItem should succeed after retry")
+	assert.Equal(t, 2, mockClient.BatchWriteCallCount)
 }

@@ -43,6 +43,14 @@ func (m *TestManagerMock) TransactWriteItems(ctx context.Context, params *dynamo
 	return &dynamodb.TransactWriteItemsOutput{}, nil
 }
 
+func (m *TestManagerMock) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	return &dynamodb.BatchGetItemOutput{}, nil
+}
+
+func (m *TestManagerMock) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	return &dynamodb.BatchWriteItemOutput{}, nil
+}
+
 // TestNewBaseManager tests the creation of a new DynamoDB base manager
 func TestNewBaseManager(t *testing.T) {
 	// Setup

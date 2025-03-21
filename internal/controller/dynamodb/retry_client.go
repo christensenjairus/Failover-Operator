@@ -99,6 +99,34 @@ func (r *RetryingDynamoDBClient) IsRetryable(err error) bool {
 	return false
 }
 
+// ExtractTransactionErrors extracts detailed error information from a TransactionCanceledException
+// Returns a map of item index to error information
+func ExtractTransactionErrors(err error) map[int]string {
+	itemErrors := make(map[int]string)
+
+	// Check if this is a TransactionCanceledException
+	var txErr *types.TransactionCanceledException
+	if !errors.As(err, &txErr) || txErr.CancellationReasons == nil {
+		return itemErrors
+	}
+
+	// Extract error info for each item in the transaction
+	for i, reason := range txErr.CancellationReasons {
+		if reason.Code == nil || *reason.Code == "" {
+			continue // No error for this item
+		}
+
+		errMsg := *reason.Code
+		if reason.Message != nil && *reason.Message != "" {
+			errMsg += ": " + *reason.Message
+		}
+
+		itemErrors[i] = errMsg
+	}
+
+	return itemErrors
+}
+
 // calculateBackoff determines the backoff duration for a specific retry attempt
 func (r *RetryingDynamoDBClient) calculateBackoff(attempt int) time.Duration {
 	// Calculate exponential backoff with jitter
@@ -236,7 +264,42 @@ func (r *RetryingDynamoDBClient) TransactWriteItems(ctx context.Context, params 
 		return r.client.TransactWriteItems(ctx, params, optFns...)
 	})
 	if err != nil {
+		// For transaction errors, extract detailed information about which items failed
+		var txErr *types.TransactionCanceledException
+		if errors.As(err, &txErr) {
+			logger := log.FromContext(ctx)
+			itemErrors := ExtractTransactionErrors(err)
+
+			if len(itemErrors) > 0 {
+				logger.Error(err, "Transaction failed with item-specific errors",
+					"itemErrors", itemErrors)
+
+				// Enhance the error message with item details
+				return nil, fmt.Errorf("transaction failed: %w (item errors: %v)",
+					err, itemErrors)
+			}
+		}
 		return nil, err
 	}
 	return result.(*dynamodb.TransactWriteItemsOutput), nil
+}
+
+func (r *RetryingDynamoDBClient) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	result, err := r.retryOperation(ctx, "BatchGetItem", func() (interface{}, error) {
+		return r.client.BatchGetItem(ctx, params, optFns...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*dynamodb.BatchGetItemOutput), nil
+}
+
+func (r *RetryingDynamoDBClient) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	result, err := r.retryOperation(ctx, "BatchWriteItem", func() (interface{}, error) {
+		return r.client.BatchWriteItem(ctx, params, optFns...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*dynamodb.BatchWriteItemOutput), nil
 }

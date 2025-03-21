@@ -3,21 +3,17 @@ package statefulsets
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-// FluxReconcileAnnotation is the annotation used by Flux to control reconciliation
-const FluxReconcileAnnotation = "kustomize.toolkit.fluxcd.io/reconcile"
-
-// DisabledValue is the value for the Flux reconcile annotation to disable reconciliation
-const DisabledValue = "disabled"
 
 // setupTestManager creates a test manager with a fake client and test StatefulSet
 func setupTestManager() (*Manager, *appsv1.StatefulSet) {
@@ -48,14 +44,14 @@ func setupTestManager() (*Manager, *appsv1.StatefulSet) {
 					"app": "test",
 				},
 			},
-			Template: metav1.PodTemplateSpec{
+			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"app": "test",
 					},
 				},
-				Spec: metav1.PodSpec{
-					Containers: []metav1.Container{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
 						{
 							Name:  "test-container",
 							Image: "test-image:latest",
@@ -318,6 +314,130 @@ func TestWaitForReplicasReady(t *testing.T) {
 
 	// Call the function to wait for replicas to be ready
 	// Since our mock StatefulSet is already ready, this should return immediately
-	err := manager.WaitForReplicasReady(ctx, statefulset.Name, statefulset.Namespace, 1)
+	err := manager.WaitForReplicasReady(ctx, statefulset.Name, statefulset.Namespace, 1*time.Second)
+	assert.NoError(t, err)
+}
+
+// TestProcessStatefulSets tests processing multiple StatefulSets
+func TestProcessStatefulSets(t *testing.T) {
+	manager, statefulset := setupTestManager()
+	ctx := context.Background()
+
+	// Create a second StatefulSet
+	statefulset2 := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-statefulset-2",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"test-key": "test-value",
+			},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: statefulset.Spec.Replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "test-2",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "test-2",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:latest",
+						},
+					},
+				},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			Replicas:        3,
+			ReadyReplicas:   3,
+			CurrentReplicas: 3,
+		},
+	}
+
+	err := manager.client.Create(ctx, statefulset2)
+	assert.NoError(t, err)
+
+	// Process StatefulSets - scaling down
+	names := []string{statefulset.Name, statefulset2.Name}
+	manager.ProcessStatefulSets(ctx, statefulset.Namespace, names, false, 0)
+
+	// Verify both StatefulSets are scaled down
+	for _, name := range names {
+		sts := &appsv1.StatefulSet{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: statefulset.Namespace}, sts)
+		assert.NoError(t, err)
+		assert.Equal(t, int32(0), *sts.Spec.Replicas)
+	}
+
+	// Process StatefulSets - scaling up
+	manager.ProcessStatefulSets(ctx, statefulset.Namespace, names, true, 2)
+
+	// Verify both StatefulSets are scaled up
+	for _, name := range names {
+		sts := &appsv1.StatefulSet{}
+		err := manager.client.Get(ctx, types.NamespacedName{Name: name, Namespace: statefulset.Namespace}, sts)
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), *sts.Spec.Replicas)
+	}
+}
+
+// TestWaitForAllStatefulSetsReady tests waiting for all StatefulSets to be ready
+func TestWaitForAllStatefulSetsReady(t *testing.T) {
+	manager, statefulset := setupTestManager()
+	ctx := context.Background()
+
+	// Create a second StatefulSet
+	statefulset2 := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-statefulset-2",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"test-key": "test-value",
+			},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: statefulset.Spec.Replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "test-2",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "test-2",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:latest",
+						},
+					},
+				},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			Replicas:        3,
+			ReadyReplicas:   3,
+			CurrentReplicas: 3,
+		},
+	}
+
+	err := manager.client.Create(ctx, statefulset2)
+	assert.NoError(t, err)
+
+	// Call the function to wait for all StatefulSets to be ready
+	names := []string{statefulset.Name, statefulset2.Name}
+	err = manager.WaitForAllStatefulSetsReady(ctx, statefulset.Namespace, names, 1*time.Second)
 	assert.NoError(t, err)
 }

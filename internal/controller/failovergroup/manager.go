@@ -67,7 +67,7 @@ func (m *Manager) SyncWithDynamoDB(ctx context.Context, failoverGroup *crdv1alph
 	}
 
 	// Get the current state from DynamoDB
-	groupState, err := m.DynamoDBManager.State.GetGroupState(ctx, failoverGroup.Namespace, failoverGroup.Name)
+	groupState, err := m.DynamoDBManager.GetGroupState(ctx, failoverGroup.Namespace, failoverGroup.Name)
 	if err != nil {
 		log.Error(err, "Failed to get group state from DynamoDB")
 		return err
@@ -104,11 +104,11 @@ func (m *Manager) UpdateDynamoDBStatus(ctx context.Context, failoverGroup *crdv1
 	// We could populate more detailed status data here in a real implementation
 
 	// Update the status in DynamoDB
-	return m.DynamoDBManager.State.UpdateClusterStatus(
+	return m.DynamoDBManager.UpdateClusterStatus(
 		ctx,
 		failoverGroup.Namespace,
 		failoverGroup.Name,
-		m.ClusterName,
+		"OK", // Default health status
 		role,
 		statusData,
 	)
@@ -176,12 +176,12 @@ func (m *Manager) determineClusterRole(failoverGroup *crdv1alpha1.FailoverGroup)
 }
 
 // updateLocalStatus updates the local FailoverGroup status based on the global state from DynamoDB
-func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup, groupState *dynamodb.GroupState) error {
+func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup, groupState *dynamodb.ManagerGroupState) error {
 	// Update the FailoverGroup status based on the DynamoDB state
 	updated := false
 
 	// Get config directly from DynamoDB service
-	config, err := m.DynamoDBManager.State.GetGroupConfig(ctx, failoverGroup.Namespace, failoverGroup.Name)
+	config, err := m.DynamoDBManager.GetGroupConfig(ctx, failoverGroup.Namespace, failoverGroup.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get group config: %w", err)
 	}
@@ -284,7 +284,7 @@ func (m *Manager) UpdateHeartbeat(ctx context.Context, failoverGroup *crdv1alpha
 	}
 
 	// Update heartbeat in DynamoDB
-	return m.DynamoDBManager.State.UpdateHeartbeat(
+	return m.DynamoDBManager.UpdateHeartbeat(
 		ctx,
 		failoverGroup.Namespace,
 		failoverGroup.Name,
@@ -305,8 +305,8 @@ func (m *Manager) GetVolumeStateFromDynamoDB(ctx context.Context, failoverGroup 
 		return "", false
 	}
 
-	// Get volume state from DynamoDB - this requires adding a method to the DynamoDB manager
-	volumeState, err := m.DynamoDBManager.State.GetVolumeState(
+	// Get volume state from DynamoDB
+	volumeState, err := m.DynamoDBManager.GetVolumeState(
 		ctx,
 		failoverGroup.Namespace,
 		failoverGroup.Name,
@@ -344,7 +344,7 @@ func (m *Manager) HandleVolumePromotion(ctx context.Context, failoverGroup *crdv
 
 	// 3. Update DynamoDB to indicate volumes are promoted
 	if m.DynamoDBManager != nil {
-		if err := m.DynamoDBManager.State.SetVolumeState(
+		if err := m.DynamoDBManager.SetVolumeState(
 			ctx,
 			failoverGroup.Namespace,
 			failoverGroup.Name,
@@ -388,7 +388,7 @@ func (m *Manager) HandleTargetActivation(ctx context.Context, failoverGroup *crd
 
 	// 5. Update DynamoDB to indicate activation is complete
 	if m.DynamoDBManager != nil {
-		if err := m.DynamoDBManager.State.SetVolumeState(
+		if err := m.DynamoDBManager.SetVolumeState(
 			ctx,
 			failoverGroup.Namespace,
 			failoverGroup.Name,

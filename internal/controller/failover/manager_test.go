@@ -67,7 +67,6 @@ func TestProcessFailover(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			FailoverMode: "safe",
 			Workloads: []crdv1alpha1.WorkloadSpec{
 				{
 					Kind: "Deployment",
@@ -197,7 +196,12 @@ func TestVerifyAndAcquireLock(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			FailoverMode: "safe",
+			Workloads: []crdv1alpha1.WorkloadSpec{
+				{
+					Kind: "Deployment",
+					Name: "test-deployment",
+				},
+			},
 		},
 		Status: crdv1alpha1.FailoverGroupStatus{
 			GlobalState: crdv1alpha1.GlobalStateInfo{
@@ -246,7 +250,6 @@ func TestExecuteFailoverWorkflow(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			FailoverMode: "safe",
 			Workloads: []crdv1alpha1.WorkloadSpec{
 				{
 					Kind: "Deployment",

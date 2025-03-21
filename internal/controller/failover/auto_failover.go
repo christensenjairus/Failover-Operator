@@ -161,12 +161,16 @@ func (m *Manager) createAutomaticFailover(ctx context.Context, group *crdv1alpha
 				"app.kubernetes.io/managed-by": "failover-operator",
 				"app.kubernetes.io/component":  "auto-failover",
 			},
+			Annotations: map[string]string{
+				"failover-operator.hahomelabs.com/automatic": "true",
+				"failover-operator.hahomelabs.com/reason":    reason,
+			},
 		},
 		Spec: crdv1alpha1.FailoverSpec{
 			TargetCluster: targetCluster,
-			// For automatic failovers, we might want to use fast mode
-			ForceFastMode: true,
-			Reason:        fmt.Sprintf("Automatic failover: %s", reason),
+			// For automatic failovers, we prioritize uptime and availability
+			FailoverMode: "UPTIME",
+			Reason:       fmt.Sprintf("Automatic failover: %s", reason),
 			FailoverGroups: []crdv1alpha1.FailoverGroupReference{
 				{
 					Name:      group.Name,
@@ -185,7 +189,8 @@ func (m *Manager) createAutomaticFailover(ctx context.Context, group *crdv1alpha
 		"failover", name,
 		"group", group.Name,
 		"namespace", group.Namespace,
-		"reason", reason)
+		"reason", reason,
+		"mode", "UPTIME")
 
 	return nil
 }

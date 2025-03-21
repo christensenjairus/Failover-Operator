@@ -52,15 +52,6 @@ spec:
           spec:
             description: FailoverGroupSpec defines the desired state of FailoverGroup
             properties:
-              failoverMode:
-                description: |-
-                  FailoverMode determines the failover approach for all resources in the group:
-                  "safe" ensures data is fully synced before failover,
-                  while "fast" allows immediate transition without waiting.
-                enum:
-                - safe
-                - fast
-                type: string
               fluxResources:
                 description: Flux resources to manage during failover
                 items:
@@ -170,8 +161,6 @@ spec:
                   - name
                   type: object
                 type: array
-            required:
-            - failoverMode
             type: object
           status:
             description: FailoverGroupStatus defines the observed state of FailoverGroup

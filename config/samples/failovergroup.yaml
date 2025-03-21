@@ -1,20 +1,14 @@
 apiVersion: crd.hahomelabs.com/v1alpha1
 kind: FailoverGroup
 metadata:
-  name: wordpress
+  name: wordpress-high-availability
   namespace: wordpress
 spec:
-  # Single mode for the entire group
-  failoverMode: "safe"
-  
   # Optional operator identifier
   operatorID: "wordpress-operator"
   
   # Optional flag to disable automatic failovers
   suspended: false
-  
-  # Optional documentation for suspension
-  suspensionReason: ""
   
   # Optional timeout settings
   timeouts:
@@ -42,61 +36,21 @@ spec:
     
     - kind: Deployment
       name: wordpress
-
+      
   networkResources:
     - kind: VirtualService
       name: wordpress
+    - kind: Ingress
+      name: wordpress-ingress
 
   fluxResources:
     - kind: HelmRelease
       name: wordpress
-      reconcile: true
-
+      triggerReconcile: true
+      
 status:
   state: "PRIMARY"
   health: "OK"
-  
-  workloads:
-    - kind: "StatefulSet"
-      name: "wordpress-db"
-      health: "OK"
-      status: "Running with 3 replicas"
-      volumeReplications:
-        - name: "wordpress-db-data"
-          health: "OK"
-          status: "Replication in sync"
-    
-    - kind: "Deployment"
-      name: "wordpress-frontend"
-      health: "OK"
-      status: "Running with 2 replicas"
-    
-    - kind: "CronJob"
-      name: "wordpress-backup"
-      health: "OK"
-      status: "Last job completed successfully"
-  
-  networkResources:
-    - kind: "VirtualService"
-      name: "wordpress-vs"
-      health: "OK"
-      status: "Routing traffic properly"
-    
-    - kind: "Ingress"
-      name: "wordpress-ingress"
-      health: "OK"
-      status: "Accepting traffic"
-  
-  fluxResources:
-    - kind: "HelmRelease"
-      name: "wordpress"
-      health: "OK"
-      status: "Reconciled successfully"
-    
-    - kind: "Kustomization"
-      name: "wordpress-config"
-      health: "OK"
-      status: "Resources applied"
   
   lastFailoverTime: "2023-05-15T08:30:00Z"
   
@@ -113,11 +67,4 @@ status:
       - name: "us-west-2"
         role: "STANDBY"
         health: "OK"
-        lastHeartbeat: "2023-05-15T08:44:30Z"
-  
-  conditions:
-    - type: "Ready"
-      status: "True"
-      reason: "ResourcesReady"
-      message: "All resources are in desired state"
-      lastTransitionTime: "2023-05-15T08:30:00Z"
+        lastHeartbeat: "2023-05-15T08:44:30Z" 

@@ -1,49 +1,59 @@
 apiVersion: crd.hahomelabs.com/v1alpha1
 kind: Failover
 metadata:
-  name: wordpress
+  name: wordpress-minimal-downtime
   namespace: wordpress
+  annotations:
+    description: "High-availability failover minimizing service disruption"
 spec:
   # Target cluster to become PRIMARY
-  targetCluster: "dev-central"
+  targetCluster: "us-west-2"
   
-  # Optional: Override component failoverMode for faster failover
-  forceFastMode: false
+  # FailoverMode determines the failover approach:
+  # UPTIME: Prioritizes service uptime by activating target before deactivating source
+  # Suitable for situations where minimizing downtime is more critical than consistency
+  failoverMode: "UPTIME"
   
   # Optional: Skip safety checks (use with caution)
+  # When using UPTIME mode, consider carefully whether to also force the failover
   force: false
   
   # Optional: Document reason for this failover
-  reason: "Planned maintenance in us-west-1 region"
+  reason: "Switching to secondary region for performance testing"
   
   # FailoverGroups to be failed over
   failoverGroups:
-    - name: "wordpress"
+    - name: "wordpress-high-availability"
       namespace: "wordpress"
+    - name: "wordpress-auxiliary-services"
+      namespace: "wordpress-aux"
 
 status:
   status: "IN_PROGRESS"
   
   failoverGroups:
-    - name: "wordpress"
+    - name: "wordpress-high-availability"
       namespace: "wordpress"
       status: "IN_PROGRESS"
-      startTime: "2023-05-15T09:30:00Z"
-      message: "Promoting standby cluster"
+      startTime: "2023-06-10T14:25:00Z"
+      message: "Preparing target cluster"
+    - name: "wordpress-auxiliary-services"
+      namespace: "wordpress-aux"
+      status: "IN_PROGRESS"
+      startTime: "2023-06-10T14:25:05Z"
+      message: "Preparing target cluster"
   
   metrics:
-    startTime: "2023-05-15T09:30:00Z"
-    duration: 45
-    downtime: 5
-  
+    startTime: "2023-06-10T14:25:00Z"
+    
   conditions:
     - type: "InProgress"
       status: "True"
       reason: "FailoverStarted"
-      message: "Failover operation in progress"
-      lastTransitionTime: "2023-05-15T09:30:00Z"
-    - type: "PromotingStandby"
+      message: "Failover operation in progress using UPTIME mode"
+      lastTransitionTime: "2023-06-10T14:25:00Z"
+    - type: "PreparingTarget"
       status: "True"
-      reason: "PromotingWorkloads"
-      message: "Scaling up workloads in standby cluster"
-      lastTransitionTime: "2023-05-15T09:31:00Z"
+      reason: "PromotingVolumes"
+      message: "Preparing target cluster for activation"
+      lastTransitionTime: "2023-06-10T14:25:10Z" 

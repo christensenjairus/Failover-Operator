@@ -203,15 +203,15 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 		// Release any locks if they exist
 		if r.FailoverGroupManager.DynamoDBManager != nil {
 			// Check if lock exists and release it
-			locked, leaseToken, _ := r.FailoverGroupManager.DynamoDBManager.Operations.IsLocked(
+			locked, leaseToken, _ := r.FailoverGroupManager.DynamoDBManager.IsLocked(
 				ctx, failoverGroup.Namespace, failoverGroup.Name)
 			if locked && leaseToken != "" {
-				_ = r.FailoverGroupManager.DynamoDBManager.Operations.ReleaseLock(
+				_ = r.FailoverGroupManager.DynamoDBManager.ReleaseLock(
 					ctx, failoverGroup.Namespace, failoverGroup.Name, leaseToken)
 			}
 
 			// Cleanup any volume state information
-			_ = r.FailoverGroupManager.DynamoDBManager.Operations.RemoveVolumeState(
+			_ = r.FailoverGroupManager.DynamoDBManager.RemoveVolumeState(
 				ctx, failoverGroup.Namespace, failoverGroup.Name)
 		}
 

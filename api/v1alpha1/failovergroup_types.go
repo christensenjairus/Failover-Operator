@@ -145,13 +145,6 @@ type FailoverGroupSpec struct {
 	// +optional
 	OperatorID string `json:"operatorID,omitempty"`
 
-	// FailoverMode determines the failover approach for all resources in the group:
-	// "safe" ensures data is fully synced before failover,
-	// while "fast" allows immediate transition without waiting.
-	// +kubebuilder:validation:Enum=safe;fast
-	// +kubebuilder:validation:Required
-	FailoverMode string `json:"failoverMode"`
-
 	// When true, automatic failovers are disabled (manual override for maintenance)
 	// The operator will not create automatic failovers even if it detects problems
 	// +optional

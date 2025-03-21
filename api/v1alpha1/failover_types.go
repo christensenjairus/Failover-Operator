@@ -66,11 +66,12 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Required
 	TargetCluster string `json:"targetCluster"`
 
-	// When true, overrides component failoverMode settings to use 'fast' mode
-	// Fast mode starts the new cluster first before stopping the old one
-	// This minimizes downtime but may cause brief data inconsistency
-	// +optional
-	ForceFastMode bool `json:"forceFastMode,omitempty"`
+	// FailoverMode defines the strategy for failover process
+	// CONSISTENCY: Prioritizes data consistency by shutting down source first (previously "Safe")
+	// UPTIME: Prioritizes service uptime by activating target before deactivating source (previously "Fast")
+	// +kubebuilder:validation:Enum=CONSISTENCY;UPTIME
+	// +kubebuilder:validation:Required
+	FailoverMode string `json:"failoverMode"`
 
 	// When true, skips safety checks like replication lag or volume sync state
 	// Use with caution - can lead to data loss if replication isn't complete
@@ -86,6 +87,18 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	FailoverGroups []FailoverGroupReference `json:"failoverGroups"`
+}
+
+// For backward compatibility with existing specs
+// +k8s:conversion-gen=false
+// +k8s:conversion-gen-external-types=github.com/christensenjairus/Failover-Operator/api/v1alpha1
+// This helps API compatibility during transition
+type LegacyFailoverSpec struct {
+	// When true, overrides component failoverMode settings to use 'fast' mode
+	// Fast mode starts the new cluster first before stopping the old one
+	// This minimizes downtime but may cause brief data inconsistency
+	// +optional
+	ForceFastMode bool `json:"forceFastMode,omitempty"`
 }
 
 // FailoverStatus defines the observed state of Failover

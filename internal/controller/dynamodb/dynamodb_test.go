@@ -70,7 +70,7 @@ func (m *MockDynamoDBClient) TransactWriteItems(ctx context.Context, params *dyn
 
 // MockStateManager overrides specific methods for testing
 type MockStateManager struct {
-	*StateManager
+	*BaseManager
 	MockGetGroupConfig func(ctx context.Context, namespace, name string) (*GroupConfigRecord, error)
 }
 
@@ -78,7 +78,8 @@ func (m *MockStateManager) GetGroupConfig(ctx context.Context, namespace, name s
 	if m.MockGetGroupConfig != nil {
 		return m.MockGetGroupConfig(ctx, namespace, name)
 	}
-	return m.StateManager.GetGroupConfig(ctx, namespace, name)
+	// Call the base manager directly
+	return m.GetGroupConfig(ctx, namespace, name)
 }
 
 func TestNewDynamoDBService(t *testing.T) {
@@ -86,15 +87,15 @@ func TestNewDynamoDBService(t *testing.T) {
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	assert.NotNil(t, service)
-	assert.NotNil(t, service.State)
-	assert.NotNil(t, service.Operations)
+	assert.NotNil(t, service.volumeStateManager)
+	assert.NotNil(t, service.operationsManager)
 }
 
 func TestStateManager_GetGroupState(t *testing.T) {
 	client := &MockDynamoDBClient{}
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
-	state, err := service.State.GetGroupState(context.Background(), "test-namespace", "test-group")
+	state, err := service.GetGroupState(context.Background(), "test-namespace", "test-group")
 
 	assert.NoError(t, err)
 	assert.NotNil(t, state)
@@ -108,7 +109,7 @@ func TestOperationsManager_ExecuteFailover(t *testing.T) {
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// When source and target are the same, should return error
-	err := service.Operations.ExecuteFailover(
+	err := service.ExecuteFailover(
 		context.Background(),
 		"test-namespace",
 		"test-group",
@@ -123,7 +124,7 @@ func TestOperationsManager_ExecuteFailover(t *testing.T) {
 	assert.Contains(t, err.Error(), "source and target clusters are the same")
 
 	// With a different target, it should proceed (mock just returns success)
-	err = service.Operations.ExecuteFailover(
+	err = service.ExecuteFailover(
 		context.Background(),
 		"test-namespace",
 		"test-group",
@@ -161,7 +162,7 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// Test marshaling by calling UpdateClusterStatus
-	err := service.State.UpdateClusterStatus(
+	err := service.UpdateClusterStatus(
 		context.Background(),
 		"test-namespace",
 		"test-group",
@@ -185,7 +186,7 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 	}
 
 	// Test marshaling by calling the legacy function
-	err = service.State.UpdateClusterStatusLegacy(
+	err = service.UpdateClusterStatusLegacy(
 		context.Background(),
 		"test-namespace",
 		"test-group",
@@ -202,7 +203,7 @@ func TestGlobalSecondaryIndex(t *testing.T) {
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// Get a config record to check GSI fields
-	config, err := service.State.GetGroupConfig(context.Background(), "test-namespace", "test-group")
+	config, err := service.GetGroupConfig(context.Background(), "test-namespace", "test-group")
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, config.GSI1PK)
@@ -211,7 +212,7 @@ func TestGlobalSecondaryIndex(t *testing.T) {
 	assert.Contains(t, config.GSI1SK, "GROUP#")
 
 	// Get a status record to check GSI fields
-	status, err := service.State.GetClusterStatus(context.Background(), "test-namespace", "test-group", "test-cluster")
+	status, err := service.GetClusterStatus(context.Background(), "test-namespace", "test-group", "test-cluster")
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, status.GSI1PK)

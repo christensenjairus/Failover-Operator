@@ -157,7 +157,7 @@ func TestCheckAutomaticFailoverTriggers(t *testing.T) {
 					failover := failoverList.Items[0]
 					assert.Equal(t, tc.group.Name, failover.Spec.FailoverGroups[0].Name)
 					assert.Equal(t, tc.group.Namespace, failover.Spec.FailoverGroups[0].Namespace)
-					assert.True(t, failover.Spec.ForceFastMode, "Automatic failover should use fast mode")
+					assert.Equal(t, "UPTIME", failover.Spec.FailoverMode, "Automatic failover should use UPTIME mode")
 				}
 			} else {
 				assert.Empty(t, failoverList.Items, "Did not expect a failover to be created")
@@ -372,7 +372,7 @@ func TestCreateAutomaticFailover(t *testing.T) {
 	assert.Equal(t, group.Name, failover.Spec.FailoverGroups[0].Name)
 	assert.Equal(t, group.Namespace, failover.Spec.FailoverGroups[0].Namespace)
 	assert.Equal(t, "target-cluster", failover.Spec.TargetCluster)
-	assert.True(t, failover.Spec.ForceFastMode)
+	assert.Equal(t, "UPTIME", failover.Spec.FailoverMode, "Automatic failover should use UPTIME mode")
 	assert.Contains(t, failover.Spec.Reason, "Test reason")
 }
 
@@ -414,8 +414,7 @@ func createTestFailoverGroup(name, namespace string, suspended bool, health, tra
 			Namespace: namespace,
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			FailoverMode: "safe",
-			Suspended:    suspended,
+			Suspended: suspended,
 			Timeouts: crdv1alpha1.TimeoutSettings{
 				TransitoryState:  transitory,
 				UnhealthyPrimary: unhealthy,

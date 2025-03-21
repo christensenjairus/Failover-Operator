@@ -50,7 +50,6 @@ func TestFailoverGroupController(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			FailoverMode: "safe",
 			// Add additional spec fields as needed
 		},
 		Status: crdv1alpha1.FailoverGroupStatus{

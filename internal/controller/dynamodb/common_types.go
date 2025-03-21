@@ -267,7 +267,7 @@ type GroupState struct {
 	LastVolumeStateUpdateTime string `json:"lastVolumeStateUpdateTime,omitempty"`
 }
 
-// ClusterInfo contains information about a cluster in the FailoverGroup
+// ClusterInfo represents information about a specific cluster
 type ClusterInfo struct {
 	// Name of the cluster
 	Name string `json:"name"`
@@ -282,10 +282,10 @@ type ClusterInfo struct {
 	LastHeartbeat string `json:"lastHeartbeat,omitempty"`
 }
 
-// StateManager manages interactions with the DynamoDB state storage
-type StateManager struct {
+// With:
+type StateMgrConfig struct {
 	Table      string
-	Client     DynamoDBAPI
+	Client     DynamoDBClient
 	OperatorID string
 	Operations *OperationsManager
 }

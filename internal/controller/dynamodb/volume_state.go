@@ -32,20 +32,20 @@ const (
 
 // VolumeStateManager provides functionality for tracking volume state during failovers
 type VolumeStateManager struct {
-	stateManager *StateManager
+	*BaseManager
 }
 
 // NewVolumeStateManager creates a new volume state manager
-func NewVolumeStateManager(stateManager *StateManager) *VolumeStateManager {
+func NewVolumeStateManager(baseManager *BaseManager) *VolumeStateManager {
 	return &VolumeStateManager{
-		stateManager: stateManager,
+		BaseManager: baseManager,
 	}
 }
 
 // GetVolumeState retrieves the current volume state for a failover group
 func (v *VolumeStateManager) GetVolumeState(ctx context.Context, namespace, groupName string) (string, error) {
 	// Get the group state which contains volume state info
-	groupState, err := v.stateManager.GetGroupState(ctx, namespace, groupName)
+	groupState, err := v.GetGroupState(ctx, namespace, groupName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get group state: %w", err)
 	}
@@ -61,7 +61,7 @@ func (v *VolumeStateManager) SetVolumeState(ctx context.Context, namespace, grou
 	// For this implementation, we'll use GroupConfig since it has a Metadata field
 
 	// Get current group config
-	config, err := v.stateManager.GetGroupConfig(ctx, namespace, groupName)
+	config, err := v.GetGroupConfig(ctx, namespace, groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group config: %w", err)
 	}
@@ -79,28 +79,22 @@ func (v *VolumeStateManager) SetVolumeState(ctx context.Context, namespace, grou
 	config.Metadata["volumeStateUpdateTime"] = time.Now().Format(time.RFC3339)
 
 	// Save the updated config
-	return v.stateManager.UpdateGroupConfig(ctx, config)
+	return v.UpdateGroupConfig(ctx, config)
 }
 
 // UpdateHeartbeat updates the heartbeat timestamp for a cluster
 func (v *VolumeStateManager) UpdateHeartbeat(ctx context.Context, namespace, groupName, clusterName string) error {
-	// Get all cluster statuses
-	statuses, err := v.stateManager.GetAllClusterStatuses(ctx, namespace, groupName)
+	// Get the cluster status
+	status, err := v.GetClusterStatus(ctx, namespace, groupName, clusterName)
 	if err != nil {
-		return fmt.Errorf("failed to get cluster statuses: %w", err)
-	}
-
-	// Get this cluster's status
-	status, exists := statuses[clusterName]
-	if !exists {
-		return fmt.Errorf("cluster status not found for %s", clusterName)
+		return fmt.Errorf("failed to get cluster status: %w", err)
 	}
 
 	// Update the heartbeat time
 	status.LastHeartbeat = time.Now()
 
 	// Update the status
-	return v.stateManager.UpdateClusterStatusLegacy(
+	return v.UpdateClusterStatusLegacy(
 		ctx,
 		namespace,
 		groupName,
@@ -113,7 +107,7 @@ func (v *VolumeStateManager) UpdateHeartbeat(ctx context.Context, namespace, gro
 // RemoveVolumeState removes the volume state information
 func (v *VolumeStateManager) RemoveVolumeState(ctx context.Context, namespace, groupName string) error {
 	// Get current group config
-	config, err := v.stateManager.GetGroupConfig(ctx, namespace, groupName)
+	config, err := v.GetGroupConfig(ctx, namespace, groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group config: %w", err)
 	}
@@ -125,5 +119,5 @@ func (v *VolumeStateManager) RemoveVolumeState(ctx context.Context, namespace, g
 	}
 
 	// Save the updated config
-	return v.stateManager.UpdateGroupConfig(ctx, config)
+	return v.UpdateGroupConfig(ctx, config)
 }

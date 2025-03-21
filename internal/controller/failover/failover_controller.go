@@ -145,7 +145,7 @@ func (r *FailoverReconciler) logFailoverDiagnostics(ctx context.Context, failove
 	logger.Info("Failover diagnostic information",
 		"error", err.Error(),
 		"targetCluster", failover.Spec.TargetCluster,
-		"forceMode", failover.Spec.ForceFastMode,
+		"failoverMode", failover.Spec.FailoverMode,
 		"groups", len(failover.Spec.FailoverGroups))
 
 	// Depending on the specific error types, we might collect and log

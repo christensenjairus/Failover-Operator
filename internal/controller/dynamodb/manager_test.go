@@ -106,6 +106,6 @@ func TestDynamoDBServiceCreation(t *testing.T) {
 
 	// Verify the results
 	assert.NotNil(t, service, "DynamoDBService should not be nil")
-	assert.NotNil(t, service.State, "StateManager should not be nil")
-	assert.NotNil(t, service.Operations, "OperationsManager should not be nil")
+	assert.NotNil(t, service.volumeStateManager, "volumeStateManager should not be nil")
+	assert.NotNil(t, service.operationsManager, "operationsManager should not be nil")
 }

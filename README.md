@@ -558,42 +558,72 @@ status:
 
 The operator supports two modes:
 
-### Safe Mode (Default)
+### CONSISTENCY Mode
 
-In safe mode (`mode: "on"` or not specified):
-- Resources are processed in a carefully ordered sequence
-- Workloads are fully terminated before VolumeReplications are set to secondary
-- VolumeReplications must reach primary state before Flux resources are resumed
-- Additional validations occur during transitions
-- More conservative error handling
+Consistency mode (previously called "Safe" mode) prioritizes data consistency by ensuring that the source cluster is completely shut down before the target cluster becomes active. This guarantees that there's only one source of truth at any time.
 
-This is the recommended mode for production environments where data integrity is critical.
+**Process Flow:**
+1. Disable traffic to source cluster
+2. Scale down source workloads completely
+3. Demote source volumes to Secondary role
+4. Promote target volumes to Primary role
+5. Scale up target workloads
+6. Enable traffic to target cluster
 
-### Unsafe Mode
+**Best for:**
+- Data-critical applications where consistency is paramount
+- Scenarios where you can tolerate brief downtime
+- Applications with strict data integrity requirements
 
-In unsafe mode (`mode: "off"`):
-- All resources are processed in parallel without waiting for ordered completion
-- No waiting for workloads to fully terminate before marking volumes as secondary
-- No waiting for volumes to be fully primary before resuming Flux resources
-- Faster transitions with fewer validations and safety checks
-- Suitable for testing, development, or non-critical environments
+### UPTIME Mode
 
-Unsafe mode trades safety for speed, completing failovers faster but potentially risking data integrity if applications haven't fully shut down before volumes become read-only.
+Uptime mode (previously called "Fast" mode) prioritizes service availability by activating the target cluster before deactivating the source. This minimizes service disruption but may create a brief period where both clusters are active.
 
-> **Future Enhancement**: In a future release, unsafe mode will also signal to a remote cluster that it can promote its volumes as quickly as possible, even before the current cluster has demoted its volumes. This will enable even faster site switchovers in multi-cluster scenarios.
+**Process Flow:**
+1. Promote target volumes to Primary role
+2. Scale up target workloads
+3. When target is ready, switch traffic to target
+4. After traffic is flowing to target, disable source traffic
+5. Scale down source workloads
+6. Demote source volumes to Secondary role
 
+**Best for:**
+- User-facing applications where availability is critical
+- Scenarios where brief data inconsistency is acceptable
+- Services with strict SLAs for uptime
+
+## Configuration
+
+The failover mode is specified in the Failover CR as a required field. This ensures that every failover operation explicitly defines its approach, rather than relying on defaults.
+
+Example (consistency mode):
 ```yaml
 apiVersion: crd.hahomelabs.com/v1alpha1
-kind: FailoverPolicy
-metadata:
-  name: fast-failover-policy
+kind: Failover
 spec:
-  desiredState: secondary
-  # Set to "off" to bypass ordered sequencing for faster operation
-  mode: "off"
-  managedResources:
-    # resources...
+  targetCluster: "us-west-2"
+  # Required field - every failover must explicitly specify a mode
+  failoverMode: "CONSISTENCY"
+  # ... other fields
 ```
+
+Example (uptime mode):
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: Failover
+spec:
+  targetCluster: "us-west-2" 
+  # Required field - every failover must explicitly specify a mode
+  failoverMode: "UPTIME"
+  # ... other fields
+```
+
+## Usage
+
+The Failover Operator consists of two custom resources:
+
+1. `FailoverGroup` - Defines a group of related resources to be failed over together
+2. `Failover` - Represents a specific failover operation targeting one or more failover groups
 
 ## Installation
 

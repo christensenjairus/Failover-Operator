@@ -11,9 +11,9 @@ import (
 
 // StateManager provides functionality for managing the state of FailoverGroups
 // This consolidates the previous separate managers into a unified API
-// type StateManager struct {
-//	*BaseManager
-// }
+type StateManager struct {
+	*BaseManager
+}
 
 // NewStateManager creates a new state manager
 func NewStateManager(baseManager *BaseManager) *StateManager {
@@ -24,7 +24,7 @@ func NewStateManager(baseManager *BaseManager) *StateManager {
 
 // GetGroupState retrieves the current state of a FailoverGroup
 // This combines data from both the config and status records
-func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string) (*GroupState, error) {
+func (m *BaseManager) GetGroupState(ctx context.Context, namespace, name string) (*ManagerGroupState, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
@@ -32,20 +32,20 @@ func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string
 	logger.V(1).Info("Getting group state")
 
 	// Get the group configuration
-	config, err := s.GetGroupConfig(ctx, namespace, name)
+	config, err := m.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group config: %w", err)
 	}
 
 	// Get the status for the owner cluster
-	status, err := s.GetClusterStatus(ctx, namespace, name, config.OwnerCluster)
+	status, err := m.GetClusterStatus(ctx, namespace, name, config.OwnerCluster)
 	if err != nil {
 		// If we can't get the status, still return a state with what we know
 		logger.Error(err, "Failed to get cluster status, returning partial state")
 	}
 
 	// Get the failover history count
-	history, err := s.GetFailoverHistory(ctx, namespace, name, 1)
+	history, err := m.GetFailoverHistory(ctx, namespace, name, 1)
 	if err != nil {
 		logger.Error(err, "Failed to get failover history")
 	}
@@ -83,7 +83,7 @@ func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string
 		failoverReason = history[0].Reason
 	}
 
-	return &GroupState{
+	return &ManagerGroupState{
 		GroupID:        fmt.Sprintf("%s/%s", namespace, name),
 		Status:         clusterHealth,
 		CurrentRole:    currentRole,
@@ -96,14 +96,14 @@ func (s *StateManager) GetGroupState(ctx context.Context, namespace, name string
 }
 
 // GetGroupConfig retrieves the current configuration for a FailoverGroup
-func (s *StateManager) GetGroupConfig(ctx context.Context, namespace, name string) (*GroupConfigRecord, error) {
+func (m *BaseManager) GetGroupConfig(ctx context.Context, namespace, name string) (*GroupConfigRecord, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
 	)
 	logger.V(1).Info("Getting group configuration")
 
-	pk := s.getGroupPK(namespace, name)
+	pk := m.getGroupPK(namespace, name)
 	sk := "CONFIG"
 
 	// TODO: Implement actual DynamoDB query
@@ -115,12 +115,12 @@ func (s *StateManager) GetGroupConfig(ctx context.Context, namespace, name strin
 	return &GroupConfigRecord{
 		PK:                pk,
 		SK:                sk,
-		GSI1PK:            s.getOperatorGSI1PK(),
-		GSI1SK:            s.getGroupGSI1SK(namespace, name),
-		OperatorID:        s.operatorID,
+		GSI1PK:            m.getOperatorGSI1PK(),
+		GSI1SK:            m.getGroupGSI1SK(namespace, name),
+		OperatorID:        m.operatorID,
 		GroupNamespace:    namespace,
 		GroupName:         name,
-		OwnerCluster:      s.clusterName, // Default to current cluster
+		OwnerCluster:      m.clusterName, // Default to current cluster
 		Version:           1,
 		LastUpdated:       time.Now(),
 		Suspended:         false,
@@ -134,7 +134,7 @@ func (s *StateManager) GetGroupConfig(ctx context.Context, namespace, name strin
 }
 
 // UpdateGroupConfig updates the configuration for a FailoverGroup
-func (s *StateManager) UpdateGroupConfig(ctx context.Context, config *GroupConfigRecord) error {
+func (m *BaseManager) UpdateGroupConfig(ctx context.Context, config *GroupConfigRecord) error {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", config.GroupNamespace,
 		"name", config.GroupName,
@@ -150,7 +150,7 @@ func (s *StateManager) UpdateGroupConfig(ctx context.Context, config *GroupConfi
 }
 
 // GetClusterStatus retrieves the status for a specific cluster in a FailoverGroup
-func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, clusterName string) (*ClusterStatusRecord, error) {
+func (m *BaseManager) GetClusterStatus(ctx context.Context, namespace, name, clusterName string) (*ClusterStatusRecord, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
@@ -158,8 +158,8 @@ func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, cl
 	)
 	logger.V(1).Info("Getting cluster status")
 
-	pk := s.getGroupPK(namespace, name)
-	sk := s.getClusterSK(clusterName)
+	pk := m.getGroupPK(namespace, name)
+	sk := m.getClusterSK(clusterName)
 
 	// TODO: Implement actual DynamoDB query
 	// 1. Query the DynamoDB table for the status record
@@ -170,9 +170,9 @@ func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, cl
 	return &ClusterStatusRecord{
 		PK:             pk,
 		SK:             sk,
-		GSI1PK:         s.getClusterGSI1PK(clusterName),
-		GSI1SK:         s.getGroupGSI1SK(namespace, name),
-		OperatorID:     s.operatorID,
+		GSI1PK:         m.getClusterGSI1PK(clusterName),
+		GSI1SK:         m.getGroupGSI1SK(namespace, name),
+		OperatorID:     m.operatorID,
 		GroupNamespace: namespace,
 		GroupName:      name,
 		ClusterName:    clusterName,
@@ -184,11 +184,11 @@ func (s *StateManager) GetClusterStatus(ctx context.Context, namespace, name, cl
 }
 
 // UpdateClusterStatus updates the status for this cluster in a FailoverGroup
-func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, statusData *StatusData) error {
+func (m *BaseManager) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, statusData *StatusData) error {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
-		"clusterName", s.clusterName,
+		"clusterName", m.clusterName,
 	)
 	logger.V(1).Info("Updating cluster status")
 
@@ -200,14 +200,14 @@ func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name,
 
 	// Create the record to be stored
 	record := &ClusterStatusRecord{
-		PK:             s.getGroupPK(namespace, name),
-		SK:             s.getClusterSK(s.clusterName),
-		GSI1PK:         s.getClusterGSI1PK(s.clusterName),
-		GSI1SK:         s.getGroupGSI1SK(namespace, name),
-		OperatorID:     s.operatorID,
+		PK:             m.getGroupPK(namespace, name),
+		SK:             m.getClusterSK(m.clusterName),
+		GSI1PK:         m.getClusterGSI1PK(m.clusterName),
+		GSI1SK:         m.getGroupGSI1SK(namespace, name),
+		OperatorID:     m.operatorID,
 		GroupNamespace: namespace,
 		GroupName:      name,
-		ClusterName:    s.clusterName,
+		ClusterName:    m.clusterName,
 		Health:         health,
 		State:          state,
 		LastHeartbeat:  time.Now(),
@@ -223,11 +223,11 @@ func (s *StateManager) UpdateClusterStatus(ctx context.Context, namespace, name,
 
 // UpdateClusterStatusLegacy updates the status for this cluster in a FailoverGroup using the legacy components format
 // This function is provided for backward compatibility during the transition to the new API
-func (s *StateManager) UpdateClusterStatusLegacy(ctx context.Context, namespace, name, health, state string, components map[string]ComponentStatus) error {
+func (m *BaseManager) UpdateClusterStatusLegacy(ctx context.Context, namespace, name, health, state string, components map[string]ComponentStatus) error {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
-		"clusterName", s.clusterName,
+		"clusterName", m.clusterName,
 	)
 	logger.V(1).Info("Updating cluster status (legacy format)")
 
@@ -239,14 +239,14 @@ func (s *StateManager) UpdateClusterStatusLegacy(ctx context.Context, namespace,
 
 	// Create the record to be stored
 	record := &ClusterStatusRecord{
-		PK:             s.getGroupPK(namespace, name),
-		SK:             s.getClusterSK(s.clusterName),
-		GSI1PK:         s.getClusterGSI1PK(s.clusterName),
-		GSI1SK:         s.getGroupGSI1SK(namespace, name),
-		OperatorID:     s.operatorID,
+		PK:             m.getGroupPK(namespace, name),
+		SK:             m.getClusterSK(m.clusterName),
+		GSI1PK:         m.getClusterGSI1PK(m.clusterName),
+		GSI1SK:         m.getGroupGSI1SK(namespace, name),
+		OperatorID:     m.operatorID,
 		GroupNamespace: namespace,
 		GroupName:      name,
-		ClusterName:    s.clusterName,
+		ClusterName:    m.clusterName,
 		Health:         health,
 		State:          state,
 		LastHeartbeat:  time.Now(),
@@ -301,7 +301,7 @@ func (s *StateManager) GetAllClusterStatuses(ctx context.Context, namespace, nam
 }
 
 // GetFailoverHistory retrieves the failover history for a FailoverGroup
-func (s *StateManager) GetFailoverHistory(ctx context.Context, namespace, name string, limit int) ([]*HistoryRecord, error) {
+func (m *BaseManager) GetFailoverHistory(ctx context.Context, namespace, name string, limit int) ([]*HistoryRecord, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,
@@ -309,7 +309,7 @@ func (s *StateManager) GetFailoverHistory(ctx context.Context, namespace, name s
 	)
 	logger.V(1).Info("Getting failover history")
 
-	pk := s.getGroupPK(namespace, name)
+	pk := m.getGroupPK(namespace, name)
 
 	// Define the prefix for querying history records
 	// Used in actual implementation for query filtering
@@ -325,8 +325,8 @@ func (s *StateManager) GetFailoverHistory(ctx context.Context, namespace, name s
 	result := make([]*HistoryRecord, 0, 1)
 	result = append(result, &HistoryRecord{
 		PK:             pk,
-		SK:             s.getHistorySK(time.Now().Add(-24 * time.Hour)),
-		OperatorID:     s.operatorID,
+		SK:             m.getHistorySK(time.Now().Add(-24 * time.Hour)),
+		OperatorID:     m.operatorID,
 		GroupNamespace: namespace,
 		GroupName:      name,
 		FailoverName:   "sample-failover",
@@ -439,7 +439,7 @@ func (s *StateManager) DetectStaleHeartbeats(ctx context.Context, namespace, nam
 
 // UpdateGroupState updates the state of a FailoverGroup in DynamoDB
 // This is a new method that updates both the group config and all related records
-func (s *StateManager) UpdateGroupState(ctx context.Context, namespace, name string, state *GroupState) error {
+func (s *StateManager) UpdateGroupState(ctx context.Context, namespace, name string, state *ManagerGroupState) error {
 	logger := log.FromContext(ctx).WithValues(
 		"namespace", namespace,
 		"name", name,

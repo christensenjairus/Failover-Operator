@@ -173,7 +173,6 @@ func CreateTestFailoverGroup() *crdv1alpha1.FailoverGroup {
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
 			OperatorID:        TestOperatorID,
-			FailoverMode:      "safe",
 			Suspended:         false,
 			HeartbeatInterval: "30s",
 			Timeouts: crdv1alpha1.TimeoutSettings{
@@ -296,7 +295,7 @@ func CreateTestFailover() *crdv1alpha1.Failover {
 		},
 		Spec: crdv1alpha1.FailoverSpec{
 			TargetCluster: "standby-cluster",
-			ForceFastMode: false,
+			FailoverMode:  "CONSISTENCY",
 			Force:         false,
 			Reason:        "Planned failover for testing",
 			FailoverGroups: []crdv1alpha1.FailoverGroupReference{

@@ -80,6 +80,7 @@ type GroupConfigRecord struct {
 	LastFailover      *FailoverReference `json:"lastFailover,omitempty"`     // Reference to the last failover operation
 	Suspended         bool               `json:"suspended"`                  // Whether automatic failovers are suspended
 	SuspensionReason  string             `json:"suspensionReason,omitempty"` // Why automatic failovers are suspended
+	Metadata          map[string]string  `json:"metadata,omitempty"`         // Additional metadata for the group (includes volume state)
 }
 
 // ClusterStatusRecord represents the status and heartbeat of a cluster for a FailoverGroup
@@ -237,4 +238,54 @@ type SimpleLockRecord struct {
 
 	// Operation describes what operation the lock is for
 	Operation string `json:"operation"`
+}
+
+// GroupState represents the global state of a FailoverGroup across all clusters
+type GroupState struct {
+	// ActiveCluster is the currently active cluster for this group
+	ActiveCluster string `json:"activeCluster"`
+
+	// ThisCluster is the name of the cluster this state is for (convenience)
+	ThisCluster string `json:"thisCluster,omitempty"`
+
+	// LastFailover contains information about the most recent failover
+	LastFailover map[string]string `json:"lastFailover,omitempty"`
+
+	// DBSyncStatus indicates the status of DynamoDB synchronization
+	DBSyncStatus string `json:"dbSyncStatus,omitempty"`
+
+	// LastSyncTime is when the last successful sync with DynamoDB occurred
+	LastSyncTime string `json:"lastSyncTime,omitempty"`
+
+	// Clusters is information about all clusters participating in this FailoverGroup
+	Clusters []ClusterInfo `json:"clusters,omitempty"`
+
+	// VolumeState tracks the state of volumes during failover
+	VolumeState string `json:"volumeState,omitempty"`
+
+	// LastVolumeStateUpdateTime is when the volume state was last updated
+	LastVolumeStateUpdateTime string `json:"lastVolumeStateUpdateTime,omitempty"`
+}
+
+// ClusterInfo contains information about a cluster in the FailoverGroup
+type ClusterInfo struct {
+	// Name of the cluster
+	Name string `json:"name"`
+
+	// Role of the cluster (PRIMARY or STANDBY)
+	Role string `json:"role,omitempty"`
+
+	// Health status of the cluster
+	Health string `json:"health,omitempty"`
+
+	// LastHeartbeat is the timestamp of the last heartbeat received
+	LastHeartbeat string `json:"lastHeartbeat,omitempty"`
+}
+
+// StateManager manages interactions with the DynamoDB state storage
+type StateManager struct {
+	Table      string
+	Client     DynamoDBAPI
+	OperatorID string
+	Operations *OperationsManager
 }

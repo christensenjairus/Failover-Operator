@@ -198,3 +198,25 @@ func (m *Manager) GetFailoverGroup(ctx context.Context, name, namespace string) 
 	}
 	return group, nil
 }
+
+// handleAutomaticFailoverError handles errors during automatic failover
+// This documents how error handling works across the failover stages
+/*
+Error Handling (Any Stage)
+--------------------------
+When an error occurs during any stage of automatic failover:
+
+1. The error is logged with detailed context and stack trace
+2. The failover status is updated to FAILED with the error message
+3. Cleanup actions are taken based on how far the failover progressed:
+   - Stage 1 (Initialization): Release lock, update status
+   - Stage 2 (Source Preparation): Restore network resources if possible
+   - Stage 3 (Volume Demotion): No automatic rollback, requires manual intervention
+   - Stage 4 (Volume Promotion): No automatic rollback, requires manual intervention
+   - Stage 5 (Target Activation): Scale down target workloads if possible
+   - Stage 6 (Completion): Release resources, ensure locks are freed
+
+4. The error is recorded in the failover history
+5. Appropriate alerts are triggered based on error severity
+6. The controller will not retry automatically to avoid cascade failures
+*/

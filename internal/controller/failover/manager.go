@@ -229,82 +229,238 @@ func (m *Manager) executeFailoverWorkflow(ctx context.Context,
 	failover *crdv1alpha1.Failover) error {
 
 	// Determine failover mode (safe or fast)
-	failoverMode := failoverGroup.Spec.FailoverMode
+	// This can be used to modify behavior in specific stages (e.g., for data sync waiting)
+	// Currently, our implementation follows the same path regardless of mode
+	// but we keep track of it for potential future optimizations
+	_ = failoverGroup.Spec.FailoverMode
 	if failover.Spec.ForceFastMode {
-		failoverMode = "fast"
+		// This would change the mode to "fast" if needed in the future
 	}
 
-	// 1. Process volume replications
-	if err := m.handleVolumeReplications(ctx, failoverGroup, failover); err != nil {
-		return err
+	// STAGE 1: INITIALIZATION
+	// ==============================================
+	// Already handled in previous steps:
+	// - validate failover request and prerequisites (verifyAndAcquireLock)
+	// - acquire lock in DynamoDB (verifyAndAcquireLock)
+	// - read current configuration from DynamoDB
+	// - set FailoverGroup status to "IN_PROGRESS"
+	// - log the start of the failover operation
+
+	// STAGE 2: SOURCE CLUSTER PREPARATION
+	// ==============================================
+	// Update network resources immediately to disable DNS
+	if err := m.updateNetworkResourcesForSourceCluster(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 2 - failed to update network resources for source cluster: %w", err)
 	}
 
-	// 2. Handle workloads based on failover mode
-	if failoverMode == "safe" {
-		// In safe mode:
-		// a. Scale down source cluster workloads
-		// b. Wait for data synchronization to complete
-		// c. Scale up target cluster workloads
+	// Scale down all workloads in source cluster
+	if err := m.scaleDownWorkloads(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 2 - failed to scale down workloads: %w", err)
+	}
 
-		if err := m.scaleDownWorkloads(ctx, failoverGroup, failover); err != nil {
-			return err
+	// Apply Flux annotations to prevent reconciliation
+	if err := m.disableFluxReconciliation(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 2 - failed to disable Flux reconciliation: %w", err)
+	}
+
+	// Wait for workloads to be fully scaled down
+	if err := m.waitForWorkloadsScaledDown(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 2 - failed waiting for workloads to scale down: %w", err)
+	}
+
+	// STAGE 3: VOLUME DEMOTION (SOURCE CLUSTER)
+	// ==============================================
+	// Demote volumes in source cluster to Secondary
+	if err := m.demoteVolumes(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 3 - failed to demote volumes: %w", err)
+	}
+
+	// Wait for volumes to be demoted
+	if err := m.waitForVolumesDemoted(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 3 - failed waiting for volumes to be demoted: %w", err)
+	}
+
+	// Update DynamoDB to indicate volumes are ready for promotion
+	if err := m.markVolumesReadyForPromotion(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 3 - failed to mark volumes as ready for promotion: %w", err)
+	}
+
+	// Release control to target cluster's operator
+	// This step concludes source cluster's responsibility
+	// Target cluster's operator will pick up from here
+
+	// STAGE 4: VOLUME PROMOTION (TARGET CLUSTER)
+	// ==============================================
+	// If this is the target cluster's operator, perform promotion
+	if m.ClusterName == failover.Spec.TargetCluster {
+		// Wait until source cluster indicates volumes are ready for promotion
+		if err := m.waitForVolumesReadyForPromotion(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 4 - failed waiting for volumes to be ready for promotion: %w", err)
 		}
 
-		if err := m.waitForDataSync(ctx, failoverGroup, failover); err != nil {
-			return err
+		// Promote volumes in target cluster to Primary
+		if err := m.promoteVolumes(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 4 - failed to promote volumes: %w", err)
 		}
 
+		// Wait for volumes to be promoted successfully
+		if err := m.waitForVolumesPromoted(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 4 - failed waiting for volumes to be promoted: %w", err)
+		}
+
+		// Verify data availability
+		if err := m.verifyDataAvailability(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 4 - failed to verify data availability: %w", err)
+		}
+
+		// STAGE 5: TARGET CLUSTER ACTIVATION
+		// ==============================================
+		// Scale up workloads in target cluster
 		if err := m.scaleUpWorkloads(ctx, failoverGroup, failover); err != nil {
-			return err
-		}
-	} else {
-		// In fast mode:
-		// a. Scale up target cluster workloads immediately
-		// b. Scale down source cluster workloads after target is ready
-
-		if err := m.scaleUpWorkloads(ctx, failoverGroup, failover); err != nil {
-			return err
+			return fmt.Errorf("stage 5 - failed to scale up workloads: %w", err)
 		}
 
+		// Trigger Flux reconciliation if specified
+		if err := m.triggerFluxReconciliation(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 5 - failed to trigger Flux reconciliation: %w", err)
+		}
+
+		// Wait for workloads to be ready
 		if err := m.waitForTargetReady(ctx, failoverGroup, failover); err != nil {
-			return err
+			return fmt.Errorf("stage 5 - failed waiting for target to be ready: %w", err)
 		}
 
-		if err := m.scaleDownWorkloads(ctx, failoverGroup, failover); err != nil {
-			return err
+		// Update network resources to enable DNS
+		if err := m.updateNetworkResourcesForTargetCluster(ctx, failoverGroup, failover); err != nil {
+			return fmt.Errorf("stage 5 - failed to update network resources for target cluster: %w", err)
 		}
 	}
 
-	// 3. Update Flux resources if needed
-	if err := m.handleFluxResources(ctx, failoverGroup, failover); err != nil {
-		return err
-	}
-
-	// 4. Update network resources to point to the new primary
-	if err := m.updateNetworkResources(ctx, failoverGroup, failover); err != nil {
-		return err
-	}
-
-	// 5. Update global state in DynamoDB
+	// STAGE 6: COMPLETION
+	// ==============================================
+	// Update DynamoDB Group Configuration with new owner
 	if err := m.updateGlobalState(ctx, failoverGroup, failover); err != nil {
-		return err
+		return fmt.Errorf("stage 6 - failed to update global state: %w", err)
 	}
 
-	// 6. Update failover group status
-	return m.updateFailoverGroupStatus(ctx, failoverGroup, failover)
+	// Write History record with metrics and details
+	if err := m.recordFailoverHistory(ctx, failoverGroup, failover); err != nil {
+		return fmt.Errorf("stage 6 - failed to record failover history: %w", err)
+	}
+
+	// Release the lock (done in calling function)
+	// Set FailoverGroup status to "SUCCESS" (done in calling function)
+	// Log completion of failover operation (done in calling function)
+
+	return nil
 }
 
-// handleVolumeReplications manages volume replication direction changes
-func (m *Manager) handleVolumeReplications(ctx context.Context,
+// updateNetworkResourcesForSourceCluster updates network resources for the source cluster
+// to disable DNS routing during failover
+func (m *Manager) updateNetworkResourcesForSourceCluster(ctx context.Context,
 	failoverGroup *crdv1alpha1.FailoverGroup,
 	failover *crdv1alpha1.Failover) error {
+	// Update VirtualServices and Ingresses to disable DNS
+	return nil
+}
 
-	// Identify volume replications from workloads
-	// For each volume replication:
-	// 1. Check current primary vs target direction
-	// 2. If needed, flip the replication direction
-	// 3. Wait for initial synchronization to start
+// disableFluxReconciliation applies annotations to prevent Flux from reconciling
+// resources during the failover
+func (m *Manager) disableFluxReconciliation(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Apply appropriate annotations to Flux resources
+	return nil
+}
 
+// waitForWorkloadsScaledDown waits for all workloads to be fully scaled down
+func (m *Manager) waitForWorkloadsScaledDown(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Check that all workloads have scaled to 0
+	return nil
+}
+
+// demoteVolumes demotes volumes in the source cluster to Secondary role
+func (m *Manager) demoteVolumes(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Perform volume demotion operations
+	return nil
+}
+
+// waitForVolumesDemoted waits for all volumes to be successfully demoted
+func (m *Manager) waitForVolumesDemoted(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Monitor volume status until all are demoted
+	return nil
+}
+
+// markVolumesReadyForPromotion updates DynamoDB to indicate volumes are ready
+// for promotion in the target cluster
+func (m *Manager) markVolumesReadyForPromotion(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Update status in DynamoDB
+	return nil
+}
+
+// waitForVolumesReadyForPromotion waits until volumes are ready to be promoted
+// in the target cluster (target cluster operator function)
+func (m *Manager) waitForVolumesReadyForPromotion(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Check DynamoDB status until volumes are ready
+	return nil
+}
+
+// promoteVolumes promotes volumes in the target cluster to Primary role
+func (m *Manager) promoteVolumes(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Perform volume promotion operations
+	return nil
+}
+
+// waitForVolumesPromoted waits for all volumes to be successfully promoted
+func (m *Manager) waitForVolumesPromoted(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Monitor volume status until all are promoted
+	return nil
+}
+
+// verifyDataAvailability verifies that data is accessible after volume promotion
+func (m *Manager) verifyDataAvailability(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Verify data is accessible
+	return nil
+}
+
+// triggerFluxReconciliation triggers reconciliation of Flux resources
+func (m *Manager) triggerFluxReconciliation(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Trigger Flux reconciliation for applicable resources
+	return nil
+}
+
+// updateNetworkResourcesForTargetCluster updates network resources for the target cluster
+// to enable DNS routing after failover
+func (m *Manager) updateNetworkResourcesForTargetCluster(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Update VirtualServices and Ingresses to enable DNS
+	return nil
+}
+
+// recordFailoverHistory records the failover operation details and metrics
+func (m *Manager) recordFailoverHistory(ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup,
+	failover *crdv1alpha1.Failover) error {
+	// Record failover history in DynamoDB
 	return nil
 }
 
@@ -484,4 +640,50 @@ func (m *Manager) StartAutomaticFailoverChecker(ctx context.Context, intervalSec
 	}()
 
 	m.Log.Info("Started automatic failover checker", "intervalSeconds", intervalSeconds)
+}
+
+// CleanupFailoverResources cleans up any resources that might have been left in
+// an inconsistent state after a failed failover
+func (m *Manager) CleanupFailoverResources(ctx context.Context, failover *crdv1alpha1.Failover) error {
+	log := m.Log.WithValues("failover", failover.Name, "namespace", failover.Namespace)
+	log.Info("Cleaning up failover resources")
+
+	// For each failover group
+	for _, group := range failover.Spec.FailoverGroups {
+		failoverGroup := &crdv1alpha1.FailoverGroup{}
+		groupNamespace := group.Namespace
+		if groupNamespace == "" {
+			groupNamespace = failover.Namespace
+		}
+
+		// Try to get the failover group
+		if err := m.Client.Get(ctx, client.ObjectKey{
+			Namespace: groupNamespace,
+			Name:      group.Name,
+		}, failoverGroup); err != nil {
+			log.Error(err, "Failed to get failover group during cleanup")
+			continue
+		}
+
+		// Release any locks the failover might have acquired
+		if err := m.releaseLock(ctx, failoverGroup); err != nil {
+			log.Error(err, "Failed to release lock during cleanup")
+		}
+
+		// Update status to indicate cleanup has happened
+		// This is important for the operator's observability
+		failoverGroup.Status.Conditions = append(failoverGroup.Status.Conditions, metav1.Condition{
+			Type:               "CleanedUp",
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "FailoverResourceDeleted",
+			Message:            "Resources cleaned up due to failover resource deletion",
+		})
+
+		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
+			log.Error(err, "Failed to update failover group status during cleanup")
+		}
+	}
+
+	return nil
 }

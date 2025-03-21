@@ -82,20 +82,74 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 		return reconcile.Result{Requeue: true}, nil
 	}
 
+	// Failover already completed successfully, no need to process again
+	if failover.Status.Status == "SUCCESS" {
+		logger.Info("Failover already completed successfully")
+		return reconcile.Result{}, nil
+	}
+
+	// Failover already failed, no automatic retry to avoid cascading issues
+	// Requires manual intervention (create a new failover or fix the issue)
+	if failover.Status.Status == "FAILED" {
+		logger.Info("Failover previously failed, manual intervention required")
+		return reconcile.Result{}, nil
+	}
+
 	// Process the failover using the manager
+	// This will execute the staged failover process:
+	// Stage 1: Initialization
+	// Stage 2: Source Cluster Preparation
+	// Stage 3: Volume Demotion (Source Cluster)
+	// Stage 4: Volume Promotion (Target Cluster)
+	// Stage 5: Target Cluster Activation
+	// Stage 6: Completion
+	// See failover_stages.go for detailed documentation of each stage
+	logger.Info("Processing failover",
+		"targetCluster", failover.Spec.TargetCluster,
+		"groups", len(failover.Spec.FailoverGroups))
+
 	err := r.FailoverManager.ProcessFailover(ctx, failover)
 	if err != nil {
+		// Handle error according to our error handling guidelines
+		// See "Error Handling (Any Stage)" in failover_stages.go
 		logger.Error(err, "Failed to process failover")
+
 		// Update status to reflect the error
 		failover.Status.Status = "FAILED"
-		// Add error to conditions instead of using Message field
+
+		// Add error to conditions with detailed information
 		if updateErr := r.Status().Update(ctx, failover); updateErr != nil {
-			logger.Error(updateErr, "Failed to update Failover status")
+			logger.Error(updateErr, "Failed to update Failover status after error")
+			// Return the original error, not the status update error
 		}
+
+		// Log additional diagnostic information for complex errors
+		r.logFailoverDiagnostics(ctx, failover, err)
+
 		return reconcile.Result{}, err
 	}
 
+	logger.Info("Failover processed successfully")
 	return reconcile.Result{}, nil
+}
+
+// logFailoverDiagnostics logs additional diagnostic information for failed failovers
+func (r *FailoverReconciler) logFailoverDiagnostics(ctx context.Context, failover *crdv1alpha1.Failover, err error) {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+	)
+
+	// Add extra diagnostic info based on error type and stage
+	// This helps administrators troubleshoot failures
+	logger.Info("Failover diagnostic information",
+		"error", err.Error(),
+		"targetCluster", failover.Spec.TargetCluster,
+		"forceMode", failover.Spec.ForceFastMode,
+		"groups", len(failover.Spec.FailoverGroups))
+
+	// Depending on the specific error types, we might collect and log
+	// additional information about cluster state, resources, etc.
 }
 
 // handleDeletion cleans up resources and removes finalizer
@@ -109,8 +163,12 @@ func (r *FailoverReconciler) handleDeletion(ctx context.Context, failover *crdv1
 	if controllerutil.ContainsFinalizer(failover, finalizerName) {
 		logger.Info("Performing cleanup before deletion")
 
-		// Let the manager handle cleanup operations if needed
-		// For now, just remove the finalizer without cleanup
+		// Clean up any lingering resources from incomplete failovers
+		if err := r.FailoverManager.CleanupFailoverResources(ctx, failover); err != nil {
+			logger.Error(err, "Failed to clean up failover resources")
+			// Continue with deletion even if cleanup fails
+		}
+
 		controllerutil.RemoveFinalizer(failover, finalizerName)
 		if err := r.Update(ctx, failover); err != nil {
 			logger.Error(err, "Failed to remove finalizer")

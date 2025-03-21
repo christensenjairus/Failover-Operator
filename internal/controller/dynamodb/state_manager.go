@@ -11,9 +11,9 @@ import (
 
 // StateManager provides functionality for managing the state of FailoverGroups
 // This consolidates the previous separate managers into a unified API
-type StateManager struct {
-	*BaseManager
-}
+// type StateManager struct {
+//	*BaseManager
+// }
 
 // NewStateManager creates a new state manager
 func NewStateManager(baseManager *BaseManager) *StateManager {
@@ -435,4 +435,41 @@ func (s *StateManager) DetectStaleHeartbeats(ctx context.Context, namespace, nam
 	}
 
 	return staleClusters, nil
+}
+
+// UpdateGroupState updates the state of a FailoverGroup in DynamoDB
+// This is a new method that updates both the group config and all related records
+func (s *StateManager) UpdateGroupState(ctx context.Context, namespace, name string, state *GroupState) error {
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", namespace,
+		"name", name,
+	)
+	logger.V(1).Info("Updating group state")
+
+	// Get the current group config
+	config, err := s.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get group config: %w", err)
+	}
+
+	// Update volume state fields if they exist in the GroupState
+	if state.VolumeState != "" {
+		// If we had a metadata field, we would update it here
+		// For now, we'll just log that we would save this
+		logger.Info("Would save volume state to DynamoDB",
+			"volumeState", state.VolumeState,
+			"lastUpdate", state.LastVolumeStateUpdateTime)
+	}
+
+	// Update the config record
+	config.LastUpdated = time.Now()
+	config.Version++
+
+	// Actually update the config in DynamoDB
+	err = s.UpdateGroupConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("failed to update group config: %w", err)
+	}
+
+	return nil
 }

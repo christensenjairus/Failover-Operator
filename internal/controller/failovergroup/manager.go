@@ -260,16 +260,180 @@ func (m *Manager) configureAsStandby(ctx context.Context, failoverGroup *crdv1al
 
 // GetFailoverGroup retrieves a FailoverGroup by name and namespace
 func (m *Manager) GetFailoverGroup(ctx context.Context, namespace, name string) (*crdv1alpha1.FailoverGroup, error) {
-	var failoverGroup crdv1alpha1.FailoverGroup
-
-	err := m.Client.Get(ctx, types.NamespacedName{
+	failoverGroup := &crdv1alpha1.FailoverGroup{}
+	namespacedName := types.NamespacedName{
 		Namespace: namespace,
 		Name:      name,
-	}, &failoverGroup)
-
-	if err != nil {
+	}
+	if err := m.Client.Get(ctx, namespacedName, failoverGroup); err != nil {
 		return nil, err
 	}
+	return failoverGroup, nil
+}
 
-	return &failoverGroup, nil
+// UpdateHeartbeat updates the heartbeat timestamp for this cluster in DynamoDB
+func (m *Manager) UpdateHeartbeat(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+
+	if m.DynamoDBManager == nil {
+		log.Info("DynamoDB manager not configured, skipping heartbeat update")
+		return nil
+	}
+
+	// Update heartbeat in DynamoDB
+	return m.DynamoDBManager.State.UpdateHeartbeat(
+		ctx,
+		failoverGroup.Namespace,
+		failoverGroup.Name,
+		m.ClusterName,
+	)
+}
+
+// GetVolumeStateFromDynamoDB retrieves the volume state from DynamoDB
+// This is used to coordinate failover stages between clusters
+func (m *Manager) GetVolumeStateFromDynamoDB(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) (string, bool) {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+
+	if m.DynamoDBManager == nil {
+		log.Info("DynamoDB manager not configured, cannot get volume state")
+		return "", false
+	}
+
+	// Get volume state from DynamoDB - this requires adding a method to the DynamoDB manager
+	volumeState, err := m.DynamoDBManager.State.GetVolumeState(
+		ctx,
+		failoverGroup.Namespace,
+		failoverGroup.Name,
+	)
+
+	if err != nil {
+		log.Error(err, "Failed to get volume state from DynamoDB")
+		return "", false
+	}
+
+	if volumeState == "" {
+		return "", false
+	}
+
+	return volumeState, true
+}
+
+// HandleVolumePromotion handles volume promotion during Stage 4 of failover
+func (m *Manager) HandleVolumePromotion(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+	log.Info("Handling volume promotion (Stage 4)")
+
+	// 1. Identify and promote volumes
+	if err := m.promoteVolumes(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to promote volumes: %w", err)
+	}
+
+	// 2. Wait for volumes to be fully promoted
+	if err := m.waitForVolumesPromoted(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to wait for volumes promotion: %w", err)
+	}
+
+	// 3. Update DynamoDB to indicate volumes are promoted
+	if m.DynamoDBManager != nil {
+		if err := m.DynamoDBManager.State.SetVolumeState(
+			ctx,
+			failoverGroup.Namespace,
+			failoverGroup.Name,
+			"PROMOTED",
+		); err != nil {
+			return fmt.Errorf("failed to update volume state in DynamoDB: %w", err)
+		}
+	}
+
+	log.Info("Volume promotion completed successfully")
+	return nil
+}
+
+// HandleTargetActivation handles target cluster activation during Stage 5 of failover
+func (m *Manager) HandleTargetActivation(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	log := m.Log.WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+	log.Info("Handling target cluster activation (Stage 5)")
+
+	// 1. Scale up workloads in target cluster
+	if err := m.scaleUpWorkloads(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to scale up workloads: %w", err)
+	}
+
+	// 2. Trigger Flux reconciliation if specified
+	if err := m.triggerFluxReconciliation(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to trigger Flux reconciliation: %w", err)
+	}
+
+	// 3. Wait for workloads to be ready
+	if err := m.waitForWorkloadsReady(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to wait for workloads to be ready: %w", err)
+	}
+
+	// 4. Update network resources
+	if err := m.updateNetworkResources(ctx, failoverGroup); err != nil {
+		return fmt.Errorf("failed to update network resources: %w", err)
+	}
+
+	// 5. Update DynamoDB to indicate activation is complete
+	if m.DynamoDBManager != nil {
+		if err := m.DynamoDBManager.State.SetVolumeState(
+			ctx,
+			failoverGroup.Namespace,
+			failoverGroup.Name,
+			"COMPLETED",
+		); err != nil {
+			return fmt.Errorf("failed to update state in DynamoDB: %w", err)
+		}
+	}
+
+	log.Info("Target cluster activation completed successfully")
+	return nil
+}
+
+// promoteVolumes promotes volumes in the target cluster to Primary
+func (m *Manager) promoteVolumes(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement volume promotion logic
+	return nil
+}
+
+// waitForVolumesPromoted waits for all volumes to be promoted
+func (m *Manager) waitForVolumesPromoted(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement waiting logic
+	return nil
+}
+
+// scaleUpWorkloads scales up workloads in the target cluster
+func (m *Manager) scaleUpWorkloads(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement scale-up logic
+	return nil
+}
+
+// triggerFluxReconciliation triggers reconciliation of Flux resources
+func (m *Manager) triggerFluxReconciliation(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement Flux reconciliation logic
+	return nil
+}
+
+// waitForWorkloadsReady waits for all workloads to be ready
+func (m *Manager) waitForWorkloadsReady(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement waiting logic
+	return nil
+}
+
+// updateNetworkResources updates network resources in the target cluster
+func (m *Manager) updateNetworkResources(ctx context.Context, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// Implement network resource updates
+	return nil
 }

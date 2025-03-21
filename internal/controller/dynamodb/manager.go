@@ -29,14 +29,16 @@ type BaseManager struct {
 
 // GroupState represents the state of a failover group
 type GroupState struct {
-	GroupID        string     `json:"groupId"`
-	Status         string     `json:"status"`
-	CurrentRole    string     `json:"currentRole"`
-	FailoverCount  int        `json:"failoverCount"`
-	LastFailover   *time.Time `json:"lastFailover,omitempty"`
-	LastHeartbeat  *time.Time `json:"lastHeartbeat,omitempty"`
-	FailoverReason string     `json:"failoverReason,omitempty"`
-	LastUpdate     int64      `json:"lastUpdate"`
+	GroupID                   string     `json:"groupId"`
+	Status                    string     `json:"status"`
+	CurrentRole               string     `json:"currentRole"`
+	FailoverCount             int        `json:"failoverCount"`
+	LastFailover              *time.Time `json:"lastFailover,omitempty"`
+	LastHeartbeat             *time.Time `json:"lastHeartbeat,omitempty"`
+	FailoverReason            string     `json:"failoverReason,omitempty"`
+	LastUpdate                int64      `json:"lastUpdate"`
+	VolumeState               string     `json:"volumeState,omitempty"`               // Current state of volumes during failover
+	LastVolumeStateUpdateTime string     `json:"lastVolumeStateUpdateTime,omitempty"` // When volume state was last updated
 }
 
 // DynamoDBService provides access to all DynamoDB functionality

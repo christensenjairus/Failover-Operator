@@ -99,14 +99,89 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Second * 10}, err
 	}
 
+	// Check for ongoing failover operations and handle state transitions
+	if shouldHandle, result, err := r.checkAndHandleFailoverStages(ctx, failoverGroup); shouldHandle {
+		return result, err
+	}
+
+	// Update heartbeat in DynamoDB
+	if err := r.FailoverGroupManager.UpdateHeartbeat(ctx, failoverGroup); err != nil {
+		logger.Error(err, "Failed to update heartbeat")
+		// Continue processing despite heartbeat update failure
+	}
+
 	// Update DynamoDB with current status
 	if err := r.FailoverGroupManager.UpdateDynamoDBStatus(ctx, failoverGroup); err != nil {
 		logger.Error(err, "Failed to update DynamoDB status")
 		return ctrl.Result{RequeueAfter: time.Second * 10}, err
 	}
 
-	// Schedule next reconciliation (every minute)
-	return ctrl.Result{RequeueAfter: time.Minute}, nil
+	// Determine reconciliation interval based on group state
+	var requeueAfter time.Duration
+	if failoverGroup.Status.State == "PRIMARY" || failoverGroup.Status.State == "STANDBY" {
+		// Normal state - check every minute
+		requeueAfter = time.Minute
+	} else if failoverGroup.Status.State == "FAILOVER" || failoverGroup.Status.State == "FAILBACK" {
+		// During failover - check more frequently
+		requeueAfter = time.Second * 10
+	} else {
+		// Default to 30 seconds
+		requeueAfter = time.Second * 30
+	}
+
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// checkAndHandleFailoverStages checks for ongoing failover operations
+// and handles transitions between stages based on DynamoDB state
+func (r *FailoverGroupReconciler) checkAndHandleFailoverStages(
+	ctx context.Context,
+	failoverGroup *crdv1alpha1.FailoverGroup) (bool, ctrl.Result, error) {
+
+	logger := log.FromContext(ctx).WithValues(
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+	)
+
+	// Check if there's an ongoing failover operation that requires action
+	volumeState, exists := r.FailoverGroupManager.GetVolumeStateFromDynamoDB(ctx, failoverGroup)
+	if !exists {
+		// No volume state information in DynamoDB, nothing to do
+		return false, ctrl.Result{}, nil
+	}
+
+	// If this is the target cluster and volumes are ready for promotion
+	if volumeState == "READY_FOR_PROMOTION" &&
+		r.ClusterName == failoverGroup.Status.GlobalState.ActiveCluster {
+
+		logger.Info("Detected volumes ready for promotion, handling Volume Promotion Stage (Stage 4)")
+
+		// Handle the volume promotion here, or delegate to the manager
+		if err := r.FailoverGroupManager.HandleVolumePromotion(ctx, failoverGroup); err != nil {
+			logger.Error(err, "Failed to handle volume promotion")
+			return true, ctrl.Result{RequeueAfter: time.Second * 30}, err
+		}
+
+		return true, ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	// If volumes are promoted and this is the target cluster
+	if volumeState == "PROMOTED" &&
+		r.ClusterName == failoverGroup.Status.GlobalState.ActiveCluster {
+
+		logger.Info("Detected volumes promoted, handling Target Cluster Activation (Stage 5)")
+
+		// Handle activation here, or delegate to the manager
+		if err := r.FailoverGroupManager.HandleTargetActivation(ctx, failoverGroup); err != nil {
+			logger.Error(err, "Failed to handle target activation")
+			return true, ctrl.Result{RequeueAfter: time.Second * 30}, err
+		}
+
+		return true, ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	// No action needed for this controller in the current state
+	return false, ctrl.Result{}, nil
 }
 
 // handleDeletion cleans up resources and removes finalizer
@@ -125,7 +200,7 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 		// 2. Release any locks
 		// 3. Scale down any workloads
 
-		// Example cleanup logic
+		// Release any locks if they exist
 		if r.FailoverGroupManager.DynamoDBManager != nil {
 			// Check if lock exists and release it
 			locked, leaseToken, _ := r.FailoverGroupManager.DynamoDBManager.Operations.IsLocked(
@@ -134,6 +209,10 @@ func (r *FailoverGroupReconciler) handleDeletion(ctx context.Context, failoverGr
 				_ = r.FailoverGroupManager.DynamoDBManager.Operations.ReleaseLock(
 					ctx, failoverGroup.Namespace, failoverGroup.Name, leaseToken)
 			}
+
+			// Cleanup any volume state information
+			_ = r.FailoverGroupManager.DynamoDBManager.Operations.RemoveVolumeState(
+				ctx, failoverGroup.Namespace, failoverGroup.Name)
 		}
 
 		// Remove the finalizer

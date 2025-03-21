@@ -1,0 +1,49 @@
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: Failover
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  # Target cluster to become PRIMARY
+  targetCluster: "dev-central"
+  
+  # Optional: Override component failoverMode for faster failover
+  forceFastMode: false
+  
+  # Optional: Skip safety checks (use with caution)
+  force: false
+  
+  # Optional: Document reason for this failover
+  reason: "Planned maintenance in us-west-1 region"
+  
+  # FailoverGroups to be failed over
+  failoverGroups:
+    - name: "wordpress"
+      namespace: "wordpress"
+
+status:
+  status: "IN_PROGRESS"
+  
+  failoverGroups:
+    - name: "wordpress"
+      namespace: "wordpress"
+      status: "IN_PROGRESS"
+      startTime: "2023-05-15T09:30:00Z"
+      message: "Promoting standby cluster"
+  
+  metrics:
+    startTime: "2023-05-15T09:30:00Z"
+    duration: 45
+    downtime: 5
+  
+  conditions:
+    - type: "InProgress"
+      status: "True"
+      reason: "FailoverStarted"
+      message: "Failover operation in progress"
+      lastTransitionTime: "2023-05-15T09:30:00Z"
+    - type: "PromotingStandby"
+      status: "True"
+      reason: "PromotingWorkloads"
+      message: "Scaling up workloads in standby cluster"
+      lastTransitionTime: "2023-05-15T09:31:00Z"

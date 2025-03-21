@@ -87,6 +87,57 @@ type GlobalStateInfo struct {
 	Clusters []ClusterInfo `json:"clusters,omitempty"`
 }
 
+// VolumeReplication defines a volume replication specification
+type VolumeReplicationSpec struct {
+	// Name of the PVC or volume claim
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+
+// WorkloadSpec defines a workload resource
+type WorkloadSpec struct {
+	// Kind of the workload resource
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;CronJob
+	Kind string `json:"kind"`
+
+	// Name of the workload resource
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// VolumeReplications are the volume replications associated with this workload
+	// +optional
+	VolumeReplications []string `json:"volumeReplications,omitempty"`
+}
+
+// NetworkResourceSpec defines a network resource
+type NetworkResourceSpec struct {
+	// Kind of the network resource
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=VirtualService;Ingress
+	Kind string `json:"kind"`
+
+	// Name of the network resource
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+
+// FluxResourceSpec defines a Flux GitOps resource
+type FluxResourceSpec struct {
+	// Kind of the Flux resource
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=HelmRelease;Kustomization
+	Kind string `json:"kind"`
+
+	// Name of the Flux resource
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Whether to trigger reconciliation of this resource during failover
+	// +optional
+	TriggerReconcile bool `json:"triggerReconcile,omitempty"`
+}
+
 // FailoverGroupSpec defines the desired state of FailoverGroup
 type FailoverGroupSpec struct {
 	// Identifier for the operator instance that should process this FailoverGroup
@@ -94,12 +145,12 @@ type FailoverGroupSpec struct {
 	// +optional
 	OperatorID string `json:"operatorID,omitempty"`
 
-	// DefaultFailoverMode determines the default failover approach for all components:
+	// FailoverMode determines the failover approach for all resources in the group:
 	// "safe" ensures data is fully synced before failover,
 	// while "fast" allows immediate transition without waiting.
 	// +kubebuilder:validation:Enum=safe;fast
 	// +kubebuilder:validation:Required
-	DefaultFailoverMode string `json:"defaultFailoverMode"`
+	FailoverMode string `json:"failoverMode"`
 
 	// When true, automatic failovers are disabled (manual override for maintenance)
 	// The operator will not create automatic failovers even if it detects problems
@@ -120,14 +171,90 @@ type FailoverGroupSpec struct {
 	// +optional
 	HeartbeatInterval string `json:"heartbeatInterval,omitempty"`
 
-	// ParentFluxResources defines the Flux resources that need to be suspended during failover operations
+	// Workloads that need scaling and health tracking during failover
 	// +optional
-	ParentFluxResources []ResourceRef `json:"parentFluxResources,omitempty"`
+	Workloads []WorkloadSpec `json:"workloads,omitempty"`
 
-	// Components defines the application components and their associated resources
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinItems=1
-	Components []ComponentSpec `json:"components"`
+	// Network resources that just need annotation flips during failover
+	// +optional
+	NetworkResources []NetworkResourceSpec `json:"networkResources,omitempty"`
+
+	// Flux resources to manage during failover
+	// +optional
+	FluxResources []FluxResourceSpec `json:"fluxResources,omitempty"`
+}
+
+// WorkloadStatus defines the status of a workload
+type WorkloadStatus struct {
+	// Kind of the workload resource
+	Kind string `json:"kind"`
+
+	// Name of the workload resource
+	Name string `json:"name"`
+
+	// Health indicates the health status of the workload
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	Health string `json:"health"`
+
+	// Status provides additional details about the workload status
+	// +optional
+	Status string `json:"status,omitempty"`
+
+	// VolumeReplications contains the status of volume replications associated with this workload
+	// +optional
+	VolumeReplications []VolumeReplicationStatus `json:"volumeReplications,omitempty"`
+}
+
+// VolumeReplicationStatus defines the status of a volume replication
+type VolumeReplicationStatus struct {
+	// Name of the volume replication
+	Name string `json:"name"`
+
+	// Health indicates the replication health status
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	Health string `json:"health"`
+
+	// Status provides additional details about the replication status
+	// +optional
+	Status string `json:"status,omitempty"`
+}
+
+// NetworkResourceStatus defines the status of a network resource
+type NetworkResourceStatus struct {
+	// Kind of the network resource
+	Kind string `json:"kind"`
+
+	// Name of the network resource
+	Name string `json:"name"`
+
+	// Health indicates the health status of the network resource
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	Health string `json:"health"`
+
+	// Status provides additional details about the network resource status
+	// +optional
+	Status string `json:"status,omitempty"`
+}
+
+// FluxResourceStatus defines the status of a Flux GitOps resource
+type FluxResourceStatus struct {
+	// Kind of the Flux resource
+	Kind string `json:"kind"`
+
+	// Name of the Flux resource
+	Name string `json:"name"`
+
+	// Health indicates the health status of the Flux resource
+	// Values: "OK", "DEGRADED", "ERROR"
+	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
+	Health string `json:"health"`
+
+	// Status provides additional details about the Flux resource status
+	// +optional
+	Status string `json:"status,omitempty"`
 }
 
 // FailoverGroupStatus defines the observed state of FailoverGroup
@@ -142,9 +269,17 @@ type FailoverGroupStatus struct {
 	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
 	Health string `json:"health,omitempty"`
 
-	// Components contains status information for each component defined in the spec
+	// Workloads contains status information for each workload defined in the spec
 	// +optional
-	Components []ComponentStatus `json:"components,omitempty"`
+	Workloads []WorkloadStatus `json:"workloads,omitempty"`
+
+	// NetworkResources contains status information for each network resource defined in the spec
+	// +optional
+	NetworkResources []NetworkResourceStatus `json:"networkResources,omitempty"`
+
+	// FluxResources contains status information for each Flux resource defined in the spec
+	// +optional
+	FluxResources []FluxResourceStatus `json:"fluxResources,omitempty"`
 
 	// LastFailoverTime is the time when the last failover operation completed
 	// +optional

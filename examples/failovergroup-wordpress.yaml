@@ -1,0 +1,39 @@
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: FailoverGroup
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  # Single mode for the entire group
+  failoverMode: "safe"
+  
+  # Workloads that need scaling and health tracking
+  workloads:
+    - kind: StatefulSet
+      name: wordpress-db
+      volumeReplications:
+        - wordpress-db-data
+    
+    - kind: Deployment
+      name: wordpress-frontend
+      
+    - kind: CronJob
+      name: wordpress-backup
+  
+  # Network resources that just need annotation flips
+  networkResources:
+    - kind: VirtualService
+      name: wordpress-vs
+    
+    - kind: Ingress
+      name: wordpress-ingress
+      
+  # Flux resources to manage during failover
+  fluxResources:
+    - kind: HelmRelease
+      name: wordpress
+      triggerReconcile: true
+      
+    - kind: Kustomization
+      name: wordpress-config
+      triggerReconcile: false 

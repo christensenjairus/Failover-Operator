@@ -163,4 +163,144 @@ To check if your configuration is loaded correctly, check the operator logs:
 kubectl logs deployment/failover-operator -n system
 ```
 
-Look for log lines containing "Operator configuration loaded" to see the active configuration. 
+Look for log lines containing "Operator configuration loaded" to see the active configuration.
+
+## FailoverGroup Custom Resource
+
+The FailoverGroup custom resource defines a group of resources that should be failed over together. Here's the updated structure of the FailoverGroup CR:
+
+```yaml
+apiVersion: crd.hahomelabs.com/v1alpha1
+kind: FailoverGroup
+metadata:
+  name: example
+  namespace: default
+spec:
+  # Single failover mode for the entire group: "safe" or "fast"
+  # "safe" ensures data is fully synced before failover
+  # "fast" allows immediate transition without waiting
+  failoverMode: "safe"
+  
+  # Optional operator identifier
+  operatorID: "failover-operator"
+  
+  # Optional timeout settings for automatic operations
+  timeouts:
+    transitoryState: "5m"     # Maximum time a FailoverGroup can remain in FAILOVER/FAILBACK states
+    unhealthyPrimary: "2m"    # Time a PRIMARY cluster can remain unhealthy before auto-failover
+    heartbeat: "1m"           # Time without heartbeats before assuming a cluster is down
+  
+  # Optional heartbeat interval
+  heartbeatInterval: "30s"
+  
+  # Optional flag to disable automatic failovers (manual override for maintenance)
+  suspended: false
+  
+  # Optional documentation field explaining why automatic failovers are suspended
+  suspensionReason: ""
+  
+  # Workloads that need scaling and health tracking during failover
+  workloads:
+    - kind: StatefulSet       # Supported kinds: Deployment, StatefulSet, CronJob
+      name: example-db
+      volumeReplications:     # Optional list of volume replications
+        - example-db-data
+    
+    - kind: Deployment
+      name: example-frontend
+      
+    - kind: CronJob
+      name: example-backup
+  
+  # Network resources that just need annotation flips during failover
+  networkResources:
+    - kind: VirtualService    # Supported kinds: VirtualService, Ingress
+      name: example-vs
+    
+    - kind: Ingress
+      name: example-ingress
+      
+  # Flux resources to manage during failover
+  fluxResources:
+    - kind: HelmRelease       # Supported kinds: HelmRelease, Kustomization
+      name: example-helm
+      triggerReconcile: true  # Whether to trigger reconciliation during failover
+      
+    - kind: Kustomization
+      name: example-config
+      triggerReconcile: false
+```
+
+### Resource Management During Failover
+
+The Failover Operator manages different resources during failover as follows:
+
+1. **Workloads**:
+   - `Deployment`: Scaled up/down during failover
+   - `StatefulSet`: Scaled up/down during failover
+   - `CronJob`: Suspended/resumed during failover
+
+2. **Storage**:
+   - `VolumeReplication`: Promoted/demoted during failover (as part of workload config)
+
+3. **Network**:
+   - `VirtualService`: Simple annotation change
+   - `Ingress`: Simple annotation change
+
+4. **GitOps**:
+   - `HelmRelease`: Suspended/resumed and optional reconciliation trigger
+   - `Kustomization`: Suspended/resumed and optional reconciliation trigger
+
+### Status Reporting
+
+The FailoverGroup reports status information for each resource type:
+
+```yaml
+status:
+  state: "PRIMARY"            # "PRIMARY", "STANDBY", "FAILOVER", "FAILBACK"
+  health: "OK"                # "OK", "DEGRADED", "ERROR"
+  
+  # Status information for each workload
+  workloads:
+    - kind: "StatefulSet"
+      name: "example-db"
+      health: "OK"
+      status: "Running normally"
+      volumeReplications:
+        - name: "example-db-data"
+          health: "OK"
+          status: "Replication in sync"
+  
+  # Status information for each network resource
+  networkResources:
+    - kind: "VirtualService"
+      name: "example-vs"
+      health: "OK"
+      status: "Traffic flowing correctly"
+  
+  # Status information for each Flux resource
+  fluxResources:
+    - kind: "HelmRelease"
+      name: "example-helm"
+      health: "OK"
+      status: "Reconciled successfully"
+  
+  # Information about when the last failover occurred
+  lastFailoverTime: "2023-04-01T12:00:00Z"
+  
+  # Global state information synced from DynamoDB
+  globalState:
+    activeCluster: "primary-cluster"
+    thisCluster: "primary-cluster"
+    dbSyncStatus: "Synced"
+    lastSyncTime: "2023-04-01T12:00:00Z"
+    clusters:
+      - name: "primary-cluster"
+        role: "PRIMARY"
+        health: "OK"
+        lastHeartbeat: "2023-04-01T12:00:00Z"
+      - name: "standby-cluster"
+        role: "STANDBY"
+        health: "OK"
+        lastHeartbeat: "2023-04-01T12:00:00Z"
+``` 

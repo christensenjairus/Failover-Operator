@@ -172,60 +172,90 @@ func CreateTestFailoverGroup() *crdv1alpha1.FailoverGroup {
 			Namespace: TestNamespace,
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			OperatorID:          TestOperatorID,
-			DefaultFailoverMode: "safe",
-			Suspended:           false,
-			HeartbeatInterval:   "30s",
+			OperatorID:        TestOperatorID,
+			FailoverMode:      "safe",
+			Suspended:         false,
+			HeartbeatInterval: "30s",
 			Timeouts: crdv1alpha1.TimeoutSettings{
 				TransitoryState:  "5m",
 				UnhealthyPrimary: "2m",
 				Heartbeat:        "1m",
 			},
-			Components: []crdv1alpha1.ComponentSpec{
+			Workloads: []crdv1alpha1.WorkloadSpec{
 				{
-					Name:         "web-app",
-					FailoverMode: "fast",
-					Workloads: []crdv1alpha1.ResourceRef{
-						{
-							Kind: "Deployment",
-							Name: "web-app-deployment",
-						},
-					},
-					VirtualServices: []string{"web-app-vs"},
-					Ingresses:       []string{"web-app-ingress"},
+					Kind: "Deployment",
+					Name: "web-app-deployment",
 				},
 				{
-					Name:         "database",
-					FailoverMode: "safe",
-					Workloads: []crdv1alpha1.ResourceRef{
-						{
-							Kind: "StatefulSet",
-							Name: "database-statefulset",
-						},
+					Kind: "StatefulSet",
+					Name: "database-statefulset",
+					VolumeReplications: []string{
+						"database-volume-replication",
 					},
-					VolumeReplications: []string{"database-volume-replication"},
 				},
 			},
-			ParentFluxResources: []crdv1alpha1.ResourceRef{
+			NetworkResources: []crdv1alpha1.NetworkResourceSpec{
 				{
-					Kind: "Kustomization",
-					Name: "app-stack",
+					Kind: "VirtualService",
+					Name: "web-app-vs",
+				},
+				{
+					Kind: "Ingress",
+					Name: "web-app-ingress",
+				},
+			},
+			FluxResources: []crdv1alpha1.FluxResourceSpec{
+				{
+					Kind:             "Kustomization",
+					Name:             "app-stack",
+					TriggerReconcile: false,
 				},
 			},
 		},
 		Status: crdv1alpha1.FailoverGroupStatus{
 			State:  string(crdv1alpha1.FailoverGroupStatePrimary),
 			Health: "OK",
-			Components: []crdv1alpha1.ComponentStatus{
+			Workloads: []crdv1alpha1.WorkloadStatus{
 				{
-					Name:    "web-app",
-					Health:  "OK",
-					Message: "Web app is healthy",
+					Kind:   "Deployment",
+					Name:   "web-app-deployment",
+					Health: "OK",
+					Status: "Web app is healthy",
 				},
 				{
-					Name:    "database",
-					Health:  "OK",
-					Message: "Database is healthy",
+					Kind:   "StatefulSet",
+					Name:   "database-statefulset",
+					Health: "OK",
+					Status: "Database is healthy",
+					VolumeReplications: []crdv1alpha1.VolumeReplicationStatus{
+						{
+							Name:   "database-volume-replication",
+							Health: "OK",
+							Status: "Volume replication is healthy",
+						},
+					},
+				},
+			},
+			NetworkResources: []crdv1alpha1.NetworkResourceStatus{
+				{
+					Kind:   "VirtualService",
+					Name:   "web-app-vs",
+					Health: "OK",
+					Status: "Virtual service is healthy",
+				},
+				{
+					Kind:   "Ingress",
+					Name:   "web-app-ingress",
+					Health: "OK",
+					Status: "Ingress is healthy",
+				},
+			},
+			FluxResources: []crdv1alpha1.FluxResourceStatus{
+				{
+					Kind:   "Kustomization",
+					Name:   "app-stack",
+					Health: "OK",
+					Status: "Kustomization is healthy",
 				},
 			},
 			LastFailoverTime: TestTime.Format(time.RFC3339),

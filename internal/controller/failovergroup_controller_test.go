@@ -51,10 +51,11 @@ func TestFailoverGroupController(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: crdv1alpha1.FailoverGroupSpec{
-			DefaultFailoverMode: "safe",
-			Components: []crdv1alpha1.ComponentSpec{
+			FailoverMode: "safe",
+			Workloads: []crdv1alpha1.WorkloadSpec{
 				{
-					Name: "test-component",
+					Kind: "Deployment",
+					Name: "test-deployment",
 				},
 			},
 		},

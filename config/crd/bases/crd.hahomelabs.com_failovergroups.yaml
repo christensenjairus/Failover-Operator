@@ -52,101 +52,68 @@ spec:
           spec:
             description: FailoverGroupSpec defines the desired state of FailoverGroup
             properties:
-              components:
-                description: Components defines the application components and their
-                  associated resources
-                items:
-                  description: ComponentSpec defines a component in the application
-                    being managed
-                  properties:
-                    failoverMode:
-                      description: |-
-                        FailoverMode determines the failover approach for this specific component
-                        If not specified, the default failover mode from the parent will be used
-                      enum:
-                      - safe
-                      - fast
-                      type: string
-                    ingresses:
-                      description: Ingresses are the Kubernetes ingress resources
-                        associated with this component
-                      items:
-                        type: string
-                      type: array
-                    name:
-                      description: Name of the component
-                      type: string
-                    virtualServices:
-                      description: VirtualServices are the Istio virtual services
-                        associated with this component
-                      items:
-                        type: string
-                      type: array
-                    volumeReplications:
-                      description: VolumeReplications are the volume replications
-                        associated with this component
-                      items:
-                        type: string
-                      type: array
-                    workloads:
-                      description: Workloads are the resources that make up this component
-                      items:
-                        description: ResourceRef defines a simple reference to a Kubernetes
-                          resource by kind and name
-                        properties:
-                          kind:
-                            description: Kind of the resource
-                            type: string
-                          name:
-                            description: Name of the resource
-                            type: string
-                        required:
-                        - kind
-                        - name
-                        type: object
-                      type: array
-                  required:
-                  - name
-                  type: object
-                minItems: 1
-                type: array
-              defaultFailoverMode:
+              failoverMode:
                 description: |-
-                  DefaultFailoverMode determines the default failover approach for all components:
+                  FailoverMode determines the failover approach for all resources in the group:
                   "safe" ensures data is fully synced before failover,
                   while "fast" allows immediate transition without waiting.
                 enum:
                 - safe
                 - fast
                 type: string
+              fluxResources:
+                description: Flux resources to manage during failover
+                items:
+                  description: FluxResourceSpec defines a Flux GitOps resource
+                  properties:
+                    kind:
+                      description: Kind of the Flux resource
+                      enum:
+                      - HelmRelease
+                      - Kustomization
+                      type: string
+                    name:
+                      description: Name of the Flux resource
+                      type: string
+                    triggerReconcile:
+                      description: Whether to trigger reconciliation of this resource
+                        during failover
+                      type: boolean
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               heartbeatInterval:
                 description: |-
                   How often the operator updates heartbeats in DynamoDB
                   This controls the frequency of cluster health updates in the global state
                 type: string
-              operatorID:
-                description: |-
-                  Identifier for the operator instance that should process this FailoverGroup
-                  This allows running multiple operator instances for different applications
-                type: string
-              parentFluxResources:
-                description: ParentFluxResources defines the Flux resources that need
-                  to be suspended during failover operations
+              networkResources:
+                description: Network resources that just need annotation flips during
+                  failover
                 items:
-                  description: ResourceRef defines a simple reference to a Kubernetes
-                    resource by kind and name
+                  description: NetworkResourceSpec defines a network resource
                   properties:
                     kind:
-                      description: Kind of the resource
+                      description: Kind of the network resource
+                      enum:
+                      - VirtualService
+                      - Ingress
                       type: string
                     name:
-                      description: Name of the resource
+                      description: Name of the network resource
                       type: string
                   required:
                   - kind
                   - name
                   type: object
                 type: array
+              operatorID:
+                description: |-
+                  Identifier for the operator instance that should process this FailoverGroup
+                  This allows running multiple operator instances for different applications
+                type: string
               suspended:
                 description: |-
                   When true, automatic failovers are disabled (manual override for maintenance)
@@ -176,40 +143,39 @@ spec:
                       The operator creates a failover after this period if health status=ERROR
                     type: string
                 type: object
+              workloads:
+                description: Workloads that need scaling and health tracking during
+                  failover
+                items:
+                  description: WorkloadSpec defines a workload resource
+                  properties:
+                    kind:
+                      description: Kind of the workload resource
+                      enum:
+                      - Deployment
+                      - StatefulSet
+                      - CronJob
+                      type: string
+                    name:
+                      description: Name of the workload resource
+                      type: string
+                    volumeReplications:
+                      description: VolumeReplications are the volume replications
+                        associated with this workload
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
             required:
-            - components
-            - defaultFailoverMode
+            - failoverMode
             type: object
           status:
             description: FailoverGroupStatus defines the observed state of FailoverGroup
             properties:
-              components:
-                description: Components contains status information for each component
-                  defined in the spec
-                items:
-                  description: ComponentStatus contains status information for a component
-                  properties:
-                    health:
-                      description: |-
-                        Health indicates the health status of the component
-                        Values: "OK", "DEGRADED", "ERROR"
-                      enum:
-                      - OK
-                      - DEGRADED
-                      - ERROR
-                      type: string
-                    message:
-                      description: Message provides additional details about the component
-                        health
-                      type: string
-                    name:
-                      description: Name of the component
-                      type: string
-                  required:
-                  - health
-                  - name
-                  type: object
-                type: array
               conditions:
                 description: Conditions represent the current state of failover reconciliation.
                 items:
@@ -265,6 +231,38 @@ spec:
                   - reason
                   - status
                   - type
+                  type: object
+                type: array
+              fluxResources:
+                description: FluxResources contains status information for each Flux
+                  resource defined in the spec
+                items:
+                  description: FluxResourceStatus defines the status of a Flux GitOps
+                    resource
+                  properties:
+                    health:
+                      description: |-
+                        Health indicates the health status of the Flux resource
+                        Values: "OK", "DEGRADED", "ERROR"
+                      enum:
+                      - OK
+                      - DEGRADED
+                      - ERROR
+                      type: string
+                    kind:
+                      description: Kind of the Flux resource
+                      type: string
+                    name:
+                      description: Name of the Flux resource
+                      type: string
+                    status:
+                      description: Status provides additional details about the Flux
+                        resource status
+                      type: string
+                  required:
+                  - health
+                  - kind
+                  - name
                   type: object
                 type: array
               globalState:
@@ -338,6 +336,38 @@ spec:
                 description: LastFailoverTime is the time when the last failover operation
                   completed
                 type: string
+              networkResources:
+                description: NetworkResources contains status information for each
+                  network resource defined in the spec
+                items:
+                  description: NetworkResourceStatus defines the status of a network
+                    resource
+                  properties:
+                    health:
+                      description: |-
+                        Health indicates the health status of the network resource
+                        Values: "OK", "DEGRADED", "ERROR"
+                      enum:
+                      - OK
+                      - DEGRADED
+                      - ERROR
+                      type: string
+                    kind:
+                      description: Kind of the network resource
+                      type: string
+                    name:
+                      description: Name of the network resource
+                      type: string
+                    status:
+                      description: Status provides additional details about the network
+                        resource status
+                      type: string
+                  required:
+                  - health
+                  - kind
+                  - name
+                  type: object
+                type: array
               state:
                 description: |-
                   State reflects the actual failover state of the system.
@@ -348,6 +378,65 @@ spec:
                 - FAILOVER
                 - FAILBACK
                 type: string
+              workloads:
+                description: Workloads contains status information for each workload
+                  defined in the spec
+                items:
+                  description: WorkloadStatus defines the status of a workload
+                  properties:
+                    health:
+                      description: |-
+                        Health indicates the health status of the workload
+                        Values: "OK", "DEGRADED", "ERROR"
+                      enum:
+                      - OK
+                      - DEGRADED
+                      - ERROR
+                      type: string
+                    kind:
+                      description: Kind of the workload resource
+                      type: string
+                    name:
+                      description: Name of the workload resource
+                      type: string
+                    status:
+                      description: Status provides additional details about the workload
+                        status
+                      type: string
+                    volumeReplications:
+                      description: VolumeReplications contains the status of volume
+                        replications associated with this workload
+                      items:
+                        description: VolumeReplicationStatus defines the status of
+                          a volume replication
+                        properties:
+                          health:
+                            description: |-
+                              Health indicates the replication health status
+                              Values: "OK", "DEGRADED", "ERROR"
+                            enum:
+                            - OK
+                            - DEGRADED
+                            - ERROR
+                            type: string
+                          name:
+                            description: Name of the volume replication
+                            type: string
+                          status:
+                            description: Status provides additional details about
+                              the replication status
+                            type: string
+                        required:
+                        - health
+                        - name
+                        type: object
+                      type: array
+                  required:
+                  - health
+                  - kind
+                  - name
+                  type: object
+                type: array
             type: object
         type: object
     served: true

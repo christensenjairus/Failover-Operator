@@ -27,7 +27,12 @@ func TestOperationsManagerEnhanced(t *testing.T) {
 	// Setup
 	ctx := logr.NewContext(context.Background(), zap.New(zap.UseDevMode(true)))
 	mockClient := new(TestManagerMock)
-	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
+	baseManager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	operationsManager := NewOperationsManager(baseManager)
 
 	// Test ExecuteFailover
@@ -81,7 +86,12 @@ func TestOperationsManagerEnhanced(t *testing.T) {
 	t.Run("IsLocked", func(t *testing.T) {
 		// Reset mock
 		mockClient = new(TestManagerMock)
-		baseManager = NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
+		baseManager = &BaseManager{
+			client:      mockClient,
+			tableName:   "test-table",
+			clusterName: "test-cluster",
+			operatorID:  "test-operator",
+		}
 		operationsManager = NewOperationsManager(baseManager)
 
 		// Create a mock lock record

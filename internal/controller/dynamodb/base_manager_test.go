@@ -15,7 +15,12 @@ func TestBaseManagerCreation(t *testing.T) {
 	operatorID := "test-operator"
 
 	// Call the function under test
-	baseManager := NewBaseManager(client, tableName, clusterName, operatorID)
+	baseManager := &BaseManager{
+		client:      client,
+		tableName:   tableName,
+		clusterName: clusterName,
+		operatorID:  operatorID,
+	}
 
 	// Verify the results
 	assert.NotNil(t, baseManager)

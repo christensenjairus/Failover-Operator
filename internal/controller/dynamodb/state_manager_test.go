@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 func TestNewStateManager(t *testing.T) {
@@ -139,7 +140,12 @@ func TestGetClusterStatus(t *testing.T) {
 		},
 	}
 
-	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
+	baseManager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -165,7 +171,12 @@ func TestGetClusterStatus(t *testing.T) {
 func TestUpdateClusterStatus(t *testing.T) {
 	// Mock client
 	client := &MockDynamoDBClient{}
-	baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
+	baseManager := &BaseManager{
+		client:      client,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	stateManager := NewStateManager(baseManager)
 
 	// Test context
@@ -188,7 +199,12 @@ func TestUpdateClusterStatus(t *testing.T) {
 func TestUpdateClusterStatusLegacy(t *testing.T) {
 	// Mock client
 	client := &MockDynamoDBClient{}
-	baseManager := NewBaseManager(client, "test-table", "test-cluster", "test-operator")
+	baseManager := &BaseManager{
+		client:      client,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	stateManager := NewStateManager(baseManager)
 
 	// Test context
@@ -221,26 +237,45 @@ func TestUpdateClusterStatusLegacy(t *testing.T) {
 
 func TestGetAllClusterStatuses(t *testing.T) {
 	// Setup
-	mockClient := &MockDynamoDBClient{
-		// Mock query operation to return cluster statuses
-		QueryFunc: func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-			// Return cluster statuses
-			return &dynamodb.QueryOutput{
-				Items: []map[string]types.AttributeValue{
-					{
-						"PK":          &types.AttributeValueMemberS{Value: "GROUP#test-operator#test-namespace#test-name"},
-						"SK":          &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
-						"operatorID":  &types.AttributeValueMemberS{Value: "test-operator"},
-						"clusterName": &types.AttributeValueMemberS{Value: "test-cluster"},
-						"health":      &types.AttributeValueMemberS{Value: string(HealthOK)},
-						"state":       &types.AttributeValueMemberS{Value: string(StatePrimary)},
-					},
-				},
-			}, nil
+	mockClient := &TestManagerMock{}
+
+	// Setup mock for Query operation
+	queryResult := &dynamodb.QueryOutput{
+		Items: []map[string]types.AttributeValue{
+			{
+				"PK":          &types.AttributeValueMemberS{Value: "GROUP#test-operator#test-namespace#test-name"},
+				"SK":          &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
+				"clusterName": &types.AttributeValueMemberS{Value: "test-cluster"},
+			},
 		},
 	}
+	mockClient.On("Query", mock.Anything, mock.Anything).Return(queryResult, nil)
 
-	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
+	// Setup mock for BatchGetItem operation with full cluster details
+	batchGetResult := &dynamodb.BatchGetItemOutput{
+		Responses: map[string][]map[string]types.AttributeValue{
+			"test-table": {
+				{
+					"PK":            &types.AttributeValueMemberS{Value: "GROUP#test-operator#test-namespace#test-name"},
+					"SK":            &types.AttributeValueMemberS{Value: "CLUSTER#test-cluster"},
+					"operatorID":    &types.AttributeValueMemberS{Value: "test-operator"},
+					"clusterName":   &types.AttributeValueMemberS{Value: "test-cluster"},
+					"health":        &types.AttributeValueMemberS{Value: string(HealthOK)},
+					"state":         &types.AttributeValueMemberS{Value: string(StatePrimary)},
+					"lastHeartbeat": &types.AttributeValueMemberS{Value: "2023-01-01T12:00:00Z"},
+				},
+			},
+		},
+	}
+	mockClient.On("BatchGetItem", mock.Anything, mock.Anything).Return(batchGetResult, nil)
+
+	// Create the BaseManager with our mock
+	baseManager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -291,7 +326,12 @@ func TestGetFailoverHistory(t *testing.T) {
 		},
 	}
 
-	baseManager := NewBaseManager(mockClient, "test-table", "test-cluster", "test-operator")
+	baseManager := &BaseManager{
+		client:      mockClient,
+		tableName:   "test-table",
+		clusterName: "test-cluster",
+		operatorID:  "test-operator",
+	}
 	stateManager := NewStateManager(baseManager)
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -371,7 +411,7 @@ func TestDeleteGroupConfig(t *testing.T) {
 	}
 
 	// Create a base manager with the mock client
-	manager := &BaseManager{
+	baseManager := &BaseManager{
 		client:      mockClient,
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -384,7 +424,7 @@ func TestDeleteGroupConfig(t *testing.T) {
 
 	// Call the function
 	ctx := context.Background()
-	err := manager.DeleteGroupConfig(ctx, namespace, name)
+	err := baseManager.DeleteGroupConfig(ctx, namespace, name)
 
 	// Verify results
 	assert.NoError(t, err)
@@ -424,7 +464,7 @@ func TestDeleteAllHistoryRecords(t *testing.T) {
 	}
 
 	// Create a base manager with the mock client
-	manager := &BaseManager{
+	baseManager := &BaseManager{
 		client:      mockClient,
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -437,7 +477,7 @@ func TestDeleteAllHistoryRecords(t *testing.T) {
 
 	// Call the function
 	ctx := context.Background()
-	err := manager.DeleteAllHistoryRecords(ctx, namespace, name)
+	err := baseManager.DeleteAllHistoryRecords(ctx, namespace, name)
 
 	// Verify results
 	assert.NoError(t, err)
@@ -477,7 +517,7 @@ func TestDeleteAllClusterStatuses(t *testing.T) {
 	}
 
 	// Create a base manager with the mock client
-	manager := &BaseManager{
+	baseManager := &BaseManager{
 		client:      mockClient,
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -490,7 +530,7 @@ func TestDeleteAllClusterStatuses(t *testing.T) {
 
 	// Call the function
 	ctx := context.Background()
-	err := manager.DeleteAllClusterStatuses(ctx, namespace, name)
+	err := baseManager.DeleteAllClusterStatuses(ctx, namespace, name)
 
 	// Verify results
 	assert.NoError(t, err)
@@ -511,7 +551,7 @@ func TestDeleteLock(t *testing.T) {
 	}
 
 	// Create a base manager with the mock client
-	manager := &BaseManager{
+	baseManager := &BaseManager{
 		client:      mockClient,
 		tableName:   "test-table",
 		clusterName: "test-cluster",
@@ -524,7 +564,7 @@ func TestDeleteLock(t *testing.T) {
 
 	// Call the function
 	ctx := context.Background()
-	err := manager.DeleteLock(ctx, namespace, name)
+	err := baseManager.DeleteLock(ctx, namespace, name)
 
 	// Verify results
 	assert.NoError(t, err)

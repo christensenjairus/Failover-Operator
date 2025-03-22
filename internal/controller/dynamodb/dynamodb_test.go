@@ -2,6 +2,7 @@ package dynamodb
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -264,13 +265,15 @@ func TestClusterStatusRecord_JsonComponents(t *testing.T) {
 	service := NewDynamoDBService(client, "test-table", "test-cluster", "test-operator")
 
 	// Test marshaling by calling UpdateClusterStatus
+	statusJSON, _ := json.Marshal(statusData)
 	err := service.UpdateClusterStatus(
 		context.Background(),
 		"test-namespace",
 		"test-group",
+		"test-cluster",
 		HealthDegraded,
 		StatePrimary,
-		statusData,
+		string(statusJSON),
 	)
 
 	assert.NoError(t, err)

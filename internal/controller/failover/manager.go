@@ -263,9 +263,10 @@ func (m *Manager) processFailoverGroup(ctx context.Context,
 			ctx,
 			failoverGroup.Namespace,
 			failoverGroup.Name,
+			m.ClusterName,
 			"OK",
 			"STANDBY",
-			nil, // Use nil for StatusData
+			"",
 		); err != nil {
 			log.Error(err, "Failed to register cluster in DynamoDB")
 			// Continue anyway - the verification might still succeed

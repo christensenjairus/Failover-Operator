@@ -107,10 +107,10 @@ func TestDynamoDBIntegration_FullCycle(t *testing.T) {
 	assert.Equal(t, 1, config.Version, "Initial version should be 1")
 
 	// 2. Update cluster status for both clusters
-	err = service.UpdateClusterStatus(ctx, namespace, name, HealthOK, StatePrimary, nil)
+	err = service.UpdateClusterStatus(ctx, namespace, name, "cluster-a", HealthOK, StatePrimary, "{}")
 	require.NoError(t, err, "Failed to update cluster-a status")
 
-	err = service.UpdateClusterStatus(ctx, namespace, name, HealthOK, StateStandby, nil)
+	err = service.UpdateClusterStatus(ctx, namespace, name, "cluster-b", HealthOK, StateStandby, "{}")
 	require.NoError(t, err, "Failed to update cluster-b status")
 
 	// 3. Get all cluster statuses

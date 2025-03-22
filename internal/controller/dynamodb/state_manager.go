@@ -417,6 +417,7 @@ func (m *BaseManager) DeleteAllHistoryRecords(ctx context.Context, namespace, na
 			":pk":        &types.AttributeValueMemberS{Value: pk},
 			":sk_prefix": &types.AttributeValueMemberS{Value: "HISTORY#"},
 		},
+		ProjectionExpression: aws.String("SK"), // Only need the sort key for deletion
 	}
 
 	// Execute the query
@@ -433,39 +434,70 @@ func (m *BaseManager) DeleteAllHistoryRecords(ctx context.Context, namespace, na
 
 	logger.Info("Deleting history records", "count", len(result.Items))
 
-	// Delete each history record
-	var deleteErr error
-	for _, item := range result.Items {
-		// Get the SK value
-		skValue := ""
-		if sk, ok := item["SK"]; ok {
-			if sv, ok := sk.(*types.AttributeValueMemberS); ok {
-				skValue = sv.Value
+	// DynamoDB BatchWriteItem can process up to 25 items in one call
+	// If we have more, we'll need multiple batches
+	const batchSize = 25
+	var errs []error
+
+	for i := 0; i < len(result.Items); i += batchSize {
+		end := i + batchSize
+		if end > len(result.Items) {
+			end = len(result.Items)
+		}
+
+		batch := result.Items[i:end]
+		writeRequests := make([]types.WriteRequest, len(batch))
+
+		for j, item := range batch {
+			sk, ok := item["SK"]
+			if !ok {
+				logger.Error(nil, "Missing SK in item", "item", item)
+				continue
+			}
+
+			writeRequests[j] = types.WriteRequest{
+				DeleteRequest: &types.DeleteRequest{
+					Key: map[string]types.AttributeValue{
+						"PK": &types.AttributeValueMemberS{Value: pk},
+						"SK": sk,
+					},
+				},
 			}
 		}
 
-		if skValue == "" {
-			logger.Error(nil, "History record has no SK value, skipping")
-			continue
-		}
-
-		// Delete the record
-		deleteInput := &dynamodb.DeleteItemInput{
-			TableName: &m.tableName,
-			Key: map[string]types.AttributeValue{
-				"PK": &types.AttributeValueMemberS{Value: pk},
-				"SK": &types.AttributeValueMemberS{Value: skValue},
+		batchInput := &dynamodb.BatchWriteItemInput{
+			RequestItems: map[string][]types.WriteRequest{
+				m.tableName: writeRequests,
 			},
 		}
 
-		if _, err := m.client.DeleteItem(ctx, deleteInput); err != nil {
-			logger.Error(err, "Failed to delete history record", "SK", skValue)
-			deleteErr = err
+		// Execute batch write
+		batchResult, batchErr := m.client.BatchWriteItem(ctx, batchInput)
+		if batchErr != nil {
+			logger.Error(batchErr, "Failed to batch delete history records",
+				"batch", i/batchSize,
+				"items", len(batch))
+			errs = append(errs, batchErr)
+			continue
+		}
+
+		// Handle unprocessed items
+		if len(batchResult.UnprocessedItems) > 0 {
+			if unprocessed, ok := batchResult.UnprocessedItems[m.tableName]; ok && len(unprocessed) > 0 {
+				logger.Info("Some items were not processed in batch delete",
+					"unprocessedCount", len(unprocessed))
+
+				// This is a simplification - in production, you should retry unprocessed items
+				// For now, we'll just log the error
+				errs = append(errs, fmt.Errorf("failed to process %d items in batch delete", len(unprocessed)))
+			}
 		}
 	}
 
-	if deleteErr != nil {
-		return fmt.Errorf("failed to delete some history records: %w", deleteErr)
+	// Check if we had any errors
+	if len(errs) > 0 {
+		logger.Error(nil, "Encountered errors during batch delete operations", "errorCount", len(errs))
+		return fmt.Errorf("encountered %d errors during batch delete operations", len(errs))
 	}
 
 	logger.Info("Successfully deleted all history records",
@@ -494,6 +526,7 @@ func (m *BaseManager) DeleteAllClusterStatuses(ctx context.Context, namespace, n
 			":pk":        &types.AttributeValueMemberS{Value: pk},
 			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
 		},
+		ProjectionExpression: aws.String("SK"), // Only need the sort key for deletion
 	}
 
 	// Execute the query
@@ -510,39 +543,70 @@ func (m *BaseManager) DeleteAllClusterStatuses(ctx context.Context, namespace, n
 
 	logger.Info("Deleting cluster status records", "count", len(result.Items))
 
-	// Delete each cluster status record
-	var deleteErr error
-	for _, item := range result.Items {
-		// Get the SK value
-		skValue := ""
-		if sk, ok := item["SK"]; ok {
-			if sv, ok := sk.(*types.AttributeValueMemberS); ok {
-				skValue = sv.Value
+	// DynamoDB BatchWriteItem can process up to 25 items in one call
+	// If we have more, we'll need multiple batches
+	const batchSize = 25
+	var errs []error
+
+	for i := 0; i < len(result.Items); i += batchSize {
+		end := i + batchSize
+		if end > len(result.Items) {
+			end = len(result.Items)
+		}
+
+		batch := result.Items[i:end]
+		writeRequests := make([]types.WriteRequest, len(batch))
+
+		for j, item := range batch {
+			sk, ok := item["SK"]
+			if !ok {
+				logger.Error(nil, "Missing SK in item", "item", item)
+				continue
+			}
+
+			writeRequests[j] = types.WriteRequest{
+				DeleteRequest: &types.DeleteRequest{
+					Key: map[string]types.AttributeValue{
+						"PK": &types.AttributeValueMemberS{Value: pk},
+						"SK": sk,
+					},
+				},
 			}
 		}
 
-		if skValue == "" {
-			logger.Error(nil, "Cluster status record has no SK value, skipping")
-			continue
-		}
-
-		// Delete the record
-		deleteInput := &dynamodb.DeleteItemInput{
-			TableName: &m.tableName,
-			Key: map[string]types.AttributeValue{
-				"PK": &types.AttributeValueMemberS{Value: pk},
-				"SK": &types.AttributeValueMemberS{Value: skValue},
+		batchInput := &dynamodb.BatchWriteItemInput{
+			RequestItems: map[string][]types.WriteRequest{
+				m.tableName: writeRequests,
 			},
 		}
 
-		if _, err := m.client.DeleteItem(ctx, deleteInput); err != nil {
-			logger.Error(err, "Failed to delete cluster status record", "SK", skValue)
-			deleteErr = err
+		// Execute batch write
+		batchResult, batchErr := m.client.BatchWriteItem(ctx, batchInput)
+		if batchErr != nil {
+			logger.Error(batchErr, "Failed to batch delete cluster status records",
+				"batch", i/batchSize,
+				"items", len(batch))
+			errs = append(errs, batchErr)
+			continue
+		}
+
+		// Handle unprocessed items
+		if len(batchResult.UnprocessedItems) > 0 {
+			if unprocessed, ok := batchResult.UnprocessedItems[m.tableName]; ok && len(unprocessed) > 0 {
+				logger.Info("Some items were not processed in batch delete",
+					"unprocessedCount", len(unprocessed))
+
+				// This is a simplification - in production, you should retry unprocessed items
+				// For now, we'll just log the error
+				errs = append(errs, fmt.Errorf("failed to process %d items in batch delete", len(unprocessed)))
+			}
 		}
 	}
 
-	if deleteErr != nil {
-		return fmt.Errorf("failed to delete some cluster status records: %w", deleteErr)
+	// Check if we had any errors
+	if len(errs) > 0 {
+		logger.Error(nil, "Encountered errors during batch delete operations", "errorCount", len(errs))
+		return fmt.Errorf("encountered %d errors during batch delete operations", len(errs))
 	}
 
 	logger.Info("Successfully deleted all cluster status records",
@@ -799,131 +863,185 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 	// Create a map to store all the statuses
 	statuses := make(map[string]*ClusterStatusRecord)
 
-	// PART 1: Query using the primary key (PK/SK) for records created by this operator
+	// PART 1: Get cluster list using query to find all records with matching PK and SK starting with CLUSTER#
 	pk := m.getGroupPK(namespace, name)
 
 	// Create the query input to find all records with matching PK and SK starting with CLUSTER#
-	primaryInput := &dynamodb.QueryInput{
+	queryInput := &dynamodb.QueryInput{
 		TableName:              &m.tableName,
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk_prefix)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":pk":        &types.AttributeValueMemberS{Value: pk},
 			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
 		},
-		ConsistentRead: aws.Bool(true), // Ensure we get the latest data
+		ProjectionExpression: aws.String("clusterName"),
+		ConsistentRead:       aws.Bool(true), // Ensure we get the latest data
 	}
 
-	// Execute the primary query
-	primaryResult, err := m.client.Query(ctx, primaryInput)
+	// Execute the query to get just the cluster names
+	queryResult, err := m.client.Query(ctx, queryInput)
 	if err != nil {
-		logger.Error(err, "Failed to query cluster statuses by primary key")
-		// Continue to the GSI query even if this fails
+		logger.Error(err, "Failed to query cluster names")
+		// Continue with scan as fallback
 	} else {
-		logger.Info("Found cluster records using primary key", "count", len(primaryResult.Items))
+		// Extract cluster names and prepare for batch get
+		if len(queryResult.Items) > 0 {
+			logger.Info("Found cluster records using query", "count", len(queryResult.Items))
 
-		// Process the primary query results
-		for _, item := range primaryResult.Items {
-			// Extract the cluster name from the item
-			var clusterName string
-			if v, ok := item["clusterName"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					clusterName = sv.Value
-				}
-			}
+			// Prepare batch request items
+			// DynamoDB BatchGetItem can retrieve up to 100 items in one call
+			// If we have more, we'll need multiple batches
+			clusterNames := make([]string, 0, len(queryResult.Items))
 
-			if clusterName == "" {
-				// Skip records without a cluster name
-				logger.Info("Skipping record without cluster name")
-				continue
-			}
-
-			logger.V(1).Info("Processing cluster record", "clusterName", clusterName)
-
-			// Create a new status record
-			status := &ClusterStatusRecord{
-				PK:             pk,
-				SK:             m.getClusterSK(clusterName),
-				OperatorID:     m.operatorID,
-				GroupNamespace: namespace,
-				GroupName:      name,
-				ClusterName:    clusterName,
-				Health:         HealthOK,     // Default value
-				State:          StateStandby, // Default value
-				LastHeartbeat:  time.Now(),   // Default value
-			}
-
-			// Extract string fields
-			if v, ok := item["GSI1PK"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.GSI1PK = sv.Value
-				}
-			}
-			if v, ok := item["GSI1SK"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.GSI1SK = sv.Value
-				}
-			}
-			if v, ok := item["health"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.Health = sv.Value
-				}
-			}
-			if v, ok := item["state"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.State = sv.Value
-				}
-			}
-			if v, ok := item["components"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.Components = sv.Value
-				}
-			}
-			if v, ok := item["operatorID"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.OperatorID = sv.Value
-				}
-			}
-
-			// Extract time fields
-			if v, ok := item["lastHeartbeat"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					if sv.Value != "" {
-						if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
-							status.LastHeartbeat = t
-						} else {
-							logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
-								"clusterName", clusterName,
-								"timestamp", sv.Value)
-							// Keep default time.Now() value
-						}
+			for _, item := range queryResult.Items {
+				if v, ok := item["clusterName"]; ok {
+					if sv, ok := v.(*types.AttributeValueMemberS); ok {
+						clusterNames = append(clusterNames, sv.Value)
 					}
 				}
 			}
 
-			// Add the status to the map
-			statuses[status.ClusterName] = status
+			// Process in batches of 100 (DynamoDB limit)
+			const batchSize = 100
+			for i := 0; i < len(clusterNames); i += batchSize {
+				end := i + batchSize
+				if end > len(clusterNames) {
+					end = len(clusterNames)
+				}
+
+				batchClusterNames := clusterNames[i:end]
+				keys := make([]map[string]types.AttributeValue, 0, len(batchClusterNames))
+
+				// Create keys for batch get
+				for _, clusterName := range batchClusterNames {
+					keys = append(keys, map[string]types.AttributeValue{
+						"PK": &types.AttributeValueMemberS{Value: pk},
+						"SK": &types.AttributeValueMemberS{Value: m.getClusterSK(clusterName)},
+					})
+				}
+
+				// Create batch get input
+				batchInput := &dynamodb.BatchGetItemInput{
+					RequestItems: map[string]types.KeysAndAttributes{
+						m.tableName: {
+							Keys:           keys,
+							ConsistentRead: aws.Bool(true),
+						},
+					},
+				}
+
+				// Execute batch get
+				batchResult, batchErr := m.client.BatchGetItem(ctx, batchInput)
+				if batchErr != nil {
+					logger.Error(batchErr, "Failed to batch get cluster statuses")
+					continue
+				}
+
+				// Process batch get results
+				if items, ok := batchResult.Responses[m.tableName]; ok {
+					for _, item := range items {
+						// Extract the cluster name from the item
+						var clusterName string
+						if v, ok := item["clusterName"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								clusterName = sv.Value
+							}
+						}
+
+						if clusterName == "" {
+							// Skip records without a cluster name
+							logger.Info("Skipping record without cluster name")
+							continue
+						}
+
+						// Create a new status record
+						status := &ClusterStatusRecord{
+							PK:             pk,
+							SK:             m.getClusterSK(clusterName),
+							OperatorID:     m.operatorID,
+							GroupNamespace: namespace,
+							GroupName:      name,
+							ClusterName:    clusterName,
+							Health:         HealthOK,     // Default value
+							State:          StateStandby, // Default value
+							LastHeartbeat:  time.Now(),   // Default value
+						}
+
+						// Extract string fields
+						if v, ok := item["GSI1PK"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								status.GSI1PK = sv.Value
+							}
+						}
+						if v, ok := item["GSI1SK"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								status.GSI1SK = sv.Value
+							}
+						}
+						if v, ok := item["health"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								status.Health = sv.Value
+							}
+						}
+						if v, ok := item["state"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								status.State = sv.Value
+							}
+						}
+						if v, ok := item["components"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								status.Components = sv.Value
+							}
+						}
+
+						// Extract time fields
+						if v, ok := item["lastHeartbeat"]; ok {
+							if sv, ok := v.(*types.AttributeValueMemberS); ok {
+								if sv.Value != "" {
+									if t, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+										status.LastHeartbeat = t
+									} else {
+										logger.V(1).Error(err, "Failed to parse lastHeartbeat timestamp",
+											"clusterName", clusterName,
+											"timestamp", sv.Value)
+										// Keep default time.Now() value
+									}
+								}
+							}
+						}
+
+						// Add the status to the map
+						statuses[status.ClusterName] = status
+					}
+				}
+
+				// Handle unprocessed keys (if any)
+				if len(batchResult.UnprocessedKeys) > 0 {
+					logger.Info("Some items were not processed in batch get",
+						"unprocessedCount", len(batchResult.UnprocessedKeys[m.tableName].Keys))
+				}
+			}
 		}
 	}
 
-	// PART 2: Use a scan operation instead of a GSI query to find all records for this group
-	// This is crucial for finding clusters registered by other operators
-	scanInput := &dynamodb.ScanInput{
-		TableName:        &m.tableName,
-		FilterExpression: aws.String("GSI1SK = :gsi_sk AND begins_with(SK, :sk_prefix)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":gsi_sk":    &types.AttributeValueMemberS{Value: m.getGroupGSI1SK(namespace, name)},
-			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
-		},
-		// Limit the results to avoid scanning the entire table
-		Limit: aws.Int32(100),
-	}
+	// If we didn't find any clusters or there was an error, fall back to scan operation
+	if len(statuses) == 0 {
+		// Fallback to scan operation to find all cluster status records
+		scanInput := &dynamodb.ScanInput{
+			TableName:        &m.tableName,
+			FilterExpression: aws.String("begins_with(SK, :sk_prefix)"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
+			},
+		}
 
-	// Execute the scan instead of GSI query
-	scanResult, err := m.client.Scan(ctx, scanInput)
-	if err != nil {
-		logger.Error(err, "Failed to scan for cluster statuses")
-		// Continue with what we have from the primary query
-	} else {
+		scanResult, err := m.client.Scan(ctx, scanInput)
+		if err != nil {
+			logger.Error(err, "Failed to scan for cluster statuses")
+			// Return empty result if both query and scan failed
+			return statuses, nil
+		}
+
 		logger.Info("Found cluster records using scan", "count", len(scanResult.Items))
 
 		// Process the scan results
@@ -955,8 +1073,6 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 				continue
 			}
 
-			logger.V(1).Info("Processing cluster record from GSI", "clusterName", clusterName)
-
 			// Create a new status record
 			status := &ClusterStatusRecord{
 				PK:             pk,
@@ -996,11 +1112,6 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 					status.Components = sv.Value
 				}
 			}
-			if v, ok := item["operatorID"]; ok {
-				if sv, ok := v.(*types.AttributeValueMemberS); ok {
-					status.OperatorID = sv.Value
-				}
-			}
 
 			// Extract time fields
 			if v, ok := item["lastHeartbeat"]; ok {
@@ -1018,7 +1129,7 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 				}
 			}
 
-			// Add the status to the map, but don't overwrite existing entries from the primary query
+			// Add the status to the map if not already present
 			if _, exists := statuses[clusterName]; !exists {
 				statuses[status.ClusterName] = status
 			}

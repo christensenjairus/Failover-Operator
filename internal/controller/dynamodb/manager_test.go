@@ -16,39 +16,75 @@ type TestManagerMock struct {
 
 // Add missing methods to implement DynamoDBClient interface
 func (m *TestManagerMock) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
-	return &dynamodb.GetItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.GetItemOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
-	return &dynamodb.PutItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.PutItemOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	return &dynamodb.UpdateItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.UpdateItemOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	return &dynamodb.DeleteItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.DeleteItemOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	return &dynamodb.QueryOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.QueryOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
-	return &dynamodb.ScanOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.ScanOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
-	return &dynamodb.TransactWriteItemsOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.TransactWriteItemsOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
-	return &dynamodb.BatchGetItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.BatchGetItemOutput), args.Error(1)
 }
 
 func (m *TestManagerMock) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
-	return &dynamodb.BatchWriteItemOutput{}, nil
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*dynamodb.BatchWriteItemOutput), args.Error(1)
 }
 
 // TestNewBaseManager tests the creation of a new DynamoDB base manager
@@ -60,7 +96,12 @@ func TestNewBaseManager(t *testing.T) {
 	operatorID := "test-operator"
 
 	// Call the function under test
-	manager := NewBaseManager(client, tableName, clusterName, operatorID)
+	manager := &BaseManager{
+		client:      client,
+		tableName:   tableName,
+		clusterName: clusterName,
+		operatorID:  operatorID,
+	}
 
 	// Verify the results
 	assert.NotNil(t, manager, "BaseManager should not be nil")

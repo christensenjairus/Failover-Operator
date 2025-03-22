@@ -2,9 +2,9 @@ package dynamodb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -55,9 +55,36 @@ type DynamoDBService struct {
 	TableName          string
 	volumeStateManager *VolumeStateManager
 	operationsManager  *OperationsManager
+
+	// Cache for frequently accessed data
+	cache        *ServiceCache
+	cacheEnabled bool
+	cacheTTL     time.Duration
+	state        *StateManager
 }
 
-// NewDynamoDBService creates a new DynamoDB service with all required managers
+// ServiceCache provides in-memory caching for DynamoDB service
+type ServiceCache struct {
+	// GroupConfig cache
+	groupConfigs map[string]*CacheEntry
+
+	// ClusterStatus cache
+	clusterStatuses map[string]*CacheEntry
+
+	// GroupState cache
+	groupStates map[string]*CacheEntry
+
+	// Cache mutex
+	mu sync.RWMutex
+}
+
+// CacheEntry represents a cached item with expiration
+type CacheEntry struct {
+	Value      interface{}
+	Expiration time.Time
+}
+
+// NewDynamoDBService creates a new DynamoDB service with optional caching
 func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorID string) *DynamoDBService {
 	// Use default values if empty strings are provided
 	if tableName == "" {
@@ -78,54 +105,306 @@ func NewDynamoDBService(client DynamoDBClient, tableName, clusterName, operatorI
 		}
 	}
 
-	baseManager := NewBaseManager(client, tableName, clusterName, operatorID)
-
-	// Ensure the client is not nil
-	if client == nil {
-		// Create a mock client or log a warning
-		log.Log.Info("Creating DynamoDBService with nil client - using mock mode")
-	}
-
-	operationsManager := NewOperationsManager(baseManager)
-	volumeStateManager := NewVolumeStateManager(baseManager)
-
-	return &DynamoDBService{
-		BaseManager:        baseManager,
-		ClusterName:        clusterName,
-		OperatorID:         operatorID,
-		TableName:          tableName,
-		volumeStateManager: volumeStateManager,
-		operationsManager:  operationsManager,
-	}
-}
-
-// NewBaseManager creates a new DynamoDB manager
-func NewBaseManager(client DynamoDBClient, tableName, clusterName, operatorID string) *BaseManager {
-	// Use default values if empty strings are provided
-	if tableName == "" {
-		tableName = "FailoverOperator"
-	}
-
-	if operatorID == "" {
-		operatorID = "default-operator"
-	}
-
-	// Create a valid clusterName if one is not provided
-	if clusterName == "" {
-		hostname, err := os.Hostname()
-		if err == nil && hostname != "" {
-			clusterName = hostname
-		} else {
-			clusterName = "unknown-cluster"
-		}
-	}
-
-	return &BaseManager{
+	baseManager := &BaseManager{
 		client:      client,
 		tableName:   tableName,
 		clusterName: clusterName,
 		operatorID:  operatorID,
 	}
+	stateManager := NewStateManager(baseManager)
+	operationsManager := NewOperationsManager(baseManager)
+	volumeStateManager := NewVolumeStateManager(baseManager)
+
+	// Create cache with default 30-second TTL
+	return NewDynamoDBServiceWithCache(baseManager, stateManager, operationsManager, volumeStateManager, true, 30*time.Second)
+}
+
+// NewDynamoDBServiceWithCache creates a new DynamoDB service with configurable caching
+func NewDynamoDBServiceWithCache(
+	baseManager *BaseManager,
+	stateManager *StateManager,
+	operationsManager *OperationsManager,
+	volumeStateManager *VolumeStateManager,
+	enableCache bool,
+	cacheTTL time.Duration,
+) *DynamoDBService {
+	cache := &ServiceCache{
+		groupConfigs:    make(map[string]*CacheEntry),
+		clusterStatuses: make(map[string]*CacheEntry),
+		groupStates:     make(map[string]*CacheEntry),
+	}
+
+	service := &DynamoDBService{
+		BaseManager:        baseManager,
+		ClusterName:        baseManager.clusterName,
+		OperatorID:         baseManager.operatorID,
+		TableName:          baseManager.tableName,
+		volumeStateManager: volumeStateManager,
+		operationsManager:  operationsManager,
+		cache:              cache,
+		cacheEnabled:       enableCache,
+		cacheTTL:           cacheTTL,
+		state:              stateManager,
+	}
+
+	// Start background cache cleanup if caching is enabled
+	if enableCache {
+		go service.startCacheCleanup(context.Background())
+	}
+
+	return service
+}
+
+// startCacheCleanup periodically removes expired cache entries
+func (s *DynamoDBService) startCacheCleanup(ctx context.Context) {
+	// Run cleanup every quarter of the TTL duration or at least every 10 seconds
+	cleanupInterval := s.cacheTTL / 4
+	if cleanupInterval < 10*time.Second {
+		cleanupInterval = 10 * time.Second
+	}
+
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Context canceled, exit the goroutine
+			return
+		case <-ticker.C:
+			// Time to clean up expired entries
+			s.cleanupExpiredEntries()
+		}
+	}
+}
+
+// cleanupExpiredEntries removes all expired entries from the cache
+func (s *DynamoDBService) cleanupExpiredEntries() {
+	now := time.Now()
+
+	// Lock the cache for writing
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+
+	// Clean up group configs
+	for key, entry := range s.cache.groupConfigs {
+		if entry.Expiration.Before(now) {
+			delete(s.cache.groupConfigs, key)
+		}
+	}
+
+	// Clean up cluster statuses
+	for key, entry := range s.cache.clusterStatuses {
+		if entry.Expiration.Before(now) {
+			delete(s.cache.clusterStatuses, key)
+		}
+	}
+
+	// Clean up group states
+	for key, entry := range s.cache.groupStates {
+		if entry.Expiration.Before(now) {
+			delete(s.cache.groupStates, key)
+		}
+	}
+}
+
+// GroupConfigKey generates a cache key for group config
+func groupConfigKey(namespace, name string) string {
+	return fmt.Sprintf("config:%s:%s", namespace, name)
+}
+
+// ClusterStatusKey generates a cache key for cluster status
+func clusterStatusKey(namespace, name, clusterName string) string {
+	return fmt.Sprintf("status:%s:%s:%s", namespace, name, clusterName)
+}
+
+// GroupStateKey generates a cache key for group state
+func groupStateKey(namespace, name string) string {
+	return fmt.Sprintf("state:%s:%s", namespace, name)
+}
+
+// GetGroupConfig gets the configuration for a FailoverGroup with caching
+func (s *DynamoDBService) GetGroupConfig(ctx context.Context, namespace, name string) (*GroupConfigRecord, error) {
+	if !s.cacheEnabled {
+		return s.BaseManager.GetGroupConfig(ctx, namespace, name)
+	}
+
+	// Check cache first
+	cacheKey := groupConfigKey(namespace, name)
+	s.cache.mu.RLock()
+	entry, found := s.cache.groupConfigs[cacheKey]
+	s.cache.mu.RUnlock()
+
+	now := time.Now()
+	if found && entry.Expiration.After(now) {
+		// Cache hit
+		if config, ok := entry.Value.(*GroupConfigRecord); ok {
+			return config, nil
+		}
+	}
+
+	// Cache miss or expired, get from DynamoDB
+	config, err := s.BaseManager.GetGroupConfig(ctx, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	s.cache.mu.Lock()
+	s.cache.groupConfigs[cacheKey] = &CacheEntry{
+		Value:      config,
+		Expiration: now.Add(s.cacheTTL),
+	}
+	s.cache.mu.Unlock()
+
+	return config, nil
+}
+
+// UpdateGroupConfig updates the configuration for a FailoverGroup and invalidates cache
+func (s *DynamoDBService) UpdateGroupConfig(ctx context.Context, config *GroupConfigRecord) error {
+	err := s.BaseManager.UpdateGroupConfig(ctx, config)
+	if err != nil {
+		return err
+	}
+
+	if s.cacheEnabled {
+		// Invalidate cache
+		cacheKey := groupConfigKey(config.GroupNamespace, config.GroupName)
+		s.cache.mu.Lock()
+		delete(s.cache.groupConfigs, cacheKey)
+		s.cache.mu.Unlock()
+	}
+
+	return nil
+}
+
+// GetClusterStatus gets the status of a cluster with caching
+func (s *DynamoDBService) GetClusterStatus(ctx context.Context, namespace, name, clusterName string) (*ClusterStatusRecord, error) {
+	if !s.cacheEnabled {
+		return s.BaseManager.GetClusterStatus(ctx, namespace, name, clusterName)
+	}
+
+	// Check cache first
+	cacheKey := clusterStatusKey(namespace, name, clusterName)
+	s.cache.mu.RLock()
+	entry, found := s.cache.clusterStatuses[cacheKey]
+	s.cache.mu.RUnlock()
+
+	now := time.Now()
+	if found && entry.Expiration.After(now) {
+		// Cache hit
+		if status, ok := entry.Value.(*ClusterStatusRecord); ok {
+			return status, nil
+		}
+	}
+
+	// Cache miss or expired, get from DynamoDB
+	status, err := s.BaseManager.GetClusterStatus(ctx, namespace, name, clusterName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache only if we got a valid status
+	if status != nil {
+		s.cache.mu.Lock()
+		s.cache.clusterStatuses[cacheKey] = &CacheEntry{
+			Value:      status,
+			Expiration: now.Add(s.cacheTTL),
+		}
+		s.cache.mu.Unlock()
+	}
+
+	return status, nil
+}
+
+// UpdateClusterStatus updates the status of a cluster and invalidates cache
+func (s *DynamoDBService) UpdateClusterStatus(ctx context.Context, namespace, name, clusterName, health, state string, componentsJSON string) error {
+	err := s.BaseManager.UpdateClusterStatus(ctx, namespace, name, clusterName, health, state, componentsJSON)
+	if err != nil {
+		return err
+	}
+
+	if s.cacheEnabled {
+		// Invalidate cache
+		cacheKey := clusterStatusKey(namespace, name, clusterName)
+		s.cache.mu.Lock()
+		delete(s.cache.clusterStatuses, cacheKey)
+		s.cache.mu.Unlock()
+
+		// Also invalidate group state cache since cluster status affects group state
+		stateKey := groupStateKey(namespace, name)
+		s.cache.mu.Lock()
+		delete(s.cache.groupStates, stateKey)
+		s.cache.mu.Unlock()
+	}
+
+	return nil
+}
+
+// GetGroupState gets the current state of a FailoverGroup with caching
+func (s *DynamoDBService) GetGroupState(ctx context.Context, namespace, name string) (*ManagerGroupState, error) {
+	if !s.cacheEnabled {
+		return s.BaseManager.GetGroupState(ctx, namespace, name)
+	}
+
+	// Check cache first
+	cacheKey := groupStateKey(namespace, name)
+	s.cache.mu.RLock()
+	entry, found := s.cache.groupStates[cacheKey]
+	s.cache.mu.RUnlock()
+
+	now := time.Now()
+	if found && entry.Expiration.After(now) {
+		// Cache hit
+		if state, ok := entry.Value.(*ManagerGroupState); ok {
+			return state, nil
+		}
+	}
+
+	// Cache miss or expired, get from DynamoDB
+	state, err := s.BaseManager.GetGroupState(ctx, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	s.cache.mu.Lock()
+	s.cache.groupStates[cacheKey] = &CacheEntry{
+		Value:      state,
+		Expiration: now.Add(s.cacheTTL),
+	}
+	s.cache.mu.Unlock()
+
+	return state, nil
+}
+
+// ClearCache clears all cached data
+func (s *DynamoDBService) ClearCache() {
+	if !s.cacheEnabled {
+		return
+	}
+
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+
+	s.cache.groupConfigs = make(map[string]*CacheEntry)
+	s.cache.clusterStatuses = make(map[string]*CacheEntry)
+	s.cache.groupStates = make(map[string]*CacheEntry)
+}
+
+// State returns the state manager
+func (s *DynamoDBService) State() *StateManager {
+	return s.state
+}
+
+// Operations returns the operations manager
+func (s *DynamoDBService) Operations() *OperationsManager {
+	return s.operationsManager
+}
+
+// VolumeState returns the volume state manager
+func (s *DynamoDBService) VolumeState() *VolumeStateManager {
+	return s.volumeStateManager
 }
 
 // getGroupPK creates a primary key for a FailoverGroup
@@ -367,29 +646,4 @@ func (s *DynamoDBService) DetectStaleHeartbeats(ctx context.Context, namespace, 
 func (s *DynamoDBService) GetAllClusterStatuses(ctx context.Context, namespace, name string) (map[string]*ClusterStatusRecord, error) {
 	// Delegate to the BaseManager's implementation to properly query for all cluster statuses
 	return s.BaseManager.GetAllClusterStatuses(ctx, namespace, name)
-}
-
-// UpdateClusterStatus updates the status of a cluster in DynamoDB
-func (s *DynamoDBService) UpdateClusterStatus(ctx context.Context, namespace, name, health, state string, statusData *StatusData) error {
-	// This is a stub implementation that would typically update the status of a cluster in DynamoDB
-	logger := log.FromContext(ctx).WithValues(
-		"namespace", namespace,
-		"name", name,
-		"health", health,
-		"state", state,
-	)
-	logger.V(1).Info("Updating cluster status")
-
-	// Convert StatusData to JSON for components if provided
-	componentsJSON := ""
-	if statusData != nil {
-		jsonBytes, err := json.Marshal(statusData)
-		if err != nil {
-			return fmt.Errorf("failed to marshal status data: %w", err)
-		}
-		componentsJSON = string(jsonBytes)
-	}
-
-	// Forward to base manager implementation with the current cluster name
-	return s.BaseManager.UpdateClusterStatus(ctx, namespace, name, s.ClusterName, health, state, componentsJSON)
 }

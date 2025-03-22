@@ -18,6 +18,7 @@ package failovergroup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -105,14 +106,29 @@ func (m *Manager) UpdateDynamoDBStatus(ctx context.Context, failoverGroup *crdv1
 	// Determine role based on the FailoverGroup status
 	role := m.determineClusterRole(failoverGroup)
 
+	// Convert statusData to JSON string for storage
+	var componentsJSON string
+	if statusData != nil {
+		jsonBytes, err := json.Marshal(statusData)
+		if err != nil {
+			log.Error(err, "Failed to marshal status data to JSON")
+			componentsJSON = "{}" // Use empty object as fallback
+		} else {
+			componentsJSON = string(jsonBytes)
+		}
+	} else {
+		componentsJSON = "{}" // Empty JSON object if no status data
+	}
+
 	// Update the status in DynamoDB with real data
 	return m.DynamoDBManager.UpdateClusterStatus(
 		ctx,
 		failoverGroup.Namespace,
 		failoverGroup.Name,
-		health, // Use actual health status
+		m.ClusterName, // Add the cluster name
+		health,        // Use actual health status
 		role,
-		statusData,
+		componentsJSON,
 	)
 }
 
@@ -537,9 +553,10 @@ func (m *Manager) syncAllFailoverGroups(ctx context.Context) error {
 						ctx,
 						failoverGroup.Namespace,
 						failoverGroup.Name,
+						m.ClusterName,
 						"OK", // Default health
 						role,
-						nil, // No detailed status yet
+						"{}", // Empty JSON object for componentsJSON
 					); err != nil {
 						log.Error(err, "Failed to register cluster in DynamoDB")
 					} else {

@@ -40,6 +40,8 @@ type Factory struct {
 type DependencyInjector interface {
 	// InjectDependencies injects dependencies into the task
 	InjectDependencies(task WorkflowTask) error
+	// GetClient returns the Kubernetes client
+	GetClient() client.Client
 }
 
 // NewFactory creates a new workflow factory
@@ -105,15 +107,6 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 	initStage.Tasks = append(initStage.Tasks, NewAcquireLockTask(ctx))
 	workflow.Stages = append(workflow.Stages, initStage)
 
-	// Add a task to update the workflow state
-	workflowStateStage := &WorkflowStage{
-		Name:        "UpdateWorkflowState",
-		Description: "Update the FailoverGroup status to reflect the current workflow operation",
-		Tasks:       []WorkflowTask{},
-	}
-	workflowStateStage.Tasks = append(workflowStateStage.Tasks, NewUpdateWorkflowStateTask(ctx))
-	workflow.Stages = append(workflow.Stages, workflowStateStage)
-
 	// Tasks that are executed only on source cluster
 	if ctx.IsSourceCluster {
 		// STAGE 2: SOURCE CLUSTER SHUTDOWN
@@ -122,9 +115,6 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 			Description: "CONSISTENCY MODE: Deactivate the source cluster before activating target to ensure data integrity",
 			Tasks:       []WorkflowTask{},
 		}
-
-		// Add phase update task at beginning of stage
-		sourceShutdownStage.Tasks = append(sourceShutdownStage.Tasks, NewSetWorkflowPhaseTask(ctx, "SCALING_DOWN_SOURCE"))
 
 		// Add source shutdown tasks
 		sourceShutdownStage.Tasks = append(sourceShutdownStage.Tasks, NewUpdateNetworkResourcesTask(ctx, "disable"))
@@ -139,9 +129,6 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 			Description: "CONSISTENCY MODE: Demote volumes in source cluster and signal readiness for target promotion",
 			Tasks:       []WorkflowTask{},
 		}
-
-		// Add phase update task at beginning of stage
-		volumeTransitionStage.Tasks = append(volumeTransitionStage.Tasks, NewSetWorkflowPhaseTask(ctx, "DEMOTING_VOLUMES"))
 
 		// Add volume transition tasks with more detailed descriptions for CONSISTENCY mode
 		volumeTransitionStage.Tasks = append(volumeTransitionStage.Tasks, NewDemoteVolumesTask(ctx))
@@ -159,9 +146,6 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 			Tasks:       []WorkflowTask{},
 		}
 
-		// Add phase update task at beginning of stage
-		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewSetWorkflowPhaseTask(ctx, "PROMOTING_VOLUMES"))
-
 		// Add target volume tasks with more detailed descriptions for CONSISTENCY mode
 		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewWaitForVolumesReadyForPromotionTask(ctx))
 		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewPromoteVolumesTask(ctx))
@@ -175,9 +159,6 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 			Description: "CONSISTENCY MODE: Activate target cluster only after volumes are successfully promoted",
 			Tasks:       []WorkflowTask{},
 		}
-
-		// Add phase update task at beginning of stage
-		targetActivationStage.Tasks = append(targetActivationStage.Tasks, NewSetWorkflowPhaseTask(ctx, "SCALING_UP_TARGET"))
 
 		// Add target activation tasks
 		targetActivationStage.Tasks = append(targetActivationStage.Tasks, NewScaleUpWorkloadsTask(ctx))
@@ -194,13 +175,9 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		Tasks:       []WorkflowTask{},
 	}
 
-	// Add phase update task at beginning of stage
-	completionStage.Tasks = append(completionStage.Tasks, NewSetWorkflowPhaseTask(ctx, "TRANSFERRING_OWNERSHIP"))
-
 	// Add completion tasks
 	completionStage.Tasks = append(completionStage.Tasks, NewUpdateGlobalStateTask(ctx))
 	completionStage.Tasks = append(completionStage.Tasks, NewRecordFailoverHistoryTask(ctx))
-	completionStage.Tasks = append(completionStage.Tasks, NewResetWorkflowStateTask(ctx))
 	completionStage.Tasks = append(completionStage.Tasks, NewReleaseLockTask(ctx))
 	workflow.Stages = append(workflow.Stages, completionStage)
 
@@ -228,15 +205,6 @@ func (f *Factory) createUptimeModeWorkflow(ctx *WorkflowContext) *Workflow {
 	initStage.Tasks = append(initStage.Tasks, NewAcquireLockTask(ctx))
 	workflow.Stages = append(workflow.Stages, initStage)
 
-	// Add a task to update the workflow state
-	workflowStateStage := &WorkflowStage{
-		Name:        "UpdateWorkflowState",
-		Description: "Update the FailoverGroup status to reflect the current workflow operation",
-		Tasks:       []WorkflowTask{},
-	}
-	workflowStateStage.Tasks = append(workflowStateStage.Tasks, NewUpdateWorkflowStateTask(ctx))
-	workflow.Stages = append(workflow.Stages, workflowStateStage)
-
 	// Tasks that are executed only on target cluster
 	if ctx.IsTargetCluster {
 		// STAGE 2: TARGET CLUSTER PREPARATION
@@ -245,9 +213,6 @@ func (f *Factory) createUptimeModeWorkflow(ctx *WorkflowContext) *Workflow {
 			Description: "Prepare target cluster by promoting volumes and scaling up workloads",
 			Tasks:       []WorkflowTask{},
 		}
-
-		// Add phase update task at beginning of stage
-		targetPrepStage.Tasks = append(targetPrepStage.Tasks, NewSetWorkflowPhaseTask(ctx, "PROMOTING_TARGET_VOLUMES"))
 
 		// Add target preparation tasks
 		targetPrepStage.Tasks = append(targetPrepStage.Tasks, NewPromoteVolumesTask(ctx))
@@ -266,9 +231,6 @@ func (f *Factory) createUptimeModeWorkflow(ctx *WorkflowContext) *Workflow {
 			Tasks:       []WorkflowTask{},
 		}
 
-		// Add phase update task at beginning of stage
-		trafficTransitionStage.Tasks = append(trafficTransitionStage.Tasks, NewSetWorkflowPhaseTask(ctx, "SWITCHING_TRAFFIC"))
-
 		// Add traffic transition tasks
 		trafficTransitionStage.Tasks = append(trafficTransitionStage.Tasks, NewWaitForTargetReadyForTrafficTask(ctx))
 		trafficTransitionStage.Tasks = append(trafficTransitionStage.Tasks, NewUpdateNetworkResourcesTask(ctx, "enable"))
@@ -284,9 +246,6 @@ func (f *Factory) createUptimeModeWorkflow(ctx *WorkflowContext) *Workflow {
 			Description: "Deactivate the source cluster after target is serving traffic",
 			Tasks:       []WorkflowTask{},
 		}
-
-		// Add phase update task at beginning of stage
-		sourceDeactivationStage.Tasks = append(sourceDeactivationStage.Tasks, NewSetWorkflowPhaseTask(ctx, "DEACTIVATING_SOURCE"))
 
 		// Add source deactivation tasks
 		sourceDeactivationStage.Tasks = append(sourceDeactivationStage.Tasks, NewWaitForTrafficTransitionCompleteTask(ctx))
@@ -306,13 +265,9 @@ func (f *Factory) createUptimeModeWorkflow(ctx *WorkflowContext) *Workflow {
 		Tasks:       []WorkflowTask{},
 	}
 
-	// Add phase update task at beginning of stage
-	completionStage.Tasks = append(completionStage.Tasks, NewSetWorkflowPhaseTask(ctx, "TRANSFERRING_OWNERSHIP"))
-
 	// Add completion tasks
 	completionStage.Tasks = append(completionStage.Tasks, NewUpdateGlobalStateTask(ctx))
 	completionStage.Tasks = append(completionStage.Tasks, NewRecordFailoverHistoryTask(ctx))
-	completionStage.Tasks = append(completionStage.Tasks, NewResetWorkflowStateTask(ctx))
 	completionStage.Tasks = append(completionStage.Tasks, NewReleaseLockTask(ctx))
 	workflow.Stages = append(workflow.Stages, completionStage)
 

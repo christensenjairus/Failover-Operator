@@ -56,55 +56,138 @@ func (t *BaseTask) GetDescription() string {
 	return t.TaskDescription
 }
 
-// UpdateFailoverGroupState updates the FailoverGroup.Status.State field
+// GetBaseTaskField provides a utility method to access BaseTask fields
+// This should be implemented by all task types
+type GetBaseTaskField interface {
+	GetClient() client.Client
+	GetLogger() logr.Logger
+}
+
+// Implement GetClient on BaseTask
+func (t *BaseTask) GetClient() client.Client {
+	return t.Client
+}
+
+// Implement GetLogger on BaseTask
+func (t *BaseTask) GetLogger() logr.Logger {
+	return t.Logger
+}
+
+// UpdateFailoverState updates the Failover.Status.State field
 // and ensures the changes are published to the API server
-func (t *BaseTask) UpdateFailoverGroupState(ctx context.Context, group *crdv1alpha1.FailoverGroup, state string) error {
+func (t *BaseTask) UpdateFailoverState(ctx context.Context, failover *crdv1alpha1.Failover, state string) error {
+	// Always update the in-memory state
+	failover.Status.State = state
+
+	t.Logger.Info("Updating Failover state",
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+		"currentState", failover.Status.State)
+
+	// If client is nil, we can't update the server
 	if t.Client == nil {
-		t.Logger.Error(nil, "Cannot update FailoverGroup state - Client not initialized")
-		return fmt.Errorf("client not initialized")
+		t.Logger.Error(nil, "Cannot update Failover state - Client not initialized in BaseTask")
+		t.Logger.Info("Task type info for debugging",
+			"taskName", t.TaskName,
+			"taskType", fmt.Sprintf("%T", t))
+		return fmt.Errorf("client not initialized in BaseTask")
+	}
+
+	// Skip API updates for minor state changes if frequent updates are disabled
+	// This helps avoid rate limiting while still tracking major phases
+	if !EnableFrequentStateUpdates {
+		// Only update the API for these major workflow phases
+		majorPhases := map[string]bool{
+			"VALIDATING":             true,
+			"IN_PROGRESS":            true,
+			"ACQUIRING_LOCK":         true,
+			"DEMOTING_VOLUMES":       true,
+			"PROMOTING_VOLUMES":      true,
+			"SCALING_DOWN_WORKLOADS": true,
+			"SCALING_UP_WORKLOADS":   true,
+			"UPDATING_GLOBAL_STATE":  true,
+			"FINISHING":              true,
+			"SUCCESS":                true,
+			"FAILED":                 true,
+		}
+
+		if !majorPhases[state] {
+			t.Logger.Info("Skipping API update for minor state change (rate limiting protection)",
+				"state", state,
+				"task", t.TaskName)
+			return nil
+		}
+	}
+
+	// Create a copy of the failover to avoid modifying the shared instance
+	failoverCopy := failover.DeepCopy()
+
+	// Update status - use a simple Update to reduce API calls
+	// We've already updated the in-memory state, which is what shows in logs
+	// This helps avoid rate limiting issues while still tracking state progress
+	err := t.Client.Status().Update(ctx, failoverCopy)
+	if err != nil {
+		// Log the error but don't fail the task
+		t.Logger.Error(err, "Failed to update Failover state in Kubernetes API",
+			"namespace", failover.Namespace,
+			"name", failover.Name,
+			"state", state)
+
+		// Don't attempt another update to avoid further rate limiting
+		// Just continue with task execution
+		return nil
+	}
+
+	t.Logger.Info("Successfully updated Failover state in Kubernetes API",
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+		"state", state)
+
+	return nil
+}
+
+// DelayAfterExecution adds a delay after task execution to make workflow progression
+// easier to observe in k9s. This is for testing purposes only.
+func (t *BaseTask) DelayAfterExecution() {
+	if !EnableTestingDelays {
+		return
+	}
+
+	t.Logger.Info("Adding delay for testing to observe workflow changes in k9s",
+		"duration", TestingDelayDuration)
+	time.Sleep(TestingDelayDuration)
+}
+
+// SetSuspendedStatus updates the FailoverGroup.Status.Suspended field to match the spec
+func (t *BaseTask) UpdateFailoverGroupSuspended(ctx context.Context, group *crdv1alpha1.FailoverGroup) error {
+	if t.Client == nil {
+		t.Logger.Error(nil, "Cannot update FailoverGroup suspended status - Client not initialized in BaseTask")
+		return fmt.Errorf("client not initialized in BaseTask")
 	}
 
 	// Create a copy of the group to avoid modifying the shared instance
 	groupCopy := group.DeepCopy()
 
-	// Set new state
-	groupCopy.Status.State = state
-
-	// Also update health status based on state
-	if state == "PRIMARY" || state == "STANDBY" {
-		// For normal operational states, determine health based on primary cluster
-		primaryHealth := "UNKNOWN"
-		for _, cluster := range groupCopy.Status.GlobalState.Clusters {
-			if cluster.Role == "PRIMARY" {
-				primaryHealth = cluster.Health
-				break
-			}
-		}
-		groupCopy.Status.Health = primaryHealth
-	} else {
-		// For transitional states (FAILOVER, FAILBACK, or custom phases), show as DEGRADED
-		groupCopy.Status.Health = "DEGRADED"
-	}
+	// Set suspended status to match spec
+	groupCopy.Status.Suspended = groupCopy.Spec.Suspended
 
 	// Update status
 	err := t.Client.Status().Update(ctx, groupCopy)
 	if err != nil {
-		t.Logger.Error(err, "Failed to update FailoverGroup state",
+		t.Logger.Error(err, "Failed to update FailoverGroup suspended status",
 			"namespace", group.Namespace,
 			"name", group.Name,
-			"state", state)
+			"suspended", groupCopy.Status.Suspended)
 		return err
 	}
 
 	// Update the original group reference to match what was sent to the server
-	group.Status.State = state
-	group.Status.Health = groupCopy.Status.Health
+	group.Status.Suspended = groupCopy.Status.Suspended
 
-	t.Logger.Info("Successfully updated FailoverGroup state",
+	t.Logger.Info("Successfully updated FailoverGroup suspended status",
 		"namespace", group.Namespace,
 		"name", group.Name,
-		"state", state,
-		"health", groupCopy.Status.Health)
+		"suspended", group.Status.Suspended)
 
 	return nil
 }
@@ -133,7 +216,14 @@ func NewValidateFailoverTask(ctx *WorkflowContext) *ValidateFailoverTask {
 func (t *ValidateFailoverTask) Execute(ctx context.Context) error {
 	// Get the failover group
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
 	targetCluster := t.Context.TargetClusterName
+
+	// Update the Failover state to show we're validating
+	if err := t.UpdateFailoverState(ctx, failover, "VALIDATING"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Check if target cluster exists in the failover group
 	targetExists := false
@@ -179,6 +269,10 @@ func (t *ValidateFailoverTask) Execute(ctx context.Context) error {
 
 	// Log successful validation
 	t.Logger.Info("Failover prerequisites validated successfully")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -200,9 +294,21 @@ func NewAcquireLockTask(ctx *WorkflowContext) *AcquireLockTask {
 
 // Execute performs the task
 func (t *AcquireLockTask) Execute(ctx context.Context) error {
+	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+	clusterName := t.Context.ClusterName
+
+	// Update the Failover state to show we're acquiring lock
+	if err := t.UpdateFailoverState(ctx, failover, "ACQUIRING_LOCK"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
+
+	// Acquire the lock in DynamoDB
 	t.Logger.Info("Acquiring lock for failover group",
-		"namespace", t.Context.FailoverGroup.Namespace,
-		"name", t.Context.FailoverGroup.Name)
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+		"clusterName", clusterName)
 
 	if t.DynamoDBManager == nil {
 		// If DynamoDBManager is not available, just simulate the acquisition for development/testing
@@ -212,6 +318,7 @@ func (t *AcquireLockTask) Execute(ctx context.Context) error {
 		t.Context.LeaseToken = fmt.Sprintf("simulated-lock-%s", uuid.New().String())
 
 		// Even without DynamoDB, the workflow should continue for testing purposes
+		t.DelayAfterExecution()
 		return nil
 	}
 
@@ -221,6 +328,8 @@ func (t *AcquireLockTask) Execute(ctx context.Context) error {
 			"group", t.Context.FailoverGroup.Name)
 		t.Context.LeaseToken = fmt.Sprintf("forced-bypass-%s", uuid.New().String())
 		t.Context.Results["SourceClusterHoldsLock"] = true
+
+		t.DelayAfterExecution()
 		return nil
 	}
 
@@ -252,6 +361,8 @@ func (t *AcquireLockTask) Execute(ctx context.Context) error {
 
 				// Set a special lease token that indicates we're proceeding despite the lock
 				t.Context.LeaseToken = fmt.Sprintf("forced-lock-bypass-%s", uuid.New().String())
+
+				t.DelayAfterExecution()
 				return nil
 			}
 		}
@@ -266,6 +377,9 @@ func (t *AcquireLockTask) Execute(ctx context.Context) error {
 
 	// Store the lease token in the workflow context
 	t.Context.LeaseToken = leaseToken
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
 
 	return nil
 }
@@ -324,6 +438,7 @@ func NewUpdateNetworkResourcesTask(ctx *WorkflowContext, action string) *UpdateN
 // Execute performs the task
 func (t *UpdateNetworkResourcesTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
 
 	// Log what we're doing
 	action := "enabling"
@@ -331,6 +446,13 @@ func (t *UpdateNetworkResourcesTask) Execute(ctx context.Context) error {
 		action = "disabling"
 	} else if t.Action == "transition" {
 		action = "transitioning"
+	}
+
+	// Update the Failover state to show we're updating network resources
+	stateMsg := fmt.Sprintf("NETWORK_%s", strings.ToUpper(t.Action))
+	if err := t.UpdateFailoverState(ctx, failover, stateMsg); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
 	}
 
 	t.Logger.Info(fmt.Sprintf("%s network resources for traffic routing", action),
@@ -365,6 +487,13 @@ func NewScaleDownWorkloadsTask(ctx *WorkflowContext) *ScaleDownWorkloadsTask {
 // Execute performs the task
 func (t *ScaleDownWorkloadsTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're scaling down workloads
+	if err := t.UpdateFailoverState(ctx, failover, "SCALING_DOWN_WORKLOADS"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Process each workload based on its kind
 	for _, workload := range failoverGroup.Spec.Workloads {
@@ -392,6 +521,10 @@ func (t *ScaleDownWorkloadsTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Workloads scaled down successfully")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -414,6 +547,17 @@ func NewDisableFluxReconciliationTask(ctx *WorkflowContext) *DisableFluxReconcil
 // Execute performs the task
 func (t *DisableFluxReconciliationTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're disabling Flux reconciliation
+	if err := t.UpdateFailoverState(ctx, failover, "DISABLING_FLUX"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
+
+	t.Logger.Info("Disabling Flux reconciliation for failover group workloads",
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name)
 
 	// Process each Flux resource
 	for _, fluxResource := range failoverGroup.Spec.FluxResources {
@@ -424,6 +568,10 @@ func (t *DisableFluxReconciliationTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Flux reconciliation disabled for resources")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -454,6 +602,10 @@ func (t *WaitForWorkloadsScaledDownTask) Execute(ctx context.Context) error {
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("All workloads successfully scaled down")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -480,6 +632,13 @@ func NewDemoteVolumesTask(ctx *WorkflowContext) *DemoteVolumesTask {
 // Execute performs the task
 func (t *DemoteVolumesTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're demoting volumes
+	if err := t.UpdateFailoverState(ctx, failover, "DEMOTING_VOLUMES"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Find all volume replications to demote
 	for _, workload := range failoverGroup.Spec.Workloads {
@@ -492,6 +651,10 @@ func (t *DemoteVolumesTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Volumes demoted to Secondary role")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -522,10 +685,14 @@ func (t *WaitForVolumesDemotedTask) Execute(ctx context.Context) error {
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("All volumes successfully demoted to Secondary role")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
-// UpdateWorkflowStateTask updates the FailoverGroup.Status.State field
+// UpdateWorkflowStateTask updates the Failover.Status.State field
 // to reflect the current failover workflow stage
 type UpdateWorkflowStateTask struct {
 	BaseTask
@@ -537,42 +704,52 @@ func NewUpdateWorkflowStateTask(ctx *WorkflowContext) *UpdateWorkflowStateTask {
 	return &UpdateWorkflowStateTask{
 		BaseTask: BaseTask{
 			TaskName:        "UpdateWorkflowState",
-			TaskDescription: "Update the FailoverGroup state to reflect the current failover operation",
+			TaskDescription: "Update the Failover state to reflect the current failover operation",
 			Context:         ctx,
 		},
 	}
 }
 
-// Execute updates the State in FailoverGroup status
+// Execute updates the State in Failover status
 func (t *UpdateWorkflowStateTask) Execute(ctx context.Context) error {
+	failover := t.Context.Failover
 	failoverGroup := t.Context.FailoverGroup
 
-	// Determine the appropriate state based on the cluster's role in the failover
+	// Determine state based on source/target roles
 	var state string
-	if t.Context.IsTargetCluster {
-		state = "FAILOVER"
-		t.Logger.Info("Setting target cluster state to FAILOVER",
-			"namespace", failoverGroup.Namespace,
-			"name", failoverGroup.Name)
-	} else if t.Context.IsSourceCluster {
-		state = "FAILBACK"
-		t.Logger.Info("Setting source cluster state to FAILBACK",
-			"namespace", failoverGroup.Namespace,
-			"name", failoverGroup.Name)
-	} else {
-		// This shouldn't happen, but if we're not on source or target, don't update state
-		t.Logger.Info("Not updating state because this cluster is neither source nor target",
-			"thisCluster", t.Context.ClusterName,
-			"sourceCluster", t.Context.SourceClusterName,
-			"targetCluster", t.Context.TargetClusterName)
-		return nil
+	for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
+		if cluster.Name == failoverGroup.Status.GlobalState.ActiveCluster {
+			if cluster.Role == "PRIMARY" {
+				state = "PREPARING"
+			} else {
+				state = "TRANSITION"
+			}
+		}
 	}
 
-	// Update state using helper
-	return t.UpdateFailoverGroupState(ctx, failoverGroup, state)
+	if state == "" {
+		state = "IN_PROGRESS"
+	}
+
+	t.Logger.Info("Updating Failover state",
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+		"current", failover.Status.State,
+		"new", state)
+
+	// Update the state using the helper method
+	if err := t.UpdateFailoverState(ctx, failover, state); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		return err
+	}
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
+	return nil
 }
 
-// ResetWorkflowStateTask resets the FailoverGroup.Status.State field
+// ResetWorkflowStateTask resets the Failover.Status.State field
 // back to the normal operational state after failover completes
 type ResetWorkflowStateTask struct {
 	BaseTask
@@ -584,29 +761,46 @@ func NewResetWorkflowStateTask(ctx *WorkflowContext) *ResetWorkflowStateTask {
 	return &ResetWorkflowStateTask{
 		BaseTask: BaseTask{
 			TaskName:        "ResetWorkflowState",
-			TaskDescription: "Reset the FailoverGroup state after failover completion",
+			TaskDescription: "Reset the Failover state after failover completion",
 			Context:         ctx,
 		},
 	}
 }
 
-// Execute resets the State in FailoverGroup status
+// Execute resets the State in Failover status
 func (t *ResetWorkflowStateTask) Execute(ctx context.Context) error {
-	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
 
-	// Determine the appropriate state based on the cluster's role
+	// Determine state based on the cluster's role
 	var state string
-	if t.Context.ClusterName == t.Context.TargetClusterName {
+	if t.Context.IsTargetCluster {
 		state = "PRIMARY"
-	} else {
+	} else if t.Context.IsSourceCluster {
 		state = "STANDBY"
+	} else {
+		// In case we're in neither the source nor target cluster
+		state = "COMPLETED"
 	}
 
-	// Update state using helper
-	return t.UpdateFailoverGroupState(ctx, failoverGroup, state)
+	t.Logger.Info("Resetting Failover state",
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+		"current", failover.Status.State,
+		"new", state)
+
+	// Update the state using the helper method
+	if err := t.UpdateFailoverState(ctx, failover, state); err != nil {
+		t.Logger.Error(err, "Failed to reset Failover state")
+		return err
+	}
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
+	return nil
 }
 
-// SetWorkflowPhaseTask updates the FailoverGroup.Status.State field to show
+// SetWorkflowPhaseTask updates the Failover.Status.State field to show
 // specific phases during the failover process
 type SetWorkflowPhaseTask struct {
 	BaseTask
@@ -619,23 +813,36 @@ func NewSetWorkflowPhaseTask(ctx *WorkflowContext, phase string) *SetWorkflowPha
 	return &SetWorkflowPhaseTask{
 		BaseTask: BaseTask{
 			TaskName:        "SetWorkflowPhase_" + phase,
-			TaskDescription: "Update the FailoverGroup state to show the " + phase + " phase",
+			TaskDescription: "Update the Failover state to show the " + phase + " phase",
 			Context:         ctx,
 		},
 		Phase: phase,
 	}
 }
 
-// Execute updates the State in FailoverGroup status to show the current phase
+// Execute updates the State in Failover status to show the current phase
 func (t *SetWorkflowPhaseTask) Execute(ctx context.Context) error {
-	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
 
-	// Log the phase we're setting
-	t.Logger.Info("Setting workflow phase",
-		"namespace", failoverGroup.Namespace,
-		"name", failoverGroup.Name,
+	t.Logger.Info("Setting Failover workflow phase",
+		"namespace", failover.Namespace,
+		"name", failover.Name,
+		"current", failover.Status.State,
 		"phase", t.Phase)
 
-	// Update state using helper
-	return t.UpdateFailoverGroupState(ctx, failoverGroup, t.Phase)
+	// Update the state using the helper method
+	if err := t.UpdateFailoverState(ctx, failover, t.Phase); err != nil {
+		t.Logger.Error(err, "Failed to set Failover phase")
+		return err
+	}
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
+	return nil
+}
+
+// GetBaseTask returns the BaseTask
+func (t *BaseTask) GetBaseTask() *BaseTask {
+	return t
 }

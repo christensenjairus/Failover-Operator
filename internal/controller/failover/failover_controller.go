@@ -3,6 +3,8 @@ package failover
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -118,7 +120,8 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 	// Update status to in progress if not already set
 	if failover.Status.Status != "IN_PROGRESS" {
 		failover.Status.Status = "IN_PROGRESS"
-		if err := r.Status().Update(ctx, failover); err != nil {
+		failover.Status.State = "IN_PROGRESS" // Also set the State field
+		if err := r.UpdateFailoverStatus(ctx, failover); err != nil {
 			logger.Error(err, "Failed to update failover status to IN_PROGRESS")
 			return reconcile.Result{}, err
 		}
@@ -204,7 +207,8 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 		// Update status to in progress
 		failover.Status.FailoverGroups[i].Status = "IN_PROGRESS"
-		if err := r.Status().Update(ctx, failover); err != nil {
+		failover.Status.State = "PROCESSING_GROUP"
+		if err := r.UpdateFailoverStatus(ctx, failover); err != nil {
 			groupLog.Error(err, "Failed to update group status to IN_PROGRESS")
 			return reconcile.Result{}, err
 		}
@@ -220,7 +224,8 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 			// Update status for this group
 			failover.Status.FailoverGroups[i].Status = "FAILED"
 			failover.Status.FailoverGroups[i].Message = "Failover failed: " + err.Error()
-			if updateErr := r.Status().Update(ctx, failover); updateErr != nil {
+			failover.Status.State = "GROUP_FAILURE"
+			if updateErr := r.UpdateFailoverStatus(ctx, failover); updateErr != nil {
 				logger.Error(updateErr, "Failed to update failover group status")
 			}
 
@@ -229,7 +234,8 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 		// Update status for this group
 		failover.Status.FailoverGroups[i].Status = "SUCCESS"
-		if err := r.Status().Update(ctx, failover); err != nil {
+		failover.Status.State = "GROUP_SUCCESS"
+		if err := r.UpdateFailoverStatus(ctx, failover); err != nil {
 			groupLog.Error(err, "Failed to update group status to SUCCESS")
 			return reconcile.Result{}, err
 		}
@@ -248,8 +254,10 @@ func (r *FailoverReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 	if allSucceeded {
 		failover.Status.Status = "SUCCESS"
-		if err := r.Status().Update(ctx, failover); err != nil {
-			logger.Error(err, "Failed to update failover status to SUCCESS")
+		failover.Status.State = "OVERALL_SUCCESS"
+		failover.Status.Message = "All failover groups were processed successfully"
+		if err := r.UpdateFailoverStatus(ctx, failover); err != nil {
+			logger.Error(err, "Failed to update overall status to SUCCESS")
 			return reconcile.Result{}, err
 		}
 		logger.Info("Failover completed successfully for all groups")
@@ -304,4 +312,44 @@ func (r *FailoverReconciler) handleDeletion(ctx context.Context, failover *crdv1
 	}
 
 	return reconcile.Result{}, nil
+}
+
+// UpdateFailoverStatus updates the status of a failover with retries to handle rate limiting
+func (r *FailoverReconciler) UpdateFailoverStatus(ctx context.Context, failover *crdv1alpha1.Failover) error {
+	log := r.Logger.WithValues("failover", failover.Name, "namespace", failover.Namespace)
+
+	// Simple retry logic with backoff
+	maxRetries := 3
+	backoffDelay := 500 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		err := r.Status().Update(ctx, failover)
+		if err == nil {
+			return nil // Success, no need to retry
+		}
+
+		// Check if this is a rate limiting error
+		if strings.Contains(err.Error(), "rate limiter") {
+			log.Info("Hit rate limit when updating Failover status, will retry with backoff",
+				"attempt", i+1,
+				"maxRetries", maxRetries,
+				"backoffDelay", backoffDelay)
+
+			// Wait before retrying
+			select {
+			case <-time.After(backoffDelay):
+				// Exponential backoff
+				backoffDelay *= 2
+			case <-ctx.Done():
+				// Context cancelled
+				return fmt.Errorf("context cancelled while retrying status update: %w", ctx.Err())
+			}
+			continue
+		}
+
+		// Not a rate limiting error, return immediately
+		return err
+	}
+
+	return fmt.Errorf("failed to update failover status after %d retries", maxRetries)
 }

@@ -50,6 +50,12 @@ func (t *UpdateGlobalStateTask) Execute(ctx context.Context) error {
 	targetCluster := t.Context.TargetClusterName
 	sourceCluster := t.Context.SourceClusterName
 
+	// Update the Failover state to show we're updating global state
+	if err := t.UpdateFailoverState(ctx, failover, "UPDATING_GLOBAL_STATE"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
+
 	// Update the global state in DynamoDB
 	t.Logger.Info("Updating global state in DynamoDB",
 		"namespace", failoverGroup.Namespace,
@@ -69,6 +75,8 @@ func (t *UpdateGlobalStateTask) Execute(ctx context.Context) error {
 		t.Context.Results["NewPrimaryCluster"] = targetCluster
 
 		// Even without DynamoDB, the workflow should continue for testing purposes
+		// Add delay after execution for debugging
+		t.DelayAfterExecution()
 		return nil
 	}
 
@@ -170,6 +178,8 @@ func (t *UpdateGlobalStateTask) Execute(ctx context.Context) error {
 	t.Logger.Info("Successfully updated global state in DynamoDB",
 		"ownerCluster", targetCluster)
 
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
 	return nil
 }
 
@@ -206,6 +216,12 @@ func (t *RecordFailoverHistoryTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
 	sourceCluster := t.Context.SourceClusterName
 	targetCluster := t.Context.TargetClusterName
+
+	// Update the Failover state to show we're completing the failover
+	if err := t.UpdateFailoverState(ctx, failover, "FINISHING"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Calculate total duration
 	totalDuration := time.Since(t.Context.StartTime)
@@ -246,6 +262,8 @@ func (t *RecordFailoverHistoryTask) Execute(ctx context.Context) error {
 		t.Context.Results["FailoverHistoryRecord"] = historyRecord
 
 		// Even without DynamoDB, the workflow should continue for testing purposes
+		// Add delay after execution for debugging
+		t.DelayAfterExecution()
 		return nil
 	}
 
@@ -254,6 +272,13 @@ func (t *RecordFailoverHistoryTask) Execute(ctx context.Context) error {
 	t.Logger.Info("Would record failover history in production with DynamoDB",
 		"record", historyRecord)
 
+	t.Logger.Info("Successfully recorded failover history in DynamoDB",
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+		"failoverName", failover.Name)
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
 	return nil
 }
 
@@ -275,7 +300,16 @@ func NewReleaseLockTask(ctx *WorkflowContext) *ReleaseLockTask {
 
 // Execute performs the task
 func (t *ReleaseLockTask) Execute(ctx context.Context) error {
-	t.Logger.Info("Releasing lock for failover group",
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're releasing lock
+	if err := t.UpdateFailoverState(ctx, failover, "RELEASING_LOCK"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
+
+	// Release the lock in DynamoDB
+	t.Logger.Info("Releasing lock in DynamoDB",
 		"namespace", t.Context.FailoverGroup.Namespace,
 		"name", t.Context.FailoverGroup.Name)
 
@@ -287,6 +321,8 @@ func (t *ReleaseLockTask) Execute(ctx context.Context) error {
 		t.Context.LeaseToken = ""
 
 		// Even without DynamoDB, the workflow should continue for testing purposes
+		// Add delay after execution for debugging
+		t.DelayAfterExecution()
 		return nil
 	}
 
@@ -328,5 +364,9 @@ func (t *ReleaseLockTask) Execute(ctx context.Context) error {
 		t.Logger.Info("No lease token found, nothing to release")
 	}
 
+	t.Logger.Info("Lock released successfully")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
 	return nil
 }

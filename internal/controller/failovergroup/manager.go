@@ -788,44 +788,6 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		}
 	}
 
-	// Update the FailoverGroup resource if status changed
-	if updated {
-		log.Info("Updating FailoverGroup status with changes")
-		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
-			return fmt.Errorf("failed to update FailoverGroup status: %w", err)
-		}
-	} else {
-		log.V(1).Info("No changes to FailoverGroup status")
-	}
-
-	// Update DBSyncStatus to "Synced" after successful sync
-	if failoverGroup.Status.GlobalState.DBSyncStatus != "Synced" {
-		failoverGroup.Status.GlobalState.DBSyncStatus = "Synced"
-		failoverGroup.Status.GlobalState.LastSyncTime = time.Now().Format(time.RFC3339)
-		log.Info("Setting DBSyncStatus to Synced")
-		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
-			return fmt.Errorf("failed to update DBSyncStatus to Synced: %w", err)
-		}
-	}
-
-	// Update the status.State and status.Health fields for k9s display
-	stateUpdated := false
-
-	// Determine state based on whether this is the active cluster
-	newState := ""
-	if m.ClusterName == failoverGroup.Status.GlobalState.ActiveCluster {
-		newState = "PRIMARY"
-	} else {
-		newState = "STANDBY"
-	}
-
-	// Update state if different
-	if failoverGroup.Status.State != newState {
-		failoverGroup.Status.State = newState
-		stateUpdated = true
-		log.Info("Updated status.State field", "state", newState)
-	}
-
 	// Find the primary cluster to determine health
 	newHealth := "UNKNOWN"
 	for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
@@ -838,14 +800,24 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 	// Update health if different
 	if failoverGroup.Status.Health != newHealth {
 		failoverGroup.Status.Health = newHealth
-		stateUpdated = true
+		updated = true
 		log.Info("Updated status.Health field", "health", newHealth)
 	}
 
-	// Update the resource if state or health changed
-	if stateUpdated {
+	// Update the resource if health changed
+	if updated {
 		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
-			return fmt.Errorf("failed to update FailoverGroup state and health: %w", err)
+			return fmt.Errorf("failed to update FailoverGroup health: %w", err)
+		}
+	}
+
+	// Update DBSyncStatus to "Synced" after successful sync
+	if failoverGroup.Status.GlobalState.DBSyncStatus != "Synced" {
+		failoverGroup.Status.GlobalState.DBSyncStatus = "Synced"
+		failoverGroup.Status.GlobalState.LastSyncTime = time.Now().Format(time.RFC3339)
+		log.Info("Setting DBSyncStatus to Synced")
+		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
+			return fmt.Errorf("failed to update DBSyncStatus to Synced: %w", err)
 		}
 	}
 

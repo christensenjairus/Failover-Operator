@@ -108,6 +108,11 @@ type FailoverStatus struct {
 	// +kubebuilder:validation:Enum=SUCCESS;FAILED;IN_PROGRESS
 	Status string `json:"status,omitempty"`
 
+	// State reflects the current phase of the failover workflow
+	// Values: "INITIALIZING", "SCALING_DOWN_SOURCE", "DEMOTING_VOLUMES", "PROMOTING_VOLUMES", "SCALING_UP_TARGET", "TRANSFERRING_OWNERSHIP", etc.
+	// +optional
+	State string `json:"state,omitempty"`
+
 	// Message provides additional details about the overall failover operation
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -128,6 +133,7 @@ type FailoverStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+//+kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 //+kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetCluster`
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 //+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.targetCluster == self.spec.targetCluster",message="targetCluster is immutable"

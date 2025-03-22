@@ -48,112 +48,17 @@ func NewFailoverDependencyInjector(
 	}
 }
 
-// InjectDependencies injects dependencies into the task
+// InjectDependencies injects dependencies into tasks
 func (i *FailoverDependencyInjector) InjectDependencies(task WorkflowTask) error {
-	// Type-assert to BaseTask
-	baseTask, ok := task.(interface {
-		GetName() string
-		GetDescription() string
-	})
-	if !ok {
-		return fmt.Errorf("task does not implement GetName/GetDescription methods")
+	// Type assert to BaseTask
+	if baseTask, ok := task.(interface{ GetBaseTask() *BaseTask }); ok {
+		bt := baseTask.GetBaseTask()
+		bt.Client = i.Client
+		bt.Logger = i.Logger
+		bt.DynamoDBManager = i.DynamoDBManager
+		return nil
 	}
-
-	// All tasks get the logger
-	switch t := task.(type) {
-	case *ValidateFailoverTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *AcquireLockTask:
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *UpdateNetworkResourcesTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *ScaleDownWorkloadsTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *DisableFluxReconciliationTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForWorkloadsScaledDownTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *DemoteVolumesTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForVolumesDemotedTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *MarkVolumesReadyForPromotionTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForVolumesReadyForPromotionTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *PromoteVolumesTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForVolumesPromotedTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *VerifyDataAvailabilityTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *ScaleUpWorkloadsTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *TriggerFluxReconciliationTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForTargetReadyTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *MarkTargetReadyForTrafficTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForTargetReadyForTrafficTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *MarkTrafficTransitionCompleteTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *WaitForTrafficTransitionCompleteTask:
-		t.Client = i.Client
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *UpdateGlobalStateTask:
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *RecordFailoverHistoryTask:
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *ReleaseLockTask:
-		t.DynamoDBManager = i.DynamoDBManager
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *UpdateWorkflowStateTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *ResetWorkflowStateTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	case *SetWorkflowPhaseTask:
-		t.Client = i.Client
-		t.Logger = i.Logger.WithValues("task", baseTask.GetName())
-	// ... other cases for various task types ...
-	default:
-		// For task types we don't explicitly handle, just log a warning
-		i.Logger.Info("No specific dependency injection handler for task type",
-			"taskType", fmt.Sprintf("%T", task),
-			"taskName", baseTask.GetName())
-	}
-
-	return nil
+	return fmt.Errorf("task does not implement GetBaseTask method")
 }
 
 // GetBaseTask provides access to the BaseTask for dependency injection
@@ -269,4 +174,9 @@ func (t *RecordFailoverHistoryTask) GetBaseTask() *BaseTask {
 // GetBaseTask provides access to the BaseTask for dependency injection
 func (t *ReleaseLockTask) GetBaseTask() *BaseTask {
 	return &t.BaseTask
+}
+
+// GetClient returns the Kubernetes client
+func (i *FailoverDependencyInjector) GetClient() client.Client {
+	return i.Client
 }

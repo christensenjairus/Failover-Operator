@@ -15,12 +15,12 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.state
-      name: State
-      type: string
     - jsonPath: .status.health
       name: Health
       type: string
+    - jsonPath: .status.suspended
+      name: Suspended
+      type: boolean
     - jsonPath: .status.globalState.activeCluster
       name: Active
       type: string
@@ -106,6 +106,7 @@ spec:
                   This allows running multiple operator instances for different applications
                 type: string
               suspended:
+                default: false
                 description: |-
                   When true, automatic failovers are disabled (manual override for maintenance)
                   The operator will not create automatic failovers even if it detects problems
@@ -161,6 +162,8 @@ spec:
                   - name
                   type: object
                 type: array
+            required:
+            - suspended
             type: object
           status:
             description: FailoverGroupStatus defines the observed state of FailoverGroup
@@ -358,16 +361,11 @@ spec:
                   - name
                   type: object
                 type: array
-              state:
+              suspended:
                 description: |-
-                  State reflects the actual failover state of the system.
-                  Values: "PRIMARY", "STANDBY", "FAILOVER", "FAILBACK"
-                enum:
-                - PRIMARY
-                - STANDBY
-                - FAILOVER
-                - FAILBACK
-                type: string
+                  Suspended indicates if the failover group is currently suspended
+                  This directly reflects the spec.suspended field and is shown in status for easier visibility
+                type: boolean
               workloads:
                 description: Workloads contains status information for each workload
                   defined in the spec
@@ -427,6 +425,8 @@ spec:
                   - name
                   type: object
                 type: array
+            required:
+            - suspended
             type: object
         type: object
     served: true

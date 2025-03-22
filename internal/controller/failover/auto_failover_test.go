@@ -422,7 +422,6 @@ func createTestFailoverGroup(name, namespace string, suspended bool, health, tra
 			},
 		},
 		Status: crdv1alpha1.FailoverGroupStatus{
-			State:  "PRIMARY",
 			Health: health,
 			GlobalState: crdv1alpha1.GlobalStateInfo{
 				ActiveCluster: "cluster1", // Default to cluster1 as active

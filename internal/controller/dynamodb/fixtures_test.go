@@ -212,7 +212,6 @@ func CreateTestFailoverGroup() *crdv1alpha1.FailoverGroup {
 			},
 		},
 		Status: crdv1alpha1.FailoverGroupStatus{
-			State:  string(crdv1alpha1.FailoverGroupStatePrimary),
 			Health: "OK",
 			Workloads: []crdv1alpha1.WorkloadStatus{
 				{

@@ -101,6 +101,28 @@ func (r *FailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Update the suspended status to match the spec
+	if failoverGroup.Status.Suspended != failoverGroup.Spec.Suspended {
+		log.Info("Updating suspended status to match spec",
+			"current", failoverGroup.Status.Suspended,
+			"new", failoverGroup.Spec.Suspended)
+
+		// Make a copy to avoid modifying the shared instance
+		fgCopy := failoverGroup.DeepCopy()
+		fgCopy.Status.Suspended = fgCopy.Spec.Suspended
+
+		if err := r.Status().Update(ctx, fgCopy); err != nil {
+			log.Error(err, "Failed to update suspended status")
+			return ctrl.Result{}, err
+		}
+
+		// Update our local copy
+		failoverGroup.Status.Suspended = fgCopy.Status.Suspended
+
+		// Requeue to continue with remaining logic
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Initialize the manager for this FailoverGroup if needed
 	if r.Manager == nil {
 		log.Error(nil, "FailoverGroup manager not initialized")

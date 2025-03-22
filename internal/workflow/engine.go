@@ -50,8 +50,27 @@ func NewTaskExecutor(logger TaskLogger) *TaskExecutor {
 }
 
 // ExecuteTask executes a task and returns the result
-func (e *TaskExecutor) ExecuteTask(ctx context.Context, task Task) error {
+func (e *TaskExecutor) ExecuteTask(ctx context.Context, task Task, workflowCtx *WorkflowContext, injector DependencyInjector) error {
 	e.Logger.Info("Executing task", "taskName", task.GetName())
+
+	// Update the failover state to reflect the current task if possible
+	if workflowCtx != nil && workflowCtx.Failover != nil {
+		// Just update the in-memory state - actual API updates should be done by each task
+		taskName := task.GetName()
+		workflowCtx.Failover.Status.State = "TASK_" + taskName
+		e.Logger.Info("Updated in-memory state for current task",
+			"task", taskName,
+			"state", workflowCtx.Failover.Status.State)
+
+		// Try to ensure the task has access to a client if it's a BaseTask
+		if baseTask, ok := task.(interface{ GetBaseTask() *BaseTask }); ok {
+			bt := baseTask.GetBaseTask()
+			if bt.Client == nil && injector != nil {
+				bt.Client = injector.GetClient()
+				e.Logger.Info("Updated task client from injector", "task", taskName)
+			}
+		}
+	}
 
 	startTime := time.Now()
 	err := task.Execute(ctx)
@@ -120,7 +139,7 @@ func (e *Engine) Execute(ctx context.Context, workflowCtx *WorkflowContext) erro
 			"taskTotal", len(e.Tasks),
 			"taskName", task.GetName())
 
-		if err := e.Executor.ExecuteTask(ctx, task); err != nil {
+		if err := e.Executor.ExecuteTask(ctx, task, e.Context, e.DepsInjector); err != nil {
 			executionDuration := time.Since(startTime)
 			e.Executor.Logger.Error(err, "Workflow execution failed",
 				"durationMs", executionDuration.Milliseconds(),

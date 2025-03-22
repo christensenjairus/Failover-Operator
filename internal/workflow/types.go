@@ -23,6 +23,20 @@ import (
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 )
 
+// EnableTestingDelays controls whether tasks add a delay after execution
+// to help visualize the workflow in k9s during testing
+const EnableTestingDelays = true
+
+// TestingDelayDuration specifies how long to delay after each task execution when EnableTestingDelays is true
+// This allows you to control the pace of workflow execution for debugging
+// Reduced from 10s to 5s to help avoid rate limiting issues
+const TestingDelayDuration = 5 * time.Second
+
+// EnableFrequentStateUpdates controls how often we try to update the Failover state in the API
+// If true, we'll try to update the state for every task
+// If false, we'll only update state for major workflow phases to avoid rate limiting
+const EnableFrequentStateUpdates = false
+
 // WorkflowTask represents a single task in a workflow
 type WorkflowTask interface {
 	// Execute performs the task

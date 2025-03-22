@@ -147,8 +147,8 @@ type FailoverGroupSpec struct {
 
 	// When true, automatic failovers are disabled (manual override for maintenance)
 	// The operator will not create automatic failovers even if it detects problems
-	// +optional
-	Suspended bool `json:"suspended,omitempty"`
+	// +kubebuilder:default=false
+	Suspended bool `json:"suspended"`
 
 	// Documentation field explaining why automatic failovers are suspended
 	// Only meaningful when suspended=true
@@ -251,15 +251,14 @@ type FluxResourceStatus struct {
 
 // FailoverGroupStatus defines the observed state of FailoverGroup
 type FailoverGroupStatus struct {
-	// State reflects the actual failover state of the system.
-	// Values: "PRIMARY", "STANDBY", "FAILOVER", "FAILBACK"
-	// +kubebuilder:validation:Enum=PRIMARY;STANDBY;FAILOVER;FAILBACK
-	State string `json:"state,omitempty"`
-
 	// Health indicates the overall health of the failover group
 	// Values: "OK", "DEGRADED", "ERROR"
 	// +kubebuilder:validation:Enum=OK;DEGRADED;ERROR
 	Health string `json:"health,omitempty"`
+
+	// Suspended indicates if the failover group is currently suspended
+	// This directly reflects the spec.suspended field and is shown in status for easier visibility
+	Suspended bool `json:"suspended"`
 
 	// Workloads contains status information for each workload defined in the spec
 	// +optional
@@ -288,8 +287,8 @@ type FailoverGroupStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 //+kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.health`
+//+kubebuilder:printcolumn:name="Suspended",type=boolean,JSONPath=`.status.suspended`
 //+kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.globalState.activeCluster`
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

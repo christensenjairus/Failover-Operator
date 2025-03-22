@@ -58,6 +58,15 @@ func NewManagerAdapter(
 
 // ProcessFailover processes a failover request
 func (a *ManagerAdapter) ProcessFailover(ctx context.Context, failover *crdv1alpha1.Failover, failoverGroup *crdv1alpha1.FailoverGroup) error {
+	// First, explicitly set the state to IN_PROGRESS
+	failover.Status.State = "IN_PROGRESS"
+	if err := a.Client.Status().Update(ctx, failover); err != nil {
+		a.Logger.Error(err, "Failed to update Failover initial state to IN_PROGRESS")
+		// Continue anyway since this isn't critical
+	} else {
+		a.Logger.Info("Updated Failover initial state to IN_PROGRESS")
+	}
+
 	// Create dependency injector
 	injector := NewFailoverDependencyInjector(a.Client, a.Logger, a.DynamoDBManager)
 
@@ -82,6 +91,15 @@ func (a *ManagerAdapter) ProcessFailover(ctx context.Context, failover *crdv1alp
 	// Execute the workflow
 	err := engine.Execute(ctx, workflowCtx)
 	if err != nil {
+		// Update the state to FAILED to ensure it's not stuck
+		failover.Status.State = "FAILED"
+		stateErr := a.Client.Status().Update(ctx, failover)
+		if stateErr != nil {
+			a.Logger.Error(stateErr, "Failed to update Failover state to FAILED")
+		} else {
+			a.Logger.Info("Updated Failover state to FAILED")
+		}
+
 		// Check if this was a lock-related error with the source cluster
 		if workflowCtx.Results != nil {
 			sourceHoldsLock, hasKey := workflowCtx.Results["SourceClusterHoldsLock"]
@@ -118,6 +136,15 @@ func (a *ManagerAdapter) ProcessFailover(ctx context.Context, failover *crdv1alp
 
 	// Update metrics from workflow context
 	failover.Status.Metrics = *workflowCtx.Metrics
+
+	// Make sure the state is set to SUCCESS at the end of successful workflow
+	failover.Status.State = "SUCCESS"
+	if stateErr := a.Client.Status().Update(ctx, failover); stateErr != nil {
+		a.Logger.Error(stateErr, "Failed to update final Failover state to SUCCESS")
+		// Continue anyway to update the overall status
+	} else {
+		a.Logger.Info("Updated final Failover state to SUCCESS")
+	}
 
 	// Update failover status to reflect success
 	if err := a.updateFailoverStatus(ctx, failover, "SUCCESS", ""); err != nil {

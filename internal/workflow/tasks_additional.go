@@ -26,7 +26,7 @@ import (
 // VOLUME TRANSITION TASKS (CONTINUED)
 //
 
-// MarkVolumesReadyForPromotionTask marks volumes as ready for promotion in DynamoDB
+// MarkVolumesReadyForPromotionTask updates volume replication to make volumes ready for promotion
 type MarkVolumesReadyForPromotionTask struct {
 	BaseTask
 }
@@ -47,12 +47,19 @@ func (t *MarkVolumesReadyForPromotionTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
 	sourceCluster := t.Context.SourceClusterName
 	targetCluster := t.Context.TargetClusterName
+	failover := t.Context.Failover
 
 	t.Logger.Info("Marking volumes as ready for promotion in DynamoDB",
 		"namespace", failoverGroup.Namespace,
 		"name", failoverGroup.Name,
 		"sourceCluster", sourceCluster,
 		"targetCluster", targetCluster)
+
+	// Update the Failover state to show we're preparing volumes
+	if err := t.UpdateFailoverState(ctx, failover, "VOLUMES_READY_FOR_PROMOTION"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// In a real implementation, this would update DynamoDB to indicate volumes are ready for promotion
 	// This information would signal to the target cluster that it can proceed with volume promotion
@@ -65,6 +72,10 @@ func (t *MarkVolumesReadyForPromotionTask) Execute(ctx context.Context) error {
 	t.Context.Results["VolumeReadyTimestamp"] = time.Now().Format(time.RFC3339)
 
 	t.Logger.Info("Volumes successfully marked as ready for promotion")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -128,6 +139,9 @@ func (t *WaitForVolumesReadyForPromotionTask) Execute(ctx context.Context) error
 		time.Sleep(retryInterval)
 	}
 
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return fmt.Errorf("timed out waiting for volumes to be ready for promotion")
 }
 
@@ -150,6 +164,13 @@ func NewPromoteVolumesTask(ctx *WorkflowContext) *PromoteVolumesTask {
 // Execute performs the task
 func (t *PromoteVolumesTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're promoting volumes
+	if err := t.UpdateFailoverState(ctx, failover, "PROMOTING_VOLUMES"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Find all volume replications to promote
 	for _, workload := range failoverGroup.Spec.Workloads {
@@ -162,6 +183,10 @@ func (t *PromoteVolumesTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Volumes promoted to Primary role")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -192,6 +217,10 @@ func (t *WaitForVolumesPromotedTask) Execute(ctx context.Context) error {
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("All volumes successfully promoted to Primary role")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -218,6 +247,10 @@ func (t *VerifyDataAvailabilityTask) Execute(ctx context.Context) error {
 	t.Logger.Info("Would verify data availability in target cluster")
 
 	t.Logger.Info("Data verified as available in target cluster")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -244,6 +277,13 @@ func NewScaleUpWorkloadsTask(ctx *WorkflowContext) *ScaleUpWorkloadsTask {
 // Execute performs the task
 func (t *ScaleUpWorkloadsTask) Execute(ctx context.Context) error {
 	failoverGroup := t.Context.FailoverGroup
+	failover := t.Context.Failover
+
+	// Update the Failover state to show we're scaling up workloads
+	if err := t.UpdateFailoverState(ctx, failover, "SCALING_UP_WORKLOADS"); err != nil {
+		t.Logger.Error(err, "Failed to update Failover state")
+		// Continue with the task even if state update fails
+	}
 
 	// Process each workload based on its kind
 	for _, workload := range failoverGroup.Spec.Workloads {
@@ -271,6 +311,10 @@ func (t *ScaleUpWorkloadsTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Workloads scaled up successfully")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -305,6 +349,10 @@ func (t *TriggerFluxReconciliationTask) Execute(ctx context.Context) error {
 	}
 
 	t.Logger.Info("Flux reconciliation triggered for resources")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -335,6 +383,10 @@ func (t *WaitForTargetReadyTask) Execute(ctx context.Context) error {
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("All workloads ready in target cluster")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -365,6 +417,10 @@ func (t *MarkTargetReadyForTrafficTask) Execute(ctx context.Context) error {
 	t.Logger.Info("Would mark target as ready for traffic in DynamoDB")
 
 	t.Logger.Info("Target marked as ready for traffic in DynamoDB")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -393,6 +449,10 @@ func (t *WaitForTargetReadyForTrafficTask) Execute(ctx context.Context) error {
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("Target is ready for traffic")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -419,6 +479,10 @@ func (t *MarkTrafficTransitionCompleteTask) Execute(ctx context.Context) error {
 	t.Logger.Info("Would mark traffic transition as complete in DynamoDB")
 
 	t.Logger.Info("Traffic transition marked as complete in DynamoDB")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }
 
@@ -447,5 +511,9 @@ func (t *WaitForTrafficTransitionCompleteTask) Execute(ctx context.Context) erro
 	time.Sleep(1 * time.Second)
 
 	t.Logger.Info("Traffic transition completed successfully")
+
+	// Add delay after execution for debugging
+	t.DelayAfterExecution()
+
 	return nil
 }

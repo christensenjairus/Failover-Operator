@@ -18,6 +18,9 @@ spec:
     - jsonPath: .status.status
       name: Status
       type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
     - jsonPath: .spec.targetCluster
       name: Target
       type: string
@@ -235,6 +238,11 @@ spec:
                     format: int64
                     type: integer
                 type: object
+              state:
+                description: |-
+                  State reflects the current phase of the failover workflow
+                  Values: "INITIALIZING", "SCALING_DOWN_SOURCE", "DEMOTING_VOLUMES", "PROMOTING_VOLUMES", "SCALING_UP_TARGET", "TRANSFERRING_OWNERSHIP", etc.
+                type: string
               status:
                 description: Status of the failover operation
                 enum:

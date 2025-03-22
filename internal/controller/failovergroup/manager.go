@@ -750,7 +750,8 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		for _, newCluster := range newClusters {
 			if oldCluster, exists := existingMap[newCluster.Name]; !exists ||
 				oldCluster.Role != newCluster.Role ||
-				oldCluster.Health != newCluster.Health {
+				oldCluster.Health != newCluster.Health ||
+				oldCluster.LastHeartbeat != newCluster.LastHeartbeat {
 				clustersChanged = true
 				break
 			}

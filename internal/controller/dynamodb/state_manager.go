@@ -905,27 +905,29 @@ func (m *BaseManager) GetAllClusterStatuses(ctx context.Context, namespace, name
 		}
 	}
 
-	// PART 2: Query using the GSI (GSI1) to find all records for this group across all operators
+	// PART 2: Use a scan operation instead of a GSI query to find all records for this group
 	// This is crucial for finding clusters registered by other operators
-	gsiInput := &dynamodb.QueryInput{
-		TableName:              &m.tableName,
-		IndexName:              aws.String("GSI1"),
-		KeyConditionExpression: aws.String("GSI1SK = :gsi_sk"),
+	scanInput := &dynamodb.ScanInput{
+		TableName:        &m.tableName,
+		FilterExpression: aws.String("GSI1SK = :gsi_sk AND begins_with(SK, :sk_prefix)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":gsi_sk": &types.AttributeValueMemberS{Value: m.getGroupGSI1SK(namespace, name)},
+			":gsi_sk":    &types.AttributeValueMemberS{Value: m.getGroupGSI1SK(namespace, name)},
+			":sk_prefix": &types.AttributeValueMemberS{Value: "CLUSTER#"},
 		},
+		// Limit the results to avoid scanning the entire table
+		Limit: aws.Int32(100),
 	}
 
-	// Execute the GSI query
-	gsiResult, err := m.client.Query(ctx, gsiInput)
+	// Execute the scan instead of GSI query
+	scanResult, err := m.client.Scan(ctx, scanInput)
 	if err != nil {
-		logger.Error(err, "Failed to query cluster statuses by GSI")
+		logger.Error(err, "Failed to scan for cluster statuses")
 		// Continue with what we have from the primary query
 	} else {
-		logger.Info("Found cluster records using GSI", "count", len(gsiResult.Items))
+		logger.Info("Found cluster records using scan", "count", len(scanResult.Items))
 
-		// Process the GSI query results
-		for _, item := range gsiResult.Items {
+		// Process the scan results
+		for _, item := range scanResult.Items {
 			// Extract the SK to check if this is a cluster status record
 			if sk, ok := item["SK"]; ok {
 				if skValue, ok := sk.(*types.AttributeValueMemberS); ok {

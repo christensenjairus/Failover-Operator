@@ -1267,6 +1267,5 @@ func (s *StateManager) UpdateGroupState(ctx context.Context, namespace, name str
 	if err != nil {
 		return fmt.Errorf("failed to update group config: %w", err)
 	}
-
 	return nil
 }

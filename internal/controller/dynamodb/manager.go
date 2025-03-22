@@ -365,39 +365,8 @@ func (s *DynamoDBService) DetectStaleHeartbeats(ctx context.Context, namespace, 
 
 // GetAllClusterStatuses gets the status of all clusters in the failover group
 func (s *DynamoDBService) GetAllClusterStatuses(ctx context.Context, namespace, name string) (map[string]*ClusterStatusRecord, error) {
-	// This is a stub implementation that would typically query DynamoDB
-	// to get the status of all clusters in the failover group
-	logger := log.FromContext(ctx).WithValues(
-		"namespace", namespace,
-		"name", name,
-	)
-	logger.V(1).Info("Getting all cluster statuses")
-
-	// Create a map with just this cluster for now
-	statuses := make(map[string]*ClusterStatusRecord)
-	status, err := s.GetClusterStatus(ctx, namespace, name, s.ClusterName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only add non-nil status to the map
-	if status != nil {
-		statuses[s.ClusterName] = status
-	} else {
-		// Create a default status if none exists yet
-		defaultStatus := &ClusterStatusRecord{
-			GroupNamespace: namespace,
-			GroupName:      name,
-			ClusterName:    s.ClusterName,
-			Health:         "UNKNOWN",
-			State:          "STANDBY",
-			LastHeartbeat:  time.Now(),
-		}
-		statuses[s.ClusterName] = defaultStatus
-		logger.V(1).Info("Created default cluster status", "clusterName", s.ClusterName)
-	}
-
-	return statuses, nil
+	// Delegate to the BaseManager's implementation to properly query for all cluster statuses
+	return s.BaseManager.GetAllClusterStatuses(ctx, namespace, name)
 }
 
 // UpdateClusterStatus updates the status of a cluster in DynamoDB

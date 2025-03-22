@@ -164,7 +164,14 @@ func (v *VolumeStateManager) UpdateHeartbeat(ctx context.Context, namespace, gro
 	var componentsMap map[string]ComponentStatus
 	if status.Components != "" && status.Components != "{}" {
 		if err := json.Unmarshal([]byte(status.Components), &componentsMap); err != nil {
-			logger.Error(err, "Failed to unmarshal components, using empty components")
+			// Try to unmarshal as StatusData instead - for backward compatibility
+			var statusData StatusData
+			if err2 := json.Unmarshal([]byte(status.Components), &statusData); err2 != nil {
+				logger.Error(err, "Failed to unmarshal components, using empty components")
+			} else {
+				// Successfully parsed as StatusData, create an empty map for now
+				logger.V(1).Info("Parsed components as StatusData instead of ComponentStatus map")
+			}
 			componentsMap = make(map[string]ComponentStatus)
 		}
 	} else {

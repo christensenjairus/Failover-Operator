@@ -594,6 +594,9 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 			DBSyncStatus: "Syncing",
 			Clusters:     []crdv1alpha1.ClusterInfo{},
 		}
+	} else if failoverGroup.Status.GlobalState.DBSyncStatus == "" {
+		// Only set DBSyncStatus to "Syncing" if it's empty
+		failoverGroup.Status.GlobalState.DBSyncStatus = "Syncing"
 	}
 
 	// Flag to track if we need to update the resource
@@ -775,6 +778,16 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		}
 	} else {
 		log.V(1).Info("No changes to FailoverGroup status")
+	}
+
+	// Update DBSyncStatus to "Synced" after successful sync
+	if failoverGroup.Status.GlobalState.DBSyncStatus != "Synced" {
+		failoverGroup.Status.GlobalState.DBSyncStatus = "Synced"
+		failoverGroup.Status.GlobalState.LastSyncTime = time.Now().Format(time.RFC3339)
+		log.Info("Setting DBSyncStatus to Synced")
+		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
+			return fmt.Errorf("failed to update DBSyncStatus to Synced: %w", err)
+		}
 	}
 
 	return nil

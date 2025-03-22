@@ -129,6 +129,11 @@ type FailoverStatus struct {
 //+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
 //+kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetCluster`
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.targetCluster == self.spec.targetCluster",message="targetCluster is immutable"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.failoverMode == self.spec.failoverMode",message="failoverMode is immutable"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.force == self.spec.force",message="force is immutable"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.reason == self.spec.reason",message="reason is immutable"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.failoverGroups == self.spec.failoverGroups",message="failoverGroups are immutable"
 
 // Failover is the Schema for the failovers API
 type Failover struct {

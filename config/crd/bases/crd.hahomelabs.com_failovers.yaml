@@ -243,6 +243,17 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: targetCluster is immutable
+          rule: '!has(oldSelf.spec) || oldSelf.spec.targetCluster == self.spec.targetCluster'
+        - message: failoverMode is immutable
+          rule: '!has(oldSelf.spec) || oldSelf.spec.failoverMode == self.spec.failoverMode'
+        - message: force is immutable
+          rule: '!has(oldSelf.spec) || oldSelf.spec.force == self.spec.force'
+        - message: reason is immutable
+          rule: '!has(oldSelf.spec) || oldSelf.spec.reason == self.spec.reason'
+        - message: failoverGroups are immutable
+          rule: '!has(oldSelf.spec) || oldSelf.spec.failoverGroups == self.spec.failoverGroups'
     served: true
     storage: true
     subresources:

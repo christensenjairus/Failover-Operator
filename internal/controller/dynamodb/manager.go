@@ -647,3 +647,8 @@ func (s *DynamoDBService) GetAllClusterStatuses(ctx context.Context, namespace, 
 	// Delegate to the BaseManager's implementation to properly query for all cluster statuses
 	return s.BaseManager.GetAllClusterStatuses(ctx, namespace, name)
 }
+
+// TransferOwnership transfers ownership of a FailoverGroup to a new cluster
+func (s *DynamoDBService) TransferOwnership(ctx context.Context, namespace, name, newOwner string) error {
+	return s.operationsManager.TransferOwnership(ctx, namespace, name, newOwner)
+}

@@ -56,7 +56,7 @@ func NewManagerAdapter(
 	}
 }
 
-// ProcessFailover handles a failover request using the workflow system
+// ProcessFailover processes a failover request
 func (a *ManagerAdapter) ProcessFailover(ctx context.Context, failover *crdv1alpha1.Failover, failoverGroup *crdv1alpha1.FailoverGroup) error {
 	// Create dependency injector
 	injector := NewFailoverDependencyInjector(a.Client, a.Logger, a.DynamoDBManager)
@@ -80,8 +80,34 @@ func (a *ManagerAdapter) ProcessFailover(ctx context.Context, failover *crdv1alp
 	engine := NewEngine(tasks, a.Logger, injector)
 
 	// Execute the workflow
-	if err := engine.Execute(ctx, workflowCtx); err != nil {
-		// Update failover status to reflect failure
+	err := engine.Execute(ctx, workflowCtx)
+	if err != nil {
+		// Check if this was a lock-related error with the source cluster
+		if workflowCtx.Results != nil {
+			sourceHoldsLock, hasKey := workflowCtx.Results["SourceClusterHoldsLock"]
+			if hasKey && sourceHoldsLock.(bool) && strings.Contains(err.Error(), "locked by") {
+				// This is a known case where the source cluster holds the lock
+				// The workflow tasks will have tried to handle this, but if we still
+				// got an error, we should inform the user about the special case
+				a.Logger.Info("Failover operation couldn't complete because the source cluster still holds the lock",
+					"sourceCluster", workflowCtx.SourceClusterName,
+					"targetCluster", workflowCtx.TargetClusterName)
+
+				// Update failover status with a more helpful message
+				updateErr := a.updateFailoverStatus(ctx, failover, "FAILED",
+					fmt.Sprintf("Source cluster '%s' still holds the lock. This may happen if the source cluster is still active. "+
+						"Verify the source cluster status and retry the failover with force=true if needed.",
+						workflowCtx.SourceClusterName))
+				if updateErr != nil {
+					// Log the status update error but return the original error
+					a.Logger.Error(updateErr, "Failed to update failover status after workflow error")
+				}
+
+				return fmt.Errorf("source cluster '%s' still holds the lock: %w", workflowCtx.SourceClusterName, err)
+			}
+		}
+
+		// Standard error handling for other cases
 		updateErr := a.updateFailoverStatus(ctx, failover, "FAILED", err.Error())
 		if updateErr != nil {
 			// Log the status update error but return the original error

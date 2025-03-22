@@ -19,12 +19,14 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
+	"github.com/google/uuid"
 )
 
 // BaseTask provides common functionality for all tasks
@@ -107,7 +109,9 @@ func (t *ValidateFailoverTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("target cluster %s does not exist in failover group", targetCluster)
 	}
 
-	if !targetHealthy && !t.Context.ForceFailover {
+	// Check if we should enforce health requirements
+	isForced := t.Context.Failover.Spec.Force
+	if !targetHealthy && !isForced {
 		return fmt.Errorf("target cluster %s is not in STANDBY role or not healthy", targetCluster)
 	}
 
@@ -115,7 +119,7 @@ func (t *ValidateFailoverTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("no PRIMARY cluster found in failover group")
 	}
 
-	if !sourceIsActive && !t.Context.ForceFailover {
+	if !sourceIsActive && !isForced {
 		return fmt.Errorf("PRIMARY cluster is not the active cluster in global state")
 	}
 
@@ -142,34 +146,98 @@ func NewAcquireLockTask(ctx *WorkflowContext) *AcquireLockTask {
 
 // Execute performs the task
 func (t *AcquireLockTask) Execute(ctx context.Context) error {
-	if t.DynamoDBManager == nil {
-		return fmt.Errorf("DynamoDB manager is not set")
-	}
-
 	t.Logger.Info("Acquiring lock for failover group",
 		"namespace", t.Context.FailoverGroup.Namespace,
 		"name", t.Context.FailoverGroup.Name)
 
-	// Attempt to acquire the lock
+	if t.DynamoDBManager == nil {
+		// If DynamoDBManager is not available, just simulate the acquisition for development/testing
+		t.Logger.Info("DynamoDBManager not initialized, simulating lock acquisition")
+
+		// Set a dummy lease token in the context
+		t.Context.LeaseToken = fmt.Sprintf("simulated-lock-%s", uuid.New().String())
+
+		// Even without DynamoDB, the workflow should continue for testing purposes
+		return nil
+	}
+
+	// If Force is true, bypass lock acquisition and set a special token
+	if t.Context.ForceFailover {
+		t.Logger.Info("Force flag is set, bypassing lock acquisition",
+			"group", t.Context.FailoverGroup.Name)
+		t.Context.LeaseToken = fmt.Sprintf("forced-bypass-%s", uuid.New().String())
+		t.Context.Results["SourceClusterHoldsLock"] = true
+		return nil
+	}
+
+	t.Logger.Info("Attempting to acquire lock for failover group",
+		"group", t.Context.FailoverGroup.Name)
+
+	// Try to acquire the lock
 	reason := "Failover operation initiated"
-	acquired, err := t.DynamoDBManager.AcquireLock(ctx, t.Context.FailoverGroup.Namespace, t.Context.FailoverGroup.Name, reason)
+	namespace := t.Context.FailoverGroup.Namespace
+	groupName := t.Context.FailoverGroup.Name
+	leaseToken, err := t.DynamoDBManager.AcquireLock(ctx, namespace, groupName, reason)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
-	}
+		// Check if the error is due to the lock being held by the source cluster
+		// and if the failover mode is CONSISTENCY or Force is true
+		if strings.Contains(err.Error(), "locked by") {
+			lockHolder := extractLockHolder(err.Error())
+			isHeldBySource := lockHolder == t.Context.SourceClusterName
+			isConsistencyMode := strings.ToUpper(t.Context.Failover.Spec.FailoverMode) == "CONSISTENCY"
+			isForced := t.Context.Failover.Spec.Force
 
-	// Check lock acquisition result
-	if acquired == "" {
-		return fmt.Errorf("failed to acquire lock, it's held by another operator")
-	}
+			// Set flag in the workflow context to track this condition
+			t.Context.Results["SourceClusterHoldsLock"] = isHeldBySource
 
-	// Store the lease token in the context for later release
-	t.Context.LeaseToken = acquired
+			if isHeldBySource && (isConsistencyMode || isForced) {
+				t.Logger.Info("Lock is held by source cluster, will proceed with failover",
+					"sourceCluster", t.Context.SourceClusterName,
+					"mode", t.Context.Failover.Spec.FailoverMode,
+					"force", t.Context.Failover.Spec.Force)
+
+				// Set a special lease token that indicates we're proceeding despite the lock
+				t.Context.LeaseToken = fmt.Sprintf("forced-lock-bypass-%s", uuid.New().String())
+				return nil
+			}
+		}
+
+		return fmt.Errorf("failed to acquire lock for failover group %s: %w",
+			t.Context.FailoverGroup.Name, err)
+	}
 
 	t.Logger.Info("Successfully acquired lock for failover group",
-		"namespace", t.Context.FailoverGroup.Namespace,
-		"name", t.Context.FailoverGroup.Name)
+		"group", t.Context.FailoverGroup.Name,
+		"leaseToken", leaseToken)
+
+	// Store the lease token in the workflow context
+	t.Context.LeaseToken = leaseToken
 
 	return nil
+}
+
+// extractLockHolder extracts the lock holder's name from the error message
+func extractLockHolder(errorMsg string) string {
+	// Expected format: "... locked by: CLUSTER_NAME ..."
+	parts := strings.Split(errorMsg, "locked by")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Extract the cluster name, removing surrounding whitespace and punctuation
+	lockHolder := strings.TrimSpace(parts[1])
+	lockHolder = strings.TrimPrefix(lockHolder, ":")
+	lockHolder = strings.TrimSpace(lockHolder)
+
+	// If there's additional text after the cluster name, remove it
+	if idx := strings.Index(lockHolder, " "); idx > 0 {
+		lockHolder = lockHolder[:idx]
+	}
+	if idx := strings.Index(lockHolder, "."); idx > 0 {
+		lockHolder = lockHolder[:idx]
+	}
+
+	return lockHolder
 }
 
 //

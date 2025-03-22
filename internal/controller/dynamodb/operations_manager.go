@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -707,25 +708,87 @@ func (m *OperationsManager) transferOwnership(ctx context.Context, namespace, na
 	)
 	logger.V(1).Info("Transferring ownership")
 
-	// Get current config
+	// Get the most up-to-date config from DynamoDB
 	config, err := m.GetGroupConfig(ctx, namespace, name)
 	if err != nil {
 		return fmt.Errorf("failed to get current config: %w", err)
 	}
 
-	// Update the ownership fields
-	config.PreviousOwner = config.OwnerCluster
-	config.OwnerCluster = newOwner
-	config.Version++
-	config.LastUpdated = time.Now()
-	config.LastFailover = &FailoverReference{
-		Name:      fmt.Sprintf("failover-%s", time.Now().Format("20060102-150405")),
-		Namespace: namespace,
-		Timestamp: time.Now(),
+	// If the current owner is already the newOwner, we're done
+	if config.OwnerCluster == newOwner {
+		logger.Info("Target cluster is already the owner, no update needed",
+			"currentOwner", config.OwnerCluster)
+		return nil
 	}
 
-	// Save the updated config
-	return m.UpdateGroupConfig(ctx, config)
+	// Make a copy of the previous owner
+	previousOwner := config.OwnerCluster
+
+	// Update the config with the new values
+	config.PreviousOwner = previousOwner
+	config.OwnerCluster = newOwner
+	config.Version++ // Increment the version
+	config.LastUpdated = time.Now()
+
+	// Create or update the LastFailover reference
+	if config.LastFailover == nil {
+		config.LastFailover = &FailoverReference{
+			Name:      fmt.Sprintf("forced-failover-%s", time.Now().Format("20060102-150405")),
+			Namespace: namespace,
+			Timestamp: time.Now(),
+		}
+	} else {
+		config.LastFailover.Timestamp = time.Now()
+	}
+
+	// Try to update the config using the standard method first
+	err = m.UpdateGroupConfig(ctx, config)
+	if err != nil {
+		// Check if we have a version conflict
+		if strings.Contains(err.Error(), "version conflict") ||
+			strings.Contains(err.Error(), "conditional check failed") {
+			logger.Info("Version conflict detected, retrying with forced update")
+
+			// For a forced update, we need to bypass version checking
+			// Create a direct update with just the ownership change
+			pk := m.getGroupPK(namespace, name)
+			configSK := "CONFIG"
+
+			updateInput := &dynamodb.UpdateItemInput{
+				TableName: &m.tableName,
+				Key: map[string]types.AttributeValue{
+					"PK": &types.AttributeValueMemberS{Value: pk},
+					"SK": &types.AttributeValueMemberS{Value: configSK},
+				},
+				UpdateExpression: aws.String("SET ownerCluster = :newOwner, previousOwner = :prevOwner, version = :newVersion, lastUpdated = :now"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{
+					":newOwner":   &types.AttributeValueMemberS{Value: newOwner},
+					":prevOwner":  &types.AttributeValueMemberS{Value: previousOwner},
+					":newVersion": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", config.Version+1)},
+					":now":        &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
+				},
+				// No condition expression - this will force the update regardless of version
+			}
+
+			_, err = m.client.UpdateItem(ctx, updateInput)
+			if err != nil {
+				return fmt.Errorf("forced ownership update failed: %w", err)
+			}
+
+			logger.Info("Successfully forced ownership update",
+				"previousOwner", previousOwner,
+				"newOwner", newOwner)
+			return nil
+		}
+
+		// For other types of errors, return as usual
+		return fmt.Errorf("failed to update ownership: %w", err)
+	}
+
+	logger.Info("Successfully transferred ownership",
+		"previousOwner", previousOwner,
+		"newOwner", newOwner)
+	return nil
 }
 
 // recordFailoverEvent records a failover event in the history

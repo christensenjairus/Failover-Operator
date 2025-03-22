@@ -808,6 +808,47 @@ func (m *Manager) updateLocalStatus(ctx context.Context, failoverGroup *crdv1alp
 		}
 	}
 
+	// Update the status.State and status.Health fields for k9s display
+	stateUpdated := false
+
+	// Determine state based on whether this is the active cluster
+	newState := ""
+	if m.ClusterName == failoverGroup.Status.GlobalState.ActiveCluster {
+		newState = "PRIMARY"
+	} else {
+		newState = "STANDBY"
+	}
+
+	// Update state if different
+	if failoverGroup.Status.State != newState {
+		failoverGroup.Status.State = newState
+		stateUpdated = true
+		log.Info("Updated status.State field", "state", newState)
+	}
+
+	// Find the primary cluster to determine health
+	newHealth := "UNKNOWN"
+	for _, cluster := range failoverGroup.Status.GlobalState.Clusters {
+		if cluster.Role == "PRIMARY" {
+			newHealth = cluster.Health
+			break
+		}
+	}
+
+	// Update health if different
+	if failoverGroup.Status.Health != newHealth {
+		failoverGroup.Status.Health = newHealth
+		stateUpdated = true
+		log.Info("Updated status.Health field", "health", newHealth)
+	}
+
+	// Update the resource if state or health changed
+	if stateUpdated {
+		if err := m.Client.Status().Update(ctx, failoverGroup); err != nil {
+			return fmt.Errorf("failed to update FailoverGroup state and health: %w", err)
+		}
+	}
+
 	return nil
 }
 

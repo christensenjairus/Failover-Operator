@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
 	"github.com/christensenjairus/Failover-Operator/internal/controller/dynamodb"
 	"github.com/google/uuid"
 )
@@ -53,6 +54,59 @@ func (t *BaseTask) GetName() string {
 // GetDescription returns a description of what the task does
 func (t *BaseTask) GetDescription() string {
 	return t.TaskDescription
+}
+
+// UpdateFailoverGroupState updates the FailoverGroup.Status.State field
+// and ensures the changes are published to the API server
+func (t *BaseTask) UpdateFailoverGroupState(ctx context.Context, group *crdv1alpha1.FailoverGroup, state string) error {
+	if t.Client == nil {
+		t.Logger.Error(nil, "Cannot update FailoverGroup state - Client not initialized")
+		return fmt.Errorf("client not initialized")
+	}
+
+	// Create a copy of the group to avoid modifying the shared instance
+	groupCopy := group.DeepCopy()
+
+	// Set new state
+	groupCopy.Status.State = state
+
+	// Also update health status based on state
+	if state == "PRIMARY" || state == "STANDBY" {
+		// For normal operational states, determine health based on primary cluster
+		primaryHealth := "UNKNOWN"
+		for _, cluster := range groupCopy.Status.GlobalState.Clusters {
+			if cluster.Role == "PRIMARY" {
+				primaryHealth = cluster.Health
+				break
+			}
+		}
+		groupCopy.Status.Health = primaryHealth
+	} else {
+		// For transitional states (FAILOVER, FAILBACK, or custom phases), show as DEGRADED
+		groupCopy.Status.Health = "DEGRADED"
+	}
+
+	// Update status
+	err := t.Client.Status().Update(ctx, groupCopy)
+	if err != nil {
+		t.Logger.Error(err, "Failed to update FailoverGroup state",
+			"namespace", group.Namespace,
+			"name", group.Name,
+			"state", state)
+		return err
+	}
+
+	// Update the original group reference to match what was sent to the server
+	group.Status.State = state
+	group.Status.Health = groupCopy.Status.Health
+
+	t.Logger.Info("Successfully updated FailoverGroup state",
+		"namespace", group.Namespace,
+		"name", group.Name,
+		"state", state,
+		"health", groupCopy.Status.Health)
+
+	return nil
 }
 
 //
@@ -469,4 +523,119 @@ func (t *WaitForVolumesDemotedTask) Execute(ctx context.Context) error {
 
 	t.Logger.Info("All volumes successfully demoted to Secondary role")
 	return nil
+}
+
+// UpdateWorkflowStateTask updates the FailoverGroup.Status.State field
+// to reflect the current failover workflow stage
+type UpdateWorkflowStateTask struct {
+	BaseTask
+	Client client.Client
+}
+
+// NewUpdateWorkflowStateTask creates a new task to update the workflow state
+func NewUpdateWorkflowStateTask(ctx *WorkflowContext) *UpdateWorkflowStateTask {
+	return &UpdateWorkflowStateTask{
+		BaseTask: BaseTask{
+			TaskName:        "UpdateWorkflowState",
+			TaskDescription: "Update the FailoverGroup state to reflect the current failover operation",
+			Context:         ctx,
+		},
+	}
+}
+
+// Execute updates the State in FailoverGroup status
+func (t *UpdateWorkflowStateTask) Execute(ctx context.Context) error {
+	failoverGroup := t.Context.FailoverGroup
+
+	// Determine the appropriate state based on the cluster's role in the failover
+	var state string
+	if t.Context.IsTargetCluster {
+		state = "FAILOVER"
+		t.Logger.Info("Setting target cluster state to FAILOVER",
+			"namespace", failoverGroup.Namespace,
+			"name", failoverGroup.Name)
+	} else if t.Context.IsSourceCluster {
+		state = "FAILBACK"
+		t.Logger.Info("Setting source cluster state to FAILBACK",
+			"namespace", failoverGroup.Namespace,
+			"name", failoverGroup.Name)
+	} else {
+		// This shouldn't happen, but if we're not on source or target, don't update state
+		t.Logger.Info("Not updating state because this cluster is neither source nor target",
+			"thisCluster", t.Context.ClusterName,
+			"sourceCluster", t.Context.SourceClusterName,
+			"targetCluster", t.Context.TargetClusterName)
+		return nil
+	}
+
+	// Update state using helper
+	return t.UpdateFailoverGroupState(ctx, failoverGroup, state)
+}
+
+// ResetWorkflowStateTask resets the FailoverGroup.Status.State field
+// back to the normal operational state after failover completes
+type ResetWorkflowStateTask struct {
+	BaseTask
+	Client client.Client
+}
+
+// NewResetWorkflowStateTask creates a new task to reset the workflow state
+func NewResetWorkflowStateTask(ctx *WorkflowContext) *ResetWorkflowStateTask {
+	return &ResetWorkflowStateTask{
+		BaseTask: BaseTask{
+			TaskName:        "ResetWorkflowState",
+			TaskDescription: "Reset the FailoverGroup state after failover completion",
+			Context:         ctx,
+		},
+	}
+}
+
+// Execute resets the State in FailoverGroup status
+func (t *ResetWorkflowStateTask) Execute(ctx context.Context) error {
+	failoverGroup := t.Context.FailoverGroup
+
+	// Determine the appropriate state based on the cluster's role
+	var state string
+	if t.Context.ClusterName == t.Context.TargetClusterName {
+		state = "PRIMARY"
+	} else {
+		state = "STANDBY"
+	}
+
+	// Update state using helper
+	return t.UpdateFailoverGroupState(ctx, failoverGroup, state)
+}
+
+// SetWorkflowPhaseTask updates the FailoverGroup.Status.State field to show
+// specific phases during the failover process
+type SetWorkflowPhaseTask struct {
+	BaseTask
+	Client client.Client
+	Phase  string
+}
+
+// NewSetWorkflowPhaseTask creates a new task to set a specific workflow phase
+func NewSetWorkflowPhaseTask(ctx *WorkflowContext, phase string) *SetWorkflowPhaseTask {
+	return &SetWorkflowPhaseTask{
+		BaseTask: BaseTask{
+			TaskName:        "SetWorkflowPhase_" + phase,
+			TaskDescription: "Update the FailoverGroup state to show the " + phase + " phase",
+			Context:         ctx,
+		},
+		Phase: phase,
+	}
+}
+
+// Execute updates the State in FailoverGroup status to show the current phase
+func (t *SetWorkflowPhaseTask) Execute(ctx context.Context) error {
+	failoverGroup := t.Context.FailoverGroup
+
+	// Log the phase we're setting
+	t.Logger.Info("Setting workflow phase",
+		"namespace", failoverGroup.Namespace,
+		"name", failoverGroup.Name,
+		"phase", t.Phase)
+
+	// Update state using helper
+	return t.UpdateFailoverGroupState(ctx, failoverGroup, t.Phase)
 }

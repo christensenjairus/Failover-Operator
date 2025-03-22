@@ -99,6 +99,7 @@ spec:
                 - UPTIME
                 type: string
               force:
+                default: false
                 description: |-
                   When true, skips safety checks like replication lag or volume sync state
                   Use with caution - can lead to data loss if replication isn't complete
@@ -249,7 +250,9 @@ spec:
         - message: failoverMode is immutable
           rule: '!has(oldSelf.spec) || oldSelf.spec.failoverMode == self.spec.failoverMode'
         - message: force is immutable
-          rule: '!has(oldSelf.spec) || oldSelf.spec.force == self.spec.force'
+          rule: '!has(oldSelf.spec) || !has(oldSelf.spec.force) && !has(self.spec.force)
+            || has(oldSelf.spec.force) && has(self.spec.force) && oldSelf.spec.force
+            == self.spec.force'
         - message: reason is immutable
           rule: '!has(oldSelf.spec) || oldSelf.spec.reason == self.spec.reason'
         - message: failoverGroups are immutable

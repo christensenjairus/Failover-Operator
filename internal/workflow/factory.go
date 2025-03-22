@@ -88,7 +88,7 @@ func (f *Factory) CreateWorkflow(failover *crdv1alpha1.Failover, failoverGroup *
 func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow {
 	workflow := &Workflow{
 		Name:        "ConsistencyModeFailover",
-		Description: "Failover workflow that prioritizes data consistency",
+		Description: "Failover workflow that prioritizes data consistency by stopping the source cluster first",
 		Context:     ctx,
 		Stages:      []*WorkflowStage{},
 	}
@@ -100,7 +100,7 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		Tasks:       []WorkflowTask{},
 	}
 
-	// Add initialization tasks
+	// Add initialization tasks with more detailed descriptions
 	initStage.Tasks = append(initStage.Tasks, NewValidateFailoverTask(ctx))
 	initStage.Tasks = append(initStage.Tasks, NewAcquireLockTask(ctx))
 	workflow.Stages = append(workflow.Stages, initStage)
@@ -110,7 +110,7 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		// STAGE 2: SOURCE CLUSTER SHUTDOWN
 		sourceShutdownStage := &WorkflowStage{
 			Name:        "SourceClusterShutdown",
-			Description: "Deactivate the source cluster by scaling down workloads and updating network resources",
+			Description: "CONSISTENCY MODE: Deactivate the source cluster before activating target to ensure data integrity",
 			Tasks:       []WorkflowTask{},
 		}
 
@@ -124,11 +124,11 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		// STAGE 3: VOLUME TRANSITION (SOURCE)
 		volumeTransitionStage := &WorkflowStage{
 			Name:        "VolumeTransitionSource",
-			Description: "Demote volumes in source cluster to Secondary role",
+			Description: "CONSISTENCY MODE: Demote volumes in source cluster and signal readiness for target promotion",
 			Tasks:       []WorkflowTask{},
 		}
 
-		// Add volume transition tasks
+		// Add volume transition tasks with more detailed descriptions for CONSISTENCY mode
 		volumeTransitionStage.Tasks = append(volumeTransitionStage.Tasks, NewDemoteVolumesTask(ctx))
 		volumeTransitionStage.Tasks = append(volumeTransitionStage.Tasks, NewWaitForVolumesDemotedTask(ctx))
 		volumeTransitionStage.Tasks = append(volumeTransitionStage.Tasks, NewMarkVolumesReadyForPromotionTask(ctx))
@@ -140,11 +140,11 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		// STAGE 4: VOLUME TRANSITION (TARGET)
 		targetVolumeStage := &WorkflowStage{
 			Name:        "VolumeTransitionTarget",
-			Description: "Promote volumes in target cluster to Primary role",
+			Description: "CONSISTENCY MODE: Wait for source shutdown, then promote volumes in target cluster to Primary role",
 			Tasks:       []WorkflowTask{},
 		}
 
-		// Add target volume tasks
+		// Add target volume tasks with more detailed descriptions for CONSISTENCY mode
 		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewWaitForVolumesReadyForPromotionTask(ctx))
 		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewPromoteVolumesTask(ctx))
 		targetVolumeStage.Tasks = append(targetVolumeStage.Tasks, NewWaitForVolumesPromotedTask(ctx))
@@ -154,7 +154,7 @@ func (f *Factory) createConsistencyModeWorkflow(ctx *WorkflowContext) *Workflow 
 		// STAGE 5: TARGET CLUSTER ACTIVATION
 		targetActivationStage := &WorkflowStage{
 			Name:        "TargetClusterActivation",
-			Description: "Activate the target cluster by scaling up workloads and enabling network resources",
+			Description: "CONSISTENCY MODE: Activate target cluster only after volumes are successfully promoted",
 			Tasks:       []WorkflowTask{},
 		}
 

@@ -60,6 +60,8 @@ type WorkflowContext struct {
 	// TargetClusterName is the name of the target cluster
 	TargetClusterName string
 	// FailoverMode indicates which failover mode is being used
+	// CONSISTENCY: Prioritizes data consistency by shutting down source first before activating target
+	// UPTIME: Prioritizes service uptime by activating target before deactivating source
 	FailoverMode string
 	// ForceFailover indicates if safety checks should be skipped
 	ForceFailover bool

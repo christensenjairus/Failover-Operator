@@ -76,6 +76,7 @@ type FailoverSpec struct {
 	// When true, skips safety checks like replication lag or volume sync state
 	// Use with caution - can lead to data loss if replication isn't complete
 	// +optional
+	// +kubebuilder:default=false
 	Force bool `json:"force,omitempty"`
 
 	// Optional documentation field explaining the reason for this failover
@@ -131,7 +132,7 @@ type FailoverStatus struct {
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 //+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.targetCluster == self.spec.targetCluster",message="targetCluster is immutable"
 //+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.failoverMode == self.spec.failoverMode",message="failoverMode is immutable"
-//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.force == self.spec.force",message="force is immutable"
+//+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || !has(oldSelf.spec.force) && !has(self.spec.force) || has(oldSelf.spec.force) && has(self.spec.force) && oldSelf.spec.force == self.spec.force",message="force is immutable"
 //+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.reason == self.spec.reason",message="reason is immutable"
 //+kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || oldSelf.spec.failoverGroups == self.spec.failoverGroups",message="failoverGroups are immutable"
 

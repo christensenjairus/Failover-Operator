@@ -77,7 +77,7 @@ spec:
                 type: array
               heartbeatInterval:
                 description: |-
-                  How often the operator updates heartbeats in DynamoDB
+                  How often the operator updates heartbeats in S3
                   This controls the frequency of cluster health updates in the global state
                 type: string
               networkResources:
@@ -259,7 +259,7 @@ spec:
                 type: array
               globalState:
                 description: GlobalState contains global state information synced
-                  from DynamoDB
+                  from the operator
                 properties:
                   activeCluster:
                     description: Which cluster is currently PRIMARY for this group
@@ -297,7 +297,7 @@ spec:
                       type: object
                     type: array
                   dbSyncStatus:
-                    description: Status of DynamoDB synchronization
+                    description: Status of Operator synchronization
                     enum:
                     - Synced
                     - Syncing
@@ -310,7 +310,7 @@ spec:
                     type: object
                   lastSyncTime:
                     description: LastSyncTime is when the last successful sync with
-                      DynamoDB occurred
+                      operator occurred
                     type: string
                   thisCluster:
                     description: This cluster's name (for convenience)

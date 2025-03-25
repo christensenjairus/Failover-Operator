@@ -59,7 +59,7 @@ type ClusterInfo struct {
 	LastHeartbeat string `json:"lastHeartbeat,omitempty"`
 }
 
-// GlobalStateInfo contains global state information synced from DynamoDB
+// GlobalStateInfo contains global state information synced
 type GlobalStateInfo struct {
 	// Which cluster is currently PRIMARY for this group
 	// +optional
@@ -73,12 +73,12 @@ type GlobalStateInfo struct {
 	// +optional
 	LastFailover map[string]string `json:"lastFailover,omitempty"`
 
-	// Status of DynamoDB synchronization
+	// Status of Operator synchronization
 	// +kubebuilder:validation:Enum=Synced;Syncing;Error
 	// +optional
 	DBSyncStatus string `json:"dbSyncStatus,omitempty"`
 
-	// LastSyncTime is when the last successful sync with DynamoDB occurred
+	// LastSyncTime is when the last successful sync with operator occurred
 	// +optional
 	LastSyncTime string `json:"lastSyncTime,omitempty"`
 
@@ -159,7 +159,7 @@ type FailoverGroupSpec struct {
 	// +optional
 	Timeouts TimeoutSettings `json:"timeouts,omitempty"`
 
-	// How often the operator updates heartbeats in DynamoDB
+	// How often the operator updates heartbeats in S3
 	// This controls the frequency of cluster health updates in the global state
 	// +optional
 	HeartbeatInterval string `json:"heartbeatInterval,omitempty"`
@@ -276,7 +276,7 @@ type FailoverGroupStatus struct {
 	// +optional
 	LastFailoverTime string `json:"lastFailoverTime,omitempty"`
 
-	// GlobalState contains global state information synced from DynamoDB
+	// GlobalState contains global state information synced from Operator
 	// +optional
 	GlobalState GlobalStateInfo `json:"globalState,omitempty"`
 

@@ -3,15 +3,7 @@ kind: ConfigMap
 metadata:
   name: failover-operator-config
   namespace: system
-data:
-  # AWS Configuration
-  AWS_REGION: "us-west-2"
-  # AWS_ENDPOINT: "http://localhost:8000"  # Uncomment for local DynamoDB
-  # AWS_USE_LOCAL_ENDPOINT: "true"         # Uncomment for local DynamoDB
-  
-  # DynamoDB Configuration
-  DYNAMODB_TABLE_NAME: "failover-operator"
-  
+data:  
   # Operator Configuration
   CLUSTER_NAME: "primary-cluster"          # Override the cluster name
   OPERATOR_ID: "failover-operator"

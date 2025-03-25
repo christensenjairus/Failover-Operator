@@ -6,7 +6,6 @@ The Failover Operator is a Kubernetes operator that manages the failover process
 - StatefulSets
 - CronJobs
 - Ingresses
-- DynamoDB (for coordination)
 
 ## Project Structure
 
@@ -25,9 +24,6 @@ internal/
       manager.go         # Implementation
       manager_test.go    # Tests
     ingresses/           # Manages Ingresses
-      manager.go         # Implementation
-      manager_test.go    # Tests
-    dynamodb/            # Manages DynamoDB coordination
       manager.go         # Implementation
       manager_test.go    # Tests
 ```
@@ -60,33 +56,19 @@ The Ingresses manager handles updating Ingress resources. During failover:
 - The PRIMARY cluster enables DNS controller annotations
 - The STANDBY cluster disables DNS controller annotations
 
-### DynamoDB Manager
-
-The DynamoDB manager handles coordination between clusters. It:
-- Tracks which cluster is PRIMARY for each FailoverGroup
-- Provides distributed locking to prevent concurrent failovers
-- Records failover history for auditing
-- Tracks operator heartbeats to detect when a cluster is unhealthy
-
 ## Implementation Guide
 
 This codebase currently contains stubs for all the required functionality. To implement the actual functionality:
 
-1. Start with the DynamoDB manager to implement coordination features:
-   - Implement the AWS SDK client integration
-   - Implement the record operations (GetOwnership, UpdateOwnership, etc.)
-   - Implement the locking operations (AcquireLock, ReleaseLock)
-   - Implement the heartbeat operations (UpdateHeartbeat, GetHeartbeats)
-
-2. Implement the individual component managers:
+1. Implement the individual component managers:
    - VolumeReplications: Implement the CR interactions using the unstructured client
    - StatefulSets: Implement the scaling operations
    - CronJobs: Implement the suspend/resume operations
    - Ingresses: Implement the annotation and DNS operations
 
-3. Update the tests to use actual mock expectations instead of placeholder assertions
+2. Update the tests to use actual mock expectations instead of placeholder assertions
 
-4. Implement the controller that uses these managers to coordinate failover
+3. Implement the controller that uses these managers to coordinate failover
 
 ## Running the Tests
 
@@ -119,13 +101,6 @@ The failover process will work as follows:
    - Disables DNS controller annotations on its Ingresses
 6. The lock is released
 7. The failover event is recorded in history
-
-## Next Steps
-
-1. Implement the AWS SDK client integration for DynamoDB
-2. Complete the implementation of each manager
-3. Develop the controller that uses these managers
-4. Test the failover process end-to-end
 
 ## Overview
 

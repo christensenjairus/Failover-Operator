@@ -259,7 +259,7 @@ spec:
                 type: array
               globalState:
                 description: GlobalState contains global state information synced
-                  from the operator
+                  from Operator
                 properties:
                   activeCluster:
                     description: Which cluster is currently PRIMARY for this group

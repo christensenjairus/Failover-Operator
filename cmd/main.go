@@ -41,7 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	crdv1alpha1 "github.com/christensenjairus/Failover-Operator/api/v1alpha1"
-	"github.com/christensenjairus/Failover-Operator/internal/controller"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/failovergroups"
+	"github.com/christensenjairus/Failover-Operator/internal/controller/failovers"
 	kubeconfig "sigs.k8s.io/multicluster-runtime/providers/kubeconfig"
 
 	// +kubebuilder:scaffold:imports
@@ -258,21 +259,21 @@ func main() {
 	time.Sleep(5 * time.Second)
 
 	// Now we set up the controller in the standard way first
-	if err := (&controller.FailoverGroupReconciler{
+	if err := (&failovergroups.Manager{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
 		MCReconciler: mcReconciler,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create failovergroup controller", "controller", "FailoverGroup")
+		setupLog.Error(err, "unable to create controller", "controller", "FailoverGroup")
 		os.Exit(1)
 	}
 
-	if err := (&controller.FailoverReconciler{
+	if err := (&failovers.Manager{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
 		MCReconciler: mcReconciler,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create failover controller", "controller", "Failover")
+		setupLog.Error(err, "unable to create controller", "controller", "Failover")
 		os.Exit(1)
 	}
 

@@ -128,6 +128,11 @@ type FailoverStatus struct {
 	// Conditions represent the current state of the failover operation
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LastModificationTimestamp records when this Failover resource was last modified
+	// This is used to determine the most up-to-date version across clusters
+	// +optional
+	LastModificationTimestamp metav1.Time `json:"lastModificationTimestamp,omitempty"`
 }
 
 //+kubebuilder:object:root=true

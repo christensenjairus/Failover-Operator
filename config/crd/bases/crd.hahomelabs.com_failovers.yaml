@@ -220,6 +220,12 @@ spec:
                   - name
                   type: object
                 type: array
+              lastModificationTimestamp:
+                description: |-
+                  LastModificationTimestamp records when this Failover resource was last modified
+                  This is used to determine the most up-to-date version across clusters
+                format: date-time
+                type: string
               message:
                 description: Message provides additional details about the overall
                   failover operation
